@@ -1,0 +1,281 @@
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import type { Session } from "@shared/planner";
+import { deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, zoomAround, zoomToFit } from "./planner/actions";
+import { engine } from "./planner/engine";
+import { initMedia, reconcileMedia } from "./planner/media";
+import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
+import { store, useStore } from "./planner/store";
+import { Timeline } from "./planner/Timeline";
+
+function isTyping(): boolean {
+	const el = document.activeElement;
+	return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+}
+
+function modalOpen(): boolean {
+	const s = store.get();
+	return s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDiscard !== null || s.exportUi !== null;
+}
+
+function menuAction(action: string): void {
+	const typing = isTyping();
+	// Text fields keep their own undo and select-all.
+	if (typing && (action === "undo" || action === "redo")) {
+		document.execCommand(action);
+		return;
+	}
+	if (typing && action === "select-all") {
+		(document.activeElement as HTMLInputElement).select();
+		return;
+	}
+	if (modalOpen()) return;
+	if (action === lastKeyAction && performance.now() - lastKeyAt < 250) return;
+	runAction(action);
+}
+
+function runAction(action: string): void {
+	switch (action) {
+		case "new":
+			requestNew();
+			break;
+		case "open":
+			requestOpen();
+			break;
+		case "save":
+			void saveSet();
+			break;
+		case "save-as":
+			void saveSet(true);
+			break;
+		case "import":
+			void importViaDialog();
+			break;
+		case "export":
+			openExport();
+			break;
+		case "undo":
+			store.undo();
+			break;
+		case "redo":
+			store.redo();
+			break;
+		case "select-all":
+			selectAll();
+			break;
+		case "split":
+			splitAtPlayhead();
+			break;
+		case "duplicate":
+			duplicateSelection();
+			break;
+		case "delete":
+			deleteSelection();
+			break;
+		case "zoom-in":
+			zoomAround(1.5);
+			break;
+		case "zoom-out":
+			zoomAround(1 / 1.5);
+			break;
+		case "zoom-fit":
+			zoomToFit();
+			break;
+	}
+}
+
+// Shortcuts are handled here so they behave the same whether or not the menu sees the
+// key. A shortcut handled here is consumed, and the guard below drops the menu's echo of
+// it if one arrives anyway.
+let lastKeyAction = "";
+let lastKeyAt = 0;
+
+function shortcut(e: KeyboardEvent): string | null {
+	const mod = e.metaKey || e.ctrlKey;
+	const k = e.key.toLowerCase();
+	if (mod && !e.altKey) {
+		if (k === "z") return e.shiftKey ? "redo" : "undo";
+		if (k === "a") return "select-all";
+		if (k === "d") return "duplicate";
+		if (k === "s") return e.shiftKey ? "save-as" : "save";
+		if (k === "o") return "open";
+		if (k === "n") return "new";
+		if (k === "i") return "import";
+		if (k === "e") return "export";
+		if (k === "=" || k === "+") return "zoom-in";
+		if (k === "-") return "zoom-out";
+		if (k === "0") return "zoom-fit";
+		return null;
+	}
+	if (mod || e.altKey) return null;
+	if (e.code === "Space") return "toggle";
+	if (k === "backspace" || k === "delete") return "delete";
+	if (k === "s") return "split";
+	if (k === "c") return "cue";
+	if (k === "home") return "home";
+	if (k === "escape") return "escape";
+	return null;
+}
+
+function onKey(e: KeyboardEvent): void {
+	if (modalOpen()) return;
+	// Space is always the transport key outside dialogs. The only fields outside dialogs are
+	// BPM boxes, where a space means nothing, so let go of whatever holds focus (a BPM box
+	// commits on blur) and play.
+	if (e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+		const el = document.activeElement;
+		if (el instanceof HTMLElement && el !== document.body) el.blur();
+		if (modalOpen()) {
+			e.preventDefault();
+			return;
+		}
+	}
+	if (isTyping()) return;
+	const action = shortcut(e);
+	if (!action) return;
+	e.preventDefault();
+	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out") return;
+	if (action === "toggle") engine.toggle();
+	else if (action === "cue") engine.cue();
+	else if (action === "home") {
+		engine.seek(0);
+		store.set({ scrollX: 0 });
+	} else if (action === "escape") {
+		// Escape during a drag only cancels the drag (handled by the timeline).
+		const dragging = document.body.classList.contains("dragging-move") || document.body.classList.contains("dragging-trim");
+		if (!dragging) store.set({ menu: null, selection: [] });
+	}
+	else {
+		lastKeyAction = action;
+		lastKeyAt = performance.now();
+		runAction(action);
+	}
+}
+
+let started = false;
+
+// Wires the store to the rest of the app once: media, playback, autosave, menus.
+function start(): void {
+	if (started) return;
+	started = true;
+	initMedia();
+	let lastDoc = store.get().doc;
+	let lastRev = store.get().rev;
+	let lastMediaRev = store.get().mediaRev;
+	let saveTimer: ReturnType<typeof setTimeout> | undefined;
+	let lastSaved = "";
+	store.subscribe(() => {
+		const s = store.get();
+		if (!s.loaded) return;
+		if (s.doc !== lastDoc) {
+			lastDoc = s.doc;
+			reconcileMedia(s.doc);
+		}
+		if (s.rev !== lastRev || s.mediaRev !== lastMediaRev) {
+			// A committed edit, or newly ready audio: rebuild playback from the playhead.
+			const mediaOnly = s.rev === lastRev;
+			lastRev = s.rev;
+			lastMediaRev = s.mediaRev;
+			if (!mediaOnly || s.playing) engine.refresh();
+			else engine.warm();
+		}
+		clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			const cur = store.get();
+			const session: Session = { doc: cur.doc, filePath: cur.filePath, dirty: cur.dirty, pxPerBeat: cur.pxPerBeat, scrollX: cur.scrollX, playheadBeat: cur.playing ? engine.positionBeat() : cur.playheadBeat };
+			const text = JSON.stringify(session);
+			if (text === lastSaved) return;
+			lastSaved = text;
+			void window.api.saveSession(session);
+		}, 400);
+	});
+	window.api.onMenu(menuAction);
+	window.api.onExportProgress((p) => {
+		if (store.get().exportUi?.phase === "running") store.set({ exportUi: { phase: "running", stage: p.stage, pct: p.pct } });
+	});
+	// Capture phase, so no element that stops key events can swallow the shortcuts.
+	window.addEventListener("keydown", onKey, true);
+	// Space is the transport key; a button that kept focus after a click must not also fire.
+	window.addEventListener("keyup", (e) => {
+		if (e.code === "Space" && document.activeElement instanceof HTMLButtonElement && !modalOpen()) e.preventDefault();
+	});
+	window.addEventListener("click", () => {
+		if (document.activeElement instanceof HTMLButtonElement && !modalOpen()) document.activeElement.blur();
+	});
+	// Dropping a file anywhere outside the lanes must not navigate the window to it.
+	window.addEventListener("dragover", (e) => e.preventDefault());
+	window.addEventListener("drop", (e) => e.preventDefault());
+	void window.api.loadSession().then((session) => {
+		if (session) {
+			store.load(session.doc, session.filePath, session.dirty);
+			store.set({ pxPerBeat: session.pxPerBeat, scrollX: session.scrollX, playheadBeat: session.playheadBeat });
+		}
+		store.set({ loaded: true });
+		reconcileMedia(store.get().doc);
+		engine.warm();
+	});
+	// Handles for the end-to-end tests.
+	(window as unknown as { planner: unknown }).planner = { store, engine, importPaths, saveSet, openSet, newSet, runExport };
+}
+
+// The divider between the timeline and the bottom area; its position is a share of the height and survives restarts.
+const SPLIT_KEY = "planner.splitFrac";
+const SPLIT_DEFAULT = 0.74;
+const SPLIT_MIN_TOP = 200;
+
+function savedSplit(): number {
+	const v = Number(localStorage.getItem(SPLIT_KEY));
+	return v > 0 && v <= 1 ? v : SPLIT_DEFAULT;
+}
+
+function Split({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
+	const ref = useRef<HTMLDivElement>(null);
+	const [frac, setFrac] = useState(savedSplit);
+
+	const onDown = (e: ReactPointerEvent): void => {
+		if (e.button !== 0) return;
+		e.preventDefault();
+		const handle = e.currentTarget as HTMLElement;
+		handle.setPointerCapture(e.pointerId);
+		const rect = ref.current!.getBoundingClientRect();
+		const grab = e.clientY - (rect.top + frac * rect.height);
+		let next = frac;
+		const move = (ev: PointerEvent): void => {
+			const y = ev.clientY - grab - rect.top;
+			next = Math.min(1, Math.max(Math.min(1, SPLIT_MIN_TOP / rect.height), y / rect.height));
+			setFrac(next);
+		};
+		const up = (): void => {
+			handle.removeEventListener("pointermove", move);
+			handle.removeEventListener("pointerup", up);
+			handle.removeEventListener("pointercancel", up);
+			localStorage.setItem(SPLIT_KEY, String(next));
+		};
+		handle.addEventListener("pointermove", move);
+		handle.addEventListener("pointerup", up);
+		handle.addEventListener("pointercancel", up);
+	};
+
+	return (
+		<div className="split" ref={ref}>
+			<div className="split-top" style={{ flexBasis: `${frac * 100}%` }}>
+				{top}
+			</div>
+			<div className="split-handle" data-testid="split-handle" onPointerDown={onDown} />
+			{bottom}
+		</div>
+	);
+}
+
+export default function App() {
+	const libraryOpen = useStore((s) => s.libraryOpen);
+	useEffect(start, []);
+	return (
+		<div className="app">
+			<TopBar />
+			<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<div className="bottom-area" />} />
+			<Modals />
+			<ClipMenu />
+			<Toast />
+		</div>
+	);
+}

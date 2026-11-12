@@ -1,0 +1,7 @@
+{
+  "name": "dj-utilities",
+  "private": true,
+  "scripts": {
+    "start": "npm --prefix app run dev"
+  }
+}

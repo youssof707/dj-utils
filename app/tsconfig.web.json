@@ -1,0 +1,10 @@
+{
+	"extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+	"include": ["src/renderer/src/**/*", "src/preload/*.d.ts", "src/shared/types.ts", "src/shared/planner.ts", "src/shared/tempo.ts"],
+	"compilerOptions": {
+		"composite": true,
+		"outDir": "out/types/web",
+		"jsx": "react-jsx",
+		"paths": { "@shared/*": ["./src/shared/*"] }
+	}
+}
