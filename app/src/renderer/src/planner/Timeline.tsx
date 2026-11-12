@@ -104,6 +104,37 @@ function Ruler({ width }: { width: number }) {
 	);
 }
 
+// ---- lane grid ----------------------------------------------------------------------
+
+// Grid lines drawn at exact beat positions (same maths as the ruler and clips), so they never
+// drift from the beat. The canvas is one device pixel tall and stretched to the lane height.
+function LaneGrid({ width, pxPerBeat, scrollX }: { width: number; pxPerBeat: number; scrollX: number }) {
+	const ref = useRef<HTMLCanvasElement>(null);
+
+	useLayoutEffect(() => {
+		const cv = ref.current;
+		if (!cv) return;
+		const dpr = window.devicePixelRatio || 1;
+		const w = Math.max(1, Math.round(width * dpr));
+		cv.width = w;
+		cv.height = 1;
+		const g = cv.getContext("2d")!;
+		g.clearRect(0, 0, w, 1);
+		const major = gridStep(pxPerBeat, 28) * 4;
+		const step = gridStep(pxPerBeat, BEAT_GRID_MIN_PX);
+		const first = Math.floor(scrollX / pxPerBeat / step) * step;
+		const lineW = Math.max(1, Math.round(dpr));
+		for (let b = first; b * pxPerBeat - scrollX < width; b += step) {
+			const x = Math.round((b * pxPerBeat - scrollX) * dpr);
+			if (x < 0) continue;
+			g.fillStyle = b % major === 0 ? "#252933" : "#17191f";
+			g.fillRect(x, 0, lineW, 1);
+		}
+	}, [width, pxPerBeat, scrollX]);
+
+	return <canvas ref={ref} className="lane-grid" style={{ width }} />;
+}
+
 // ---- tempo lane ---------------------------------------------------------------------
 
 const TEMPO_H = 64;
@@ -277,7 +308,7 @@ function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected
 		}
 		// Full signal as a dim layer behind; the kick band bright in front, so each kick is a
 		// sharp spike whose left edge is the hit.
-		g.fillStyle = `hsl(${hue} 45% 60% / 0.35)`;
+		g.fillStyle = `hsl(${hue} 45% 60% / 0.14)`;
 		for (let x = 0; x < cols; x++) {
 			const hh = Math.max(0.5, Math.min(1, pk[x]) * mid);
 			g.fillRect(x, mid - hh, 1, hh * 2);
@@ -592,12 +623,6 @@ function Lanes({ width }: { width: number }) {
 		if (paths.length) void importPaths(paths, laneAt(e.clientY), Math.max(0, snap(beatAt(e.clientX), e)));
 	};
 
-	const bar = gridStep(pxPerBeat, 28);
-	const beatStep = gridStep(pxPerBeat, BEAT_GRID_MIN_PX);
-	const grid: CSSProperties = {
-		backgroundSize: `${bar * 4 * pxPerBeat}px 100%, ${beatStep * pxPerBeat}px 100%`,
-		backgroundPosition: `${-scrollX}px 0, ${-scrollX}px 0`,
-	};
 	const selTempo = selection.length === 1 ? doc.tempos.find((t) => t.id === selection[0]) : undefined;
 
 	return (
@@ -618,7 +643,6 @@ function Lanes({ width }: { width: number }) {
 			<div
 				className="lane tempo-lane"
 				data-testid="tempo-lane"
-				style={grid}
 				onDoubleClick={(e) => {
 					// A new tempo change starts out at the tempo already playing there.
 					const beat = Math.max(0, snap(beatAt(e.clientX), e));
@@ -627,6 +651,7 @@ function Lanes({ width }: { width: number }) {
 					focusTempoEditor();
 				}}
 			>
+				<LaneGrid width={width} pxPerBeat={pxPerBeat} scrollX={scrollX} />
 				{doc.tempos.map((t) => (
 					<TempoView key={t.id} block={t} from={starts.get(t.id) ?? doc.bpm} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} selected={selection.includes(t.id)} onDown={onItemDown} />
 				))}
@@ -636,7 +661,8 @@ function Lanes({ width }: { width: number }) {
 			</div>
 			<div className="clip-lanes" ref={clipLanesRef}>
 				{Array.from({ length: LANES }, (_, lane) => (
-					<div className="lane" key={lane} data-testid={`lane-${lane}`} style={grid}>
+					<div className="lane" key={lane} data-testid={`lane-${lane}`}>
+							<LaneGrid width={width} pxPerBeat={pxPerBeat} scrollX={scrollX} />
 						{doc.clips
 							.filter((c) => c.lane === lane)
 							.map((c) => {
@@ -757,10 +783,9 @@ export function Timeline() {
 								className={`mute-btn${laneMuted[i] ? " muted" : ""}${soloLane === i ? " solo" : ""}`}
 								data-testid={`mute-${i}`}
 								title={soloLane === i ? "Soloed: ⌘-click to unsolo" : laneMuted[i] ? "Unmute (⌘-click to solo)" : "Mute (⌘-click to solo)"}
+								aria-label={laneMuted[i] ? `Unmute lane ${i + 1}` : `Mute lane ${i + 1}`}
 								onClick={(e) => (e.metaKey ? toggleSolo(i) : toggleMute(i))}
-							>
-								{soloLane === i ? "S" : "M"}
-							</button>
+							/>
 						</div>
 					))}
 				</div>

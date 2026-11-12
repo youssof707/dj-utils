@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Track } from "@shared/types";
 import { TempoMap, isFlat } from "@shared/tempo";
-import { cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
+import { cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, workingCount } from "./media";
 import { store, useStore } from "./store";
@@ -98,6 +98,7 @@ export function TopBar() {
 	const dirty = useStore((s) => s.dirty);
 	const doc = useStore((s) => s.doc);
 	const libraryOpen = useStore((s) => s.libraryOpen);
+	const metronome = useStore((s) => s.metronome);
 	useStore((s) => s.mediaRev);
 	const working = workingCount(doc);
 	const name = filePath ? filePath.split("/").pop()!.replace(/\.djset$/, "") : "Untitled set";
@@ -133,6 +134,13 @@ export function TopBar() {
 							<path d="M4 2.5v11l9-5.5z" fill="currentColor" />
 						</svg>
 					)}
+				</button>
+				<button className={`ghost icon metro${metronome ? " active" : ""}`} data-testid="metronome" onClick={() => toggleMetronome()} title={`Metronome ${metronome ? "on" : "off"}: a click on every beat, higher on each bar`}>
+					<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round">
+						<path d="M6 1.75h4l3.25 12.5H2.75z" />
+						<path d="M4.5 10.5h7" />
+						<path d="M8 10.5l4-6.5" />
+					</svg>
 				</button>
 				<Position />
 			</div>

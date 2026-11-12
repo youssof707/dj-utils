@@ -15,6 +15,19 @@ const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "ca
 let cacheDir = "";
 let decodedDir = "";
 let sessionFile = "";
+let setsDir = "";
+
+// A new auto-saved set gets a dated name in the sets folder, never overwriting another file.
+function newSetPath(): string {
+	fs.mkdirSync(setsDir, { recursive: true });
+	const d = new Date();
+	const p2 = (n: number): string => String(n).padStart(2, "0");
+	const stem = `Set ${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}.${p2(d.getMinutes())}`;
+	for (let i = 1; ; i++) {
+		const file = path.join(setsDir, `${stem}${i === 1 ? "" : ` ${i}`}.djset`);
+		if (!fs.existsSync(file)) return file;
+	}
+}
 
 function send(channel: string, payload: unknown): void {
 	for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send(channel, payload);
@@ -267,6 +280,7 @@ export function setupPlanner(): void {
 	cacheDir = path.join(base, "planner-cache");
 	decodedDir = path.join(cacheDir, "decoded");
 	sessionFile = path.join(base, "planner-session.json");
+	setsDir = process.env["DJ_PLANNER_DATA"] ? path.join(base, "sets") : path.join(app.getPath("documents"), "DJ Sets");
 	fs.mkdirSync(decodedDir, { recursive: true });
 	// Decoded intermediates are only needed while stretching; clear leftovers from earlier runs.
 	for (const f of fs.readdirSync(decodedDir)) fs.rmSync(path.join(decodedDir, f), { force: true });
@@ -346,6 +360,12 @@ export function setupPlanner(): void {
 			if (r.canceled || !r.filePath) return null;
 			target = r.filePath;
 		}
+		writeAtomic(target, JSON.stringify(doc, null, "\t") + "\n");
+		return target;
+	});
+	// Auto-save: never shows a dialog. A set without a file gets one in the sets folder.
+	ipcMain.handle("planner:autosave-project", async (_e, file: string | null, doc: PlannerDoc) => {
+		const target = file ?? newSetPath();
 		writeAtomic(target, JSON.stringify(doc, null, "\t") + "\n");
 		return target;
 	});

@@ -23,6 +23,7 @@ const api = {
 	openProject: (path?: string): Promise<{ path: string; doc: PlannerDoc } | null> => ipcRenderer.invoke("planner:open-project", path),
 	saveProject: (path: string | null, doc: PlannerDoc): Promise<string | null> => ipcRenderer.invoke("planner:save-project", path, doc),
 	loadSession: (): Promise<Session | null> => ipcRenderer.invoke("planner:load-session"),
+	autoSaveProject: (path: string | null, doc: PlannerDoc): Promise<string> => ipcRenderer.invoke("planner:autosave-project", path, doc),
 	saveSession: (s: Session): Promise<void> => ipcRenderer.invoke("planner:save-session", s),
 	reveal: (path: string): Promise<void> => ipcRenderer.invoke("planner:reveal", path),
 	fileExists: (path: string): Promise<boolean> => ipcRenderer.invoke("planner:file-exists", path),

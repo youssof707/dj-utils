@@ -28,8 +28,10 @@ export type State = {
 	laneMuted: boolean[]; // playback only; never saved with the set
 	soloLane: number | null;
 	preSolo: boolean[] | null; // mutes to restore when the solo is lifted
+	metronome: boolean; // playback only; never saved with the set
 	filePath: string | null;
 	dirty: boolean;
+	setGen: number; // bumps whenever a different set is loaded
 	importQueue: ImportItem[];
 	lastPlacedEnd: number;
 	trackBpmEdit: string | null;
@@ -62,8 +64,10 @@ let state: State = {
 	laneMuted: Array.from({ length: LANES }, () => false),
 	soloLane: null,
 	preSolo: null,
+	metronome: false,
 	filePath: null,
 	dirty: false,
+	setGen: 0,
 	importQueue: [],
 	lastPlacedEnd: 0,
 	trackBpmEdit: null,
@@ -136,7 +140,7 @@ export const store = {
 		const bpm = Math.round(rest.bpm);
 		const tempos = rest.tempos ?? pointsToBlocks((points ?? []).map((p) => ({ ...p, bpm: Math.round(p.bpm) })), bpm, 0.05).map((b, i) => ({ ...b, id: `b${Date.now().toString(36)}${i}` }));
 		const doc: PlannerDoc = { ...rest, bpm, tempos: tempos.map((t) => ({ ...t, bpm: Math.round(t.bpm) })) };
-		store.set({ doc, past: [], future: [], rev: state.rev + 1, selection: [], filePath, dirty, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0 });
+		store.set({ doc, past: [], future: [], rev: state.rev + 1, selection: [], filePath, dirty, setGen: state.setGen + 1, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0 });
 	},
 };
 

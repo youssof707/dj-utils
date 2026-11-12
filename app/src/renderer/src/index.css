@@ -59,6 +59,12 @@ button.ghost.on {
 	background: var(--panel-2);
 	color: var(--text);
 }
+button.ghost.metro.active,
+button.ghost.metro.active:hover {
+	background: rgba(91, 140, 255, 0.16);
+	color: var(--accent);
+	box-shadow: inset 0 0 0 1px var(--accent);
+}
 button.icon {
 	padding: 6px 8px;
 	min-width: 30px;
@@ -220,12 +226,21 @@ button.play.on {
 }
 .split-handle {
 	flex: none;
-	height: 6px;
+	height: 1px;
+	position: relative;
+	z-index: 10;
 	cursor: row-resize;
-	background: var(--panel);
-	border-top: 1px solid var(--line);
-	border-bottom: 1px solid var(--line);
+	background: var(--line);
 	touch-action: none;
+}
+/* Invisible grab area around the single 1px line. */
+.split-handle::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: -4px;
+	bottom: -4px;
 }
 .split-handle:hover,
 .split-handle:active {
@@ -317,29 +332,22 @@ button.play.on {
 	font-weight: 600;
 }
 .mute-btn {
-	width: 24px;
-	height: 20px;
+	width: 12px;
+	height: 12px;
 	padding: 0;
-	border-radius: 4px;
-	border: 1px solid var(--line-strong);
-	background: transparent;
-	color: var(--muted);
-	font-size: 11px;
-	font-weight: 700;
+	border-radius: 50%;
+	border: 1px solid #2fd25a;
+	background: #2fd25a;
+	box-shadow: 0 0 6px rgba(47, 210, 90, 0.6);
 	cursor: pointer;
 }
 .mute-btn:hover {
-	border-color: var(--muted);
+	filter: brightness(1.15);
 }
 .mute-btn.muted {
-	background: #e0a33a;
-	border-color: #e0a33a;
-	color: #16181d;
-}
-.mute-btn.solo {
-	background: var(--accent);
-	border-color: var(--accent);
-	color: #fff;
+	background: #1f3a27;
+	border-color: #2c4a34;
+	box-shadow: none;
 }
 .scroll-cell {
 	height: 14px;
@@ -477,8 +485,14 @@ button.play.on {
 	overflow: hidden;
 	border-bottom: 1px solid var(--line);
 	background-color: var(--bg);
-	background-image: linear-gradient(to right, #252933 1px, transparent 1px), linear-gradient(to right, #17191f 1px, transparent 1px);
-	background-repeat: repeat;
+}
+.lane-grid {
+	position: absolute;
+	top: 0;
+	left: 0;
+	height: 100%;
+	pointer-events: none;
+	image-rendering: pixelated;
 }
 .lane:nth-child(even) {
 	background-color: #101216;
@@ -503,16 +517,16 @@ button.play.on {
 }
 .clip {
 	position: absolute;
-	top: 4px;
-	bottom: 4px;
-	border-radius: 5px;
-	background: hsl(var(--hue) 42% 30% / 0.3);
+	top: 0;
+	bottom: 0;
+	border-radius: 0;
+	background: hsl(var(--hue) 42% 30% / 0.06);
 	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 55% / 0.8);
 	overflow: hidden;
 	cursor: grab;
 }
 .clip.selected {
-	background: hsl(var(--hue) 48% 38% / 0.42);
+	background: hsl(var(--hue) 48% 38% / 0.12);
 	box-shadow: inset 0 0 0 2px #fff;
 	z-index: 2;
 }

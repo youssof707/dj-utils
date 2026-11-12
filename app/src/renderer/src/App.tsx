@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Session } from "@shared/planner";
-import { deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, zoomAround, zoomToFit } from "./planner/actions";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia } from "./planner/media";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
@@ -183,6 +183,7 @@ function start(): void {
 			const cur = store.get();
 			const session: Session = { doc: cur.doc, filePath: cur.filePath, dirty: cur.dirty, pxPerBeat: cur.pxPerBeat, scrollX: cur.scrollX, playheadBeat: cur.playing ? engine.positionBeat() : cur.playheadBeat };
 			const text = JSON.stringify(session);
+			void autoSave();
 			if (text === lastSaved) return;
 			lastSaved = text;
 			void window.api.saveSession(session);
@@ -210,6 +211,7 @@ function start(): void {
 			store.set({ pxPerBeat: session.pxPerBeat, scrollX: session.scrollX, playheadBeat: session.playheadBeat });
 		}
 		store.set({ loaded: true });
+		void autoSave(); // anything left unsaved last time
 		reconcileMedia(store.get().doc);
 		engine.warm();
 	});

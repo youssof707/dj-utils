@@ -251,6 +251,11 @@ export function toggleSolo(lane: number): void {
 	engine.applyMutes();
 }
 
+export function toggleMetronome(): void {
+	store.set({ metronome: !store.get().metronome });
+	engine.applyMetronome();
+}
+
 export function zoomToFit(): void {
 	const s = store.get();
 	const beats = Math.max(32, contentBeats(s.doc));
@@ -262,15 +267,11 @@ export function zoomToFit(): void {
 
 // New and Open replace the current set. With unsaved changes they ask first.
 export function requestNew(): void {
-	const s = store.get();
-	if (s.dirty && s.doc.clips.length > 0) store.set({ pendingDiscard: "new" });
-	else newSet();
+	void flushAutoSave().then(newSet);
 }
 
 export function requestOpen(): void {
-	const s = store.get();
-	if (s.dirty && s.doc.clips.length > 0) store.set({ pendingDiscard: "open" });
-	else void openSet();
+	void flushAutoSave().then(() => openSet());
 }
 
 export function newSet(): void {
@@ -302,6 +303,44 @@ export async function saveSet(saveAs = false): Promise<boolean> {
 		toast(`Could not save: ${errorText(e)}`);
 		return false;
 	}
+}
+
+// Every change is written to the set's file shortly after it happens. A set that has no file
+// yet gets one in the sets folder as soon as it has a clip. Saves never overlap; a change
+// made during a save is picked up by another pass.
+let autoSaving: Promise<void> | null = null;
+let autoSaveAgain = false;
+let autoSaveFailed = false;
+
+export function autoSave(): Promise<void> {
+	if (autoSaving) {
+		autoSaveAgain = true;
+		return autoSaving;
+	}
+	autoSaving = (async () => {
+		do {
+			autoSaveAgain = false;
+			const s = store.get();
+			if (!s.dirty || (!s.filePath && s.doc.clips.length === 0)) continue;
+			try {
+				const path = await window.api.autoSaveProject(s.filePath, compactDoc(s.doc));
+				autoSaveFailed = false;
+				const cur = store.get();
+				if (cur.setGen !== s.setGen) continue; // a different set was loaded meanwhile
+				store.set({ filePath: path, dirty: cur.doc !== s.doc });
+			} catch (e) {
+				if (!autoSaveFailed) toast(`Could not auto-save: ${errorText(e)}`);
+				autoSaveFailed = true;
+			}
+		} while (autoSaveAgain);
+	})().finally(() => {
+		autoSaving = null;
+	});
+	return autoSaving;
+}
+
+export async function flushAutoSave(): Promise<void> {
+	await autoSave();
 }
 
 // ---- export -------------------------------------------------------------------------
