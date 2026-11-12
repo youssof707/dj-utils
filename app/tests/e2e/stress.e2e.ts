@@ -100,7 +100,7 @@ it("handles a 65-track, one-hour set", async () => {
 	await h.page.keyboard.press("Meta+0");
 
 	// Tempo ramp over the middle of the set, then a full key-locked export.
-	await state(h.page, "s => { window.planner.store.commit({ ...s.doc, points: [{ id: 'p1', beat: 2000, bpm: 128 }, { id: 'p2', beat: 5000, bpm: 150 }] }); return 0; }");
+	await state(h.page, "s => { window.planner.store.commit({ ...s.doc, tempos: [{ id: 'b1', startBeat: 2000, lengthBeat: 3000, bpm: 150 }] }); return 0; }");
 	await shot(h.page, "stress-04-tempo");
 	for (const keyLock of [false, true]) {
 		const out = path.join(h.workDir, keyLock ? "set-key.wav" : "set-vari.wav");

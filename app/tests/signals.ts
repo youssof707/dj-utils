@@ -32,6 +32,43 @@ export function writeClickTrack(path: string, bpm: number, seconds: number, opts
 	w.close();
 }
 
+// A track with a clear bar: a loud, bright click on every bar line and a soft one on the
+// other beats, over quiet noise so there is something between the clicks. `firstSec` is
+// where the first beat falls and `firstNo` its place in the bar (1 = a bar line).
+export function writeBarTrack(path: string, bpm: number, seconds: number, opts: { firstSec?: number; firstNo?: number; seed?: number } = {}): void {
+	const frames = Math.round(seconds * SR);
+	const data = new Float32Array(frames * 2);
+	let seed = opts.seed ?? 7;
+	const rnd = (): number => {
+		seed = (seed * 1103515245 + 12345) >>> 0;
+		return (seed / 0xffffffff) * 2 - 1;
+	};
+	// Noise whose level wanders, like the body of a song.
+	for (let i = 0; i < frames; i++) {
+		const v = 0.02 * rnd() * (1 + 0.8 * Math.sin((2 * Math.PI * i) / (SR * 3.7)));
+		data[i * 2] = v;
+		data[i * 2 + 1] = v;
+	}
+	const len = Math.round(0.004 * SR);
+	const firstNo = opts.firstNo ?? 1;
+	for (let beat = 0; ; beat++) {
+		const start = Math.round(((opts.firstSec ?? 0) + (beat * 60) / bpm) * SR);
+		if (start + len >= frames) break;
+		if (start < 0) continue;
+		const bar = (firstNo - 1 + beat) % 4 === 0;
+		const amp = bar ? 0.9 : 0.3;
+		const hz = bar ? 2500 : 1000;
+		for (let i = 0; i < len; i++) {
+			const v = amp * Math.sin((2 * Math.PI * hz * i) / SR + Math.PI / 2) * (1 - i / len);
+			data[(start + i) * 2] += v;
+			data[(start + i) * 2 + 1] += v;
+		}
+	}
+	const w = new WavWriter(path, SR, "int16");
+	w.write(data, frames);
+	w.close();
+}
+
 export function writeTone(path: string, hz: number, seconds: number, amp = 0.5): void {
 	const frames = Math.round(seconds * SR);
 	const data = new Float32Array(frames * 2);

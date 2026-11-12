@@ -280,43 +280,31 @@ describe("editing and playback", () => {
 		await h.page.keyboard.press("Meta+0");
 	});
 
-	it("tempo points and the project BPM are whole numbers", async () => {
+	it("tempo changes and the project BPM are whole numbers", async () => {
 		const lane = (await h.page.getByTestId("tempo-lane").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
-		// a new point takes the tempo the curve has there, wherever the click is vertically
+		const bpms = (): Promise<number[]> => state(h.page, "s => s.doc.tempos.slice().sort((a, b) => a.startBeat - b.startBeat).map(t => t.bpm)");
+		// a new change takes the tempo already playing there, wherever the click is vertically
 		await h.page.mouse.dblclick(lane.x + 16 * ppb, lane.y + 12);
-		let pts: any[] = await state(h.page, "s => s.doc.points");
-		expect(pts.map((p) => p.bpm)).toEqual([128]);
-		await h.page.getByTestId("point-bpm").fill("140.6");
-		await h.page.getByTestId("point-bpm").press("Enter");
-		await h.page.mouse.dblclick(lane.x + 80 * ppb, lane.y + 80);
-		pts = await state(h.page, "s => s.doc.points.slice().sort((a, b) => a.beat - b.beat)");
-		expect(pts.map((p) => p.bpm)).toEqual([141, 141]);
-		await h.page.getByTestId("point-bpm").fill("100");
-		await h.page.getByTestId("point-bpm").press("Enter");
-		// halfway along a 141 -> 100 ramp the curve is 120.5, added as a whole number
-		const mid: number = await state(h.page, "s => { const p = s.doc.points.slice().sort((a, b) => a.beat - b.beat); return (p[0].beat + p[1].beat) / 2; }");
-		await h.page.mouse.dblclick(lane.x + mid * ppb - (await state<number>(h.page, "s => s.scrollX")), lane.y + 70);
-		pts = await state(h.page, "s => s.doc.points.slice().sort((a, b) => a.beat - b.beat)");
-		expect(pts).toHaveLength(3);
-		expect(Number.isInteger(pts[1].bpm)).toBe(true);
-		expect(Math.abs(pts[1].bpm - 120.5)).toBeLessThan(1);
-		// dragging a point lands on whole BPMs
-		const pt = h.page.getByTestId("tempo-point").nth(2);
-		const pb = (await pt.boundingBox())!;
-		await h.page.mouse.move(pb.x + pb.width / 2, pb.y + pb.height / 2);
-		await h.page.mouse.down();
-		await h.page.mouse.move(pb.x + pb.width / 2 + 3, pb.y + pb.height / 2 - 17, { steps: 7 });
-		await h.page.mouse.up();
-		pts = await state(h.page, "s => s.doc.points");
-		for (const p of pts) expect(Number.isInteger(p.bpm)).toBe(true);
-		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+z");
-		expect(await state(h.page, "s => s.doc.points")).toEqual([]);
+		expect(await bpms()).toEqual([128]);
+		await h.page.getByTestId("tempo-bpm").fill("140.6");
+		await h.page.getByTestId("tempo-bpm").press("Enter");
+		expect(await bpms()).toEqual([141]);
+		await h.page.mouse.dblclick(lane.x + 80 * ppb, lane.y + 50);
+		expect(await bpms()).toEqual([141, 141]);
+		await h.page.getByTestId("tempo-bpm").fill("99,5");
+		await h.page.getByTestId("tempo-bpm").press("Enter");
+		expect(await bpms()).toEqual([141, 100]);
+		// nonsense is ignored
+		await h.page.getByTestId("tempo-block").nth(1).dblclick();
+		await h.page.getByTestId("tempo-bpm").fill("fast");
+		await h.page.getByTestId("tempo-bpm").press("Enter");
+		expect(await bpms()).toEqual([141, 100]);
+		// the Delete button removes the selected change
+		await h.page.getByTestId("tempo-delete").click();
+		expect(await bpms()).toEqual([141]);
+		for (let i = 0; i < 8 && (await bpms()).length > 0; i++) await h.page.keyboard.press("Meta+z");
+		expect(await bpms()).toEqual([]);
 		// project BPM rounds too
 		const input = h.page.getByTestId("project-bpm");
 		await input.fill("130.4");
@@ -330,33 +318,50 @@ describe("editing and playback", () => {
 		await waitReady(h.page);
 	});
 
-	it("timeline takes the top three quarters of the window", async () => {
-		const vh: number = await h.page.evaluate(() => window.innerHeight);
+	it("timeline fills the window down to the divider", async () => {
+		// the divider's place is a share of the height, remembered between runs
+		const frac: number = await h.page.evaluate(() => {
+			const v = Number(localStorage.getItem("planner.splitFrac"));
+			return v > 0 && v <= 1 ? v : 0.74;
+		});
+		const split = (await h.page.locator(".split").boundingBox())!;
 		const tl = (await h.page.getByTestId("timeline").boundingBox())!;
-		expect(Math.abs(tl.y + tl.height - vh * 0.75)).toBeLessThan(2);
+		const handle = (await h.page.getByTestId("split-handle").boundingBox())!;
+		expect(Math.abs(tl.y - split.y)).toBeLessThan(2);
+		expect(Math.abs(tl.y + tl.height - handle.y)).toBeLessThan(2);
+		expect(Math.abs(handle.y - (split.y + Math.max(200, frac * split.height)))).toBeLessThan(2);
 		await shot(h.page, "12-layout");
 	});
 
-	it("typing in a field does not trigger shortcuts", async () => {
+	it("typing in a field does not trigger shortcuts, and space still plays", async () => {
 		await h.page.locator('[data-testid="clip"]').first().click({ position: { x: 50, y: 40 } });
 		const input = h.page.getByTestId("project-bpm");
 		await input.click();
 		await input.press("Backspace");
-		await input.type("s ");
+		await input.type("s");
 		expect((await clips()).length).toBe(3);
 		expect(await state(h.page, "s => s.playing")).toBe(false);
 		await input.press("Escape");
 		expect(await input.inputValue()).toBe("128");
+		// space is the transport key even from inside the BPM box: the box lets go and playback starts
+		await input.click();
+		await h.page.keyboard.press("Space");
+		expect(await state(h.page, "s => s.playing")).toBe(true);
+		expect(await h.page.evaluate(() => document.activeElement === document.body)).toBe(true);
+		expect(await input.inputValue()).toBe("128");
+		await h.page.keyboard.press("Space");
+		expect(await state(h.page, "s => s.playing")).toBe(false);
+		expect((await clips()).length).toBe(3);
 	});
 
-	it("asks before discarding unsaved work", async () => {
+	it("a new set starts empty; the old one is already saved to its file", async () => {
+		await expect.poll(() => state(h.page, "s => s.filePath !== null && !s.dirty"), { timeout: 10000 }).toBe(true);
+		const file: string = await state(h.page, "s => s.filePath");
 		await h.page.keyboard.press("Meta+n");
-		await h.page.getByTestId("discard-modal").waitFor();
-		await h.page.keyboard.press("Escape");
-		expect((await clips()).length).toBe(3);
-		await h.page.keyboard.press("Meta+n");
-		await h.page.getByTestId("discard-confirm").click();
-		expect((await clips()).length).toBe(0);
+		await expect.poll(async () => (await clips()).length).toBe(0);
+		expect(await state(h.page, "s => s.filePath")).toBeNull();
+		const fs = await import("node:fs");
+		expect(JSON.parse(fs.readFileSync(file, "utf8")).clips.length).toBe(3);
 	});
 });
 
@@ -368,7 +373,7 @@ describe("export cancel", () => {
 		writeClickTrack(a, 128, 400);
 		await importTrack(h.page, a, 128, 0, 0);
 		await waitReady(h.page);
-		await state(h.page, "s => { window.planner.store.commit({ ...s.doc, points: [{ id: 'p1', beat: 0, bpm: 128 }, { id: 'p2', beat: 800, bpm: 140 }] }); return 0; }");
+		await state(h.page, "s => { window.planner.store.commit({ ...s.doc, tempos: [{ id: 'b1', startBeat: 0, lengthBeat: 800, bpm: 140 }] }); return 0; }");
 		const out = path.join(h.workDir, "cancelled.wav");
 		void h.page.evaluate((o) => {
 			const p = (window as any).planner;

@@ -1,10 +1,10 @@
 // Everything the user can do to a set, as plain functions over the store.
 
-import { emptyDoc, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
+import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
 import { blocksToPoints } from "@shared/tempo";
 import { engine } from "./engine";
 import { mediaFor, workingCount } from "./media";
-import { errorText, newId, store, toast } from "./store";
+import { errorText, newId, store, toast, type ImportItem } from "./store";
 
 export const MIN_CLIP_BEATS = 0.05;
 export const MIN_PX_PER_BEAT = 0.05;
@@ -34,18 +34,30 @@ export function contentBeats(doc: PlannerDoc): number {
 
 // ---- import -------------------------------------------------------------------------
 
+// Tracks Rekordbox has analysed come with their BPM and bar line and go straight onto the
+// timeline; anything else asks for its BPM first.
 export async function importPaths(paths: string[], lane: number, beat: number | null): Promise<void> {
 	let first = true;
 	for (const p of paths) {
 		try {
-			const existing = store.get().doc.tracks.find((t) => t.sourcePath === p);
 			const at = first ? beat : null;
-			if (existing) {
-				// Already told us this file's BPM; place it straight away.
-				placeTrack(existing, lane, at);
+			if (store.get().doc.tracks.some((t) => t.sourcePath === p)) {
+				// Already in the set. Rekordbox still has the last word on the grid, so a grid
+				// corrected there since is picked up; clips already placed are left alone.
+				const grid = await window.api.rekordbox(p);
+				const known = store.get().doc.tracks.filter((t) => t.sourcePath === p);
+				if (known.length === 0) continue; // the set was replaced while we looked
+				const sameBpm = grid ? known.find((t) => Math.abs(t.bpm - grid.bpm) < 1e-6) : undefined;
+				let track: PlannerTrack;
+				if (!grid) track = known.find((t) => t.downbeatSec !== undefined) ?? known[0];
+				else if (sameBpm) track = sameBpm.downbeatSec === grid.downbeatSec ? sameBpm : { ...sameBpm, downbeatSec: grid.downbeatSec };
+				else track = { ...known[0], id: newId("t"), bpm: grid.bpm, downbeatSec: grid.downbeatSec };
+				enqueue({ track, lane, beat: at });
 			} else {
 				const probe = await window.api.probe(p);
-				store.set({ importQueue: [...store.get().importQueue, { probe, lane, beat: at }] });
+				const grid = probe.rekordbox;
+				if (grid) enqueue({ track: { id: newId("t"), sourcePath: probe.path, name: probe.name, bpm: grid.bpm, durationSec: probe.durationSec, downbeatSec: grid.downbeatSec }, lane, beat: at });
+				else enqueue({ probe, lane, beat: at });
 			}
 			first = false;
 		} catch (e) {
@@ -54,25 +66,98 @@ export async function importPaths(paths: string[], lane: number, beat: number | 
 	}
 }
 
+// Files land in the order they were dropped: one that is waiting for its BPM holds back
+// the ones behind it, which then follow on from where it ends up.
+function enqueue(item: ImportItem): void {
+	store.set({ importQueue: [...store.get().importQueue, item] });
+	placeReady();
+}
+
+function placeReady(): void {
+	for (;;) {
+		const [head, ...rest] = store.get().importQueue;
+		if (!head || !("track" in head)) return;
+		store.set({ importQueue: rest });
+		placeTrack(head.track, head.lane, head.beat);
+	}
+}
+
 function placeTrack(track: PlannerTrack, lane: number, beat: number | null): void {
 	const s = store.get();
-	const startBeat = Math.max(0, beat ?? s.lastPlacedEnd);
-	const clip: Clip = { id: newId("c"), trackId: track.id, lane: Math.min(LANES - 1, Math.max(0, lane)), startBeat, offsetBeat: 0, lengthBeat: trackBeats(track) };
-	const tracks = s.doc.tracks.some((t) => t.id === track.id) ? s.doc.tracks : [...s.doc.tracks, track];
+	const total = trackBeats(track);
+	let startBeat = Math.max(0, beat ?? s.lastPlacedEnd);
+	let offsetBeat = 0;
+	const bar = firstBarBeat(track);
+	if (bar !== null) {
+		// The track's first bar line goes on the drop point, so the clip starts there and the
+		// lead-in before it stays hidden behind the clip's left edge. Queued up behind another
+		// clip, the drop point is the next bar line.
+		if (beat === null) startBeat = Math.ceil(startBeat / 4 - 1e-6) * 4;
+		if (bar < 0) startBeat -= bar; // the bar line is a hair before the first sample
+		else if (bar < total - MIN_CLIP_BEATS) offsetBeat = bar;
+	}
+	const clip: Clip = { id: newId("c"), trackId: track.id, lane: Math.min(LANES - 1, Math.max(0, lane)), startBeat, offsetBeat, lengthBeat: total - offsetBeat };
+	const tracks = s.doc.tracks.some((t) => t.id === track.id) ? s.doc.tracks.map((t) => (t.id === track.id ? track : t)) : [...s.doc.tracks, track];
 	store.commit({ ...s.doc, tracks, clips: [...s.doc.clips, clip] });
 	store.set({ lastPlacedEnd: startBeat + clip.lengthBeat, selection: [clip.id] });
 }
 
 export function confirmImport(bpm: number): void {
 	const [item, ...rest] = store.get().importQueue;
-	if (!item) return;
+	if (!item || !("probe" in item)) return;
 	store.set({ importQueue: rest });
 	const track: PlannerTrack = { id: newId("t"), sourcePath: item.probe.path, name: item.probe.name, bpm, durationSec: item.probe.durationSec };
 	placeTrack(track, item.lane, item.beat);
+	placeReady();
 }
 
 export function skipImport(): void {
-	store.set({ importQueue: store.get().importQueue.slice(1) });
+	const [item, next, ...rest] = store.get().importQueue;
+	if (!item) return;
+	// The file after a skipped one takes over its place.
+	store.set({ importQueue: next ? [next.beat === null ? { ...next, beat: item.beat } : next, ...rest] : [] });
+	placeReady();
+}
+
+// ---- Rekordbox cue points -------------------------------------------------------------
+
+const cuesAsked = new Set<string>();
+let cueWork: Promise<void> = Promise.resolve();
+
+// Looks up the cue points of the set's tracks, one file at a time: files not asked about
+// yet, or every file when `again` (Rekordbox may have been used since).
+export function refreshCues(again: boolean): void {
+	const paths = [...new Set(store.get().doc.tracks.map((t) => t.sourcePath))].filter((p) => again || !cuesAsked.has(p));
+	for (const p of paths) {
+		cuesAsked.add(p);
+		cueWork = cueWork.then(async () => {
+			if (!store.get().doc.tracks.some((t) => t.sourcePath === p)) {
+				cuesAsked.delete(p); // no longer in the set
+				return;
+			}
+			try {
+				const cues = await window.api.cues(p);
+				const had = store.get().cues[p];
+				if (JSON.stringify(had ?? []) !== JSON.stringify(cues)) store.set({ cues: { ...store.get().cues, [p]: cues } });
+			} catch {
+				cuesAsked.delete(p); // asked again next time round
+			}
+		});
+	}
+}
+
+// Keeps cue points current: new tracks are looked up as they arrive, and all of them again
+// whenever the window comes back to the front.
+export function watchCues(): void {
+	let tracks = store.get().doc.tracks;
+	store.subscribe(() => {
+		const now = store.get().doc.tracks;
+		if (now === tracks) return;
+		tracks = now;
+		refreshCues(false);
+	});
+	window.addEventListener("focus", () => refreshCues(true));
+	refreshCues(false);
 }
 
 export async function importViaDialog(): Promise<void> {
@@ -98,6 +183,65 @@ export function deleteSelection(): void {
 export function compactDoc(doc: PlannerDoc): PlannerDoc {
 	const used = new Set(doc.clips.map((c) => c.trackId));
 	return { ...doc, tracks: doc.tracks.filter((t) => used.has(t.id)) };
+}
+
+// The point in a track that "Align to grid" puts on a bar line, in the track's own beats:
+// its first Rekordbox bar line, or without a grid its first cue or memory cue.
+export function alignPoint(track: PlannerTrack): number | null {
+	const bar = firstBarBeat(track);
+	if (bar !== null) return bar;
+	const cues = store.get().cues[track.sourcePath];
+	if (!cues?.length) return null;
+	return (Math.min(...cues.map((c) => c.sec)) * track.bpm) / 60;
+}
+
+// Moves each selected clip so its alignment point (see alignPoint) sits on the nearest bar
+// line of the set's grid.
+export function alignSelectionToGrid(): void {
+	const s = store.get();
+	const sel = new Set(s.selection);
+	let changed = false;
+	const clips = s.doc.clips.map((c) => {
+		if (!sel.has(c.id)) return c;
+		const track = s.doc.tracks.find((t) => t.id === c.trackId);
+		const bar = track ? alignPoint(track) : null;
+		if (bar === null) return c;
+		const anchor = c.startBeat - c.offsetBeat + bar;
+		let target = Math.round(anchor / 4) * 4;
+		const shift = (t: number): number => t - anchor;
+		if (c.startBeat + shift(target) < -1e-9) target = Math.ceil((anchor - c.startBeat) / 4 - 1e-9) * 4;
+		const d = shift(target);
+		if (Math.abs(d) < 1e-9) return c;
+		changed = true;
+		return { ...c, startBeat: c.startBeat + d };
+	});
+	if (changed) store.commit({ ...s.doc, clips });
+}
+
+// Below this zoom the beat lines are hidden, so moves go by whole bars.
+export const BEAT_GRID_MIN_PX = 9;
+
+// The step that moves snap to at the current zoom: a beat, or a bar when zoomed out.
+export function gridStepBeats(): number {
+	return store.get().pxPerBeat < BEAT_GRID_MIN_PX ? 4 : 1;
+}
+
+// Arrow keys: moves the selected clips and tempo changes one step left or right. A move that
+// would push anything before the start of the set does nothing.
+export function nudgeSelection(dir: -1 | 1): void {
+	const s = store.get();
+	const sel = new Set(s.selection);
+	const clips = s.doc.clips.filter((c) => sel.has(c.id));
+	const tempos = s.doc.tempos.filter((t) => sel.has(t.id));
+	if (clips.length + tempos.length === 0) return;
+	const d = dir * gridStepBeats();
+	const minStart = Math.min(...clips.map((c) => c.startBeat), ...tempos.map((t) => t.startBeat));
+	if (minStart + d < -1e-9) return;
+	store.commit({
+		...s.doc,
+		clips: s.doc.clips.map((c) => (sel.has(c.id) ? { ...c, startBeat: c.startBeat + d } : c)),
+		tempos: s.doc.tempos.map((t) => (sel.has(t.id) ? { ...t, startBeat: t.startBeat + d } : t)),
+	});
 }
 
 export function duplicateSelection(): void {

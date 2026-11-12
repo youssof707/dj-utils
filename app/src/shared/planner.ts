@@ -11,6 +11,9 @@ export type PlannerTrack = {
 	name: string;
 	bpm: number; // the track's own tempo, as typed on import
 	durationSec: number; // length of the source file
+	// From Rekordbox's beat grid: where a bar line falls in the source file. Tracks that have
+	// it are placed, and later moved, by their bar lines.
+	downbeatSec?: number;
 };
 
 // Positions are in beats so they survive a project BPM change.
@@ -42,7 +45,23 @@ export type PlannerDoc = {
 	tempos: TempoBlock[];
 };
 
-export type ProbeResult = { path: string; name: string; durationSec: number; tagBpm: number | null };
+// A track's beat grid as Rekordbox analysed it, on our own decode of the file.
+export type RekordboxGrid = { bpm: number; downbeatSec: number };
+
+// A Rekordbox cue point, in seconds into our own decode of the file. Kind 0 is a memory
+// cue; 1 and up are the hot cues A, B, C...
+export type Cue = { sec: number; kind: number };
+
+export type ProbeResult = {
+	path: string;
+	name: string;
+	durationSec: number;
+	tagBpm: number | null;
+	rekordbox: RekordboxGrid | null;
+	// Rekordbox has a track by this file name, but analysed different audio (an earlier
+	// version of the file, say): its BPM is worth suggesting, its bar line is not.
+	rekordboxBpm: number | null;
+};
 
 export type StretchRequest = { sourcePath: string; bpm: number; projectBpm: number };
 export type StretchResult = { cachePath: string; frames: number };
@@ -74,6 +93,23 @@ export function stretchKey(r: StretchRequest): string {
 
 export function trackBeats(t: PlannerTrack): number {
 	return (t.durationSec * t.bpm) / 60;
+}
+
+// A bar line this close before the first sample still counts as the track's first bar line.
+// Rekordbox's clock starts up to about 0.1 s before ours on MP3 and AAC files (it keeps the
+// encoder's padding), so its first bar line can sit that far ahead of the audio we have.
+const EARLY_BAR_SEC = 0.25;
+
+// Where a Rekordbox track's first bar line sits, in the track's own beats from the start of
+// the file. Usually a little after the start; slightly negative when the bar line falls a
+// hair before the first sample. Null for tracks without a Rekordbox grid.
+export function firstBarBeat(t: PlannerTrack): number | null {
+	if (t.downbeatSec === undefined || !Number.isFinite(t.downbeatSec)) return null;
+	const beatSec = 60 / t.bpm;
+	const beat = t.downbeatSec / beatSec;
+	let bar = beat - Math.floor(beat / 4) * 4;
+	if ((4 - bar) * beatSec < EARLY_BAR_SEC) bar -= 4;
+	return bar;
 }
 
 export function emptyDoc(): PlannerDoc {

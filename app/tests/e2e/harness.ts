@@ -8,11 +8,11 @@ export const SHOTS = path.join(APP_DIR, "tests/e2e/shots");
 
 export type Harness = { app: ElectronApplication; page: Page; dataDir: string; workDir: string; close: () => Promise<void>; relaunch: () => Promise<Harness> };
 
-export async function launch(dataDir?: string, workDir?: string): Promise<Harness> {
+export async function launch(dataDir?: string, workDir?: string, env: Record<string, string> = {}): Promise<Harness> {
 	const data = dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "planner-data-"));
 	const work = workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "planner-work-"));
 	fs.mkdirSync(SHOTS, { recursive: true });
-	const app = await _electron.launch({ args: [APP_DIR], cwd: APP_DIR, env: { ...process.env, DJ_PLANNER_DATA: data } });
+	const app = await _electron.launch({ args: [APP_DIR], cwd: APP_DIR, env: { ...process.env, ...env, DJ_PLANNER_DATA: data } });
 	const page = await app.firstWindow();
 	page.on("console", (m) => {
 		if (m.type() === "error") console.log("[renderer error]", m.text());
@@ -27,7 +27,7 @@ export async function launch(dataDir?: string, workDir?: string): Promise<Harnes
 		close: () => app.close(),
 		relaunch: async () => {
 			await app.close();
-			return launch(data, work);
+			return launch(data, work, env);
 		},
 	};
 	return h;

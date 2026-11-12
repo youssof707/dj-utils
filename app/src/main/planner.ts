@@ -3,12 +3,14 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, SAMPLE_RATE, stretchKey, type ExportRequest, type ExportResult, type PlannerDoc, type ProbeResult, type Session, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, SAMPLE_RATE, stretchKey, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type Session, type StretchRequest, type StretchResult } from "../shared/planner";
 import { afconvertToWav } from "./audio/dsp";
 import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
+import { databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, type LibraryCue, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
 
 const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "caf", "mp4", "alac"];
 
@@ -140,14 +142,184 @@ function readTagBpm(file: string): number | null {
 	return null;
 }
 
+// ---- Rekordbox library ---------------------------------------------------------------
+
+let rekordboxRoot: string | null = null; // the folder of analysis files, when there is one
+let rekordboxCache = "";
+let rekordboxIndex = new Map<string, LibraryEntry[]>(); // by file name
+let rekordboxScan: Promise<void> | null = null;
+let rekordboxScannedAt = 0;
+
+// Where to look for Rekordbox's analysis files. Test runs never look at the real library.
+function findRekordboxRoot(): string | null {
+	const forced = process.env["DJ_REKORDBOX_DIR"];
+	if (forced) return forced;
+	return process.env["DJ_PLANNER_DATA"] ? null : findAnalysisRoot(os.homedir());
+}
+
+// Reads the analysis folder into the index (only new and changed files are parsed). One
+// scan at a time; a failed scan keeps whatever index there was.
+function scanRekordbox(): Promise<void> {
+	if (!rekordboxRoot) return Promise.resolve();
+	rekordboxScan ??= runWorker<LibraryEntry[]>({ type: "rekordbox-scan", job: { root: rekordboxRoot, cachePath: rekordboxCache } }, () => {})
+		.then((entries) => {
+			const index = new Map<string, LibraryEntry[]>();
+			for (const e of entries) {
+				const key = nameKey(e.name);
+				const list = index.get(key);
+				if (list) list.push(e);
+				else index.set(key, [e]);
+			}
+			rekordboxIndex = index;
+			rekordboxScannedAt = Date.now();
+		})
+		.catch((e) => console.error("Rekordbox scan failed:", e))
+		.finally(() => {
+			rekordboxScan = null;
+		});
+	return rekordboxScan;
+}
+
+// Matches already worked out, by file and by the analyses it was compared with. The ones
+// that found the track are kept between runs, so a set's tracks need no second look.
+const rekordboxMatches = new Map<string, Promise<RekordboxMatch | null>>();
+let matchesFile = "";
+let savedMatches: Record<string, RekordboxMatch> = {};
+const MAX_SAVED_MATCHES = 20000;
+
+function loadSavedMatches(): void {
+	try {
+		const doc = JSON.parse(fs.readFileSync(matchesFile, "utf8")) as { version?: number; matches?: Record<string, RekordboxMatch> };
+		if (doc.version === 1 && doc.matches && typeof doc.matches === "object") savedMatches = doc.matches;
+	} catch {
+		// none saved yet
+	}
+}
+
+function saveMatch(key: string, match: RekordboxMatch): void {
+	if (Object.keys(savedMatches).length >= MAX_SAVED_MATCHES) savedMatches = {};
+	savedMatches[key] = match;
+	try {
+		const tmp = `${matchesFile}.${process.pid}.${Date.now()}.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify({ version: 1, matches: savedMatches }));
+		fs.renameSync(tmp, matchesFile);
+	} catch {
+		// only saves time on a later run
+	}
+}
+
+const analysesStamp = (list: LibraryEntry[] | undefined): string => (list ?? []).map((e) => `${e.dat}|${e.mtimeMs}`).join("\n");
+
+// Lines the file's audio up against each analysis that carries its name.
+function matchRekordbox(sourcePath: string, candidates: LibraryEntry[]): Promise<RekordboxMatch | null> {
+	const key = `${sourceHash(sourcePath)}-${createHash("sha1").update(analysesStamp(candidates)).digest("hex").slice(0, 16)}`;
+	let p = rekordboxMatches.get(key);
+	if (!p) {
+		const saved = savedMatches[key];
+		p = saved
+			? Promise.resolve(saved)
+			: runMatch(sourcePath, candidates).then((m) => {
+					if (m) saveMatch(key, m);
+					return m;
+				});
+		rekordboxMatches.set(key, p);
+		p.catch(() => rekordboxMatches.delete(key)); // a failure is worth another try
+	}
+	return p;
+}
+
+async function runMatch(sourcePath: string, candidates: LibraryEntry[]): Promise<RekordboxMatch | null> {
+	for (let attempt = 0; ; attempt++) {
+		const decodedPath = await decode(sourcePath);
+		// Keep the decoded copy from being cleaned up by a stretch that finishes meanwhile.
+		decodedUsers.set(decodedPath, (decodedUsers.get(decodedPath) ?? 0) + 1);
+		try {
+			return await runWorker<RekordboxMatch | null>({ type: "rekordbox-match", job: { decodedPath, candidates } }, () => {});
+		} catch (e) {
+			// The copy was cleaned up just before we claimed it: decode again, once.
+			if (attempt > 0 || fs.existsSync(decodedPath)) throw e;
+		} finally {
+			const left = (decodedUsers.get(decodedPath) ?? 1) - 1;
+			if (left <= 0) decodedUsers.delete(decodedPath);
+			else decodedUsers.set(decodedPath, left);
+		}
+	}
+}
+
+// The file's Rekordbox analysis, or null when Rekordbox has not analysed this recording.
+// Answers come from the index built at startup. Only a file the index has no match for
+// makes it look at the analysis folder again (when `rescan` allows), in case the track was
+// analysed since.
+async function rekordboxMatch(sourcePath: string, rescan: boolean): Promise<RekordboxMatch | null> {
+	if (!rekordboxRoot) return null;
+	try {
+		const key = nameKey(path.basename(sourcePath));
+		if (rekordboxScan) await rekordboxScan;
+		const first = rekordboxIndex.get(key);
+		const grid = first ? await matchRekordbox(sourcePath, first) : null;
+		if (grid || !rescan || Date.now() - rekordboxScannedAt < 2000) return grid;
+		await scanRekordbox();
+		const second = rekordboxIndex.get(key);
+		return second && analysesStamp(second) !== analysesStamp(first) ? await matchRekordbox(sourcePath, second) : null;
+	} catch (e) {
+		console.error("Rekordbox lookup failed:", e);
+		return null;
+	}
+}
+
+async function rekordboxGrid(sourcePath: string): Promise<RekordboxGrid | null> {
+	const m = await rekordboxMatch(sourcePath, true);
+	return m && { bpm: m.bpm, downbeatSec: m.downbeatSec };
+}
+
+// Cue points come from Rekordbox's database, read again whenever Rekordbox has written to
+// it, so cues set a moment ago are there.
+let rekordboxDb: string | null = null;
+let cueIndex: Record<string, LibraryCue[]> = {};
+let cueStamp = "";
+let cueLoad: Promise<void> | null = null;
+
+function findRekordboxDb(): string | null {
+	const forced = process.env["DJ_REKORDBOX_DB"];
+	if (forced) return forced;
+	return process.env["DJ_PLANNER_DATA"] || process.env["DJ_REKORDBOX_DIR"] ? null : findDatabase(os.homedir());
+}
+
+function loadCues(): Promise<void> {
+	if (!rekordboxDb) return Promise.resolve();
+	if (cueLoad) return cueLoad;
+	const dbPath = rekordboxDb;
+	const stamp = databaseStamp(dbPath);
+	if (stamp === cueStamp) return Promise.resolve();
+	cueLoad = runWorker<Record<string, LibraryCue[]>>({ type: "rekordbox-cues", job: { dbPath } }, () => {})
+		.then((cues) => {
+			cueIndex = cues;
+		})
+		.catch((e) => console.error("Rekordbox cues could not be read:", e)) // keeps the cues we had
+		.finally(() => {
+			cueStamp = stamp;
+			cueLoad = null;
+		});
+	return cueLoad;
+}
+
+// The file's memory cues and hot cues, on our own decode of it.
+async function rekordboxCues(sourcePath: string): Promise<Cue[]> {
+	if (!rekordboxDb) return [];
+	const m = await rekordboxMatch(sourcePath, false);
+	if (!m) return [];
+	await loadCues();
+	return (cueIndex[datKey(m.dat)] ?? []).map((c) => ({ sec: c.ms / 1000 - m.shiftSec, kind: c.kind }));
+}
+
 async function probe(sourcePath: string): Promise<ProbeResult> {
 	const decoded = await decode(sourcePath);
-	return {
-		path: sourcePath,
-		name: path.basename(sourcePath).replace(/\.[^.]+$/, ""),
-		durationSec: wavFrames(decoded) / SAMPLE_RATE,
-		tagBpm: readTagBpm(sourcePath),
-	};
+	const durationSec = wavFrames(decoded) / SAMPLE_RATE;
+	const rekordbox = await rekordboxGrid(sourcePath);
+	// Same file name in Rekordbox but not this audio: offer the newest analysis' BPM.
+	const sameName = rekordbox ? undefined : rekordboxIndex.get(nameKey(path.basename(sourcePath)));
+	const rekordboxBpm = sameName ? sameName.reduce((a, b) => (b.mtimeMs > a.mtimeMs ? b : a)).bpm : null;
+	return { path: sourcePath, name: path.basename(sourcePath).replace(/\.[^.]+$/, ""), durationSec, tagBpm: readTagBpm(sourcePath), rekordbox, rekordboxBpm };
 }
 
 // Stretch queue: a few at a time, one job per (file, track BPM, project BPM).
@@ -285,8 +457,17 @@ export function setupPlanner(): void {
 	// Decoded intermediates are only needed while stretching; clear leftovers from earlier runs.
 	for (const f of fs.readdirSync(decodedDir)) fs.rmSync(path.join(decodedDir, f), { force: true });
 	pruneCache();
+	rekordboxRoot = findRekordboxRoot();
+	rekordboxCache = path.join(base, "rekordbox-cache.json");
+	matchesFile = path.join(base, "rekordbox-matches.json");
+	loadSavedMatches();
+	rekordboxDb = findRekordboxDb();
+	void scanRekordbox();
+	void loadCues();
 
 	ipcMain.handle("planner:probe", (_e, p: string) => probe(p));
+	ipcMain.handle("planner:rekordbox", (_e, p: string) => rekordboxGrid(p));
+	ipcMain.handle("planner:cues", (_e, p: string) => rekordboxCues(p));
 	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => ensureStretch(req));
 	ipcMain.handle("planner:read-audio", async (_e, file: string) => {
 		if (!inCache(file)) throw new Error("Not a cache file");

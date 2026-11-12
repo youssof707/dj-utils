@@ -549,8 +549,8 @@ button.play.on {
 }
 .clip .wave {
 	position: absolute;
-	top: 0;
-	height: 100%;
+	top: 19px;
+	height: calc(100% - 19px);
 	pointer-events: none;
 }
 .clip-label {
@@ -591,6 +591,50 @@ button.play.on {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	pointer-events: none;
+}
+/* Rekordbox cue points: a thin line down the clip. Memory cues are red with a small triangle
+   on top; hot cues are green with their letters. */
+.cue {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: 2px;
+	margin-left: -1px;
+	pointer-events: none;
+	z-index: 1;
+}
+.cue.memory {
+	background: rgba(255, 59, 48, 0.85);
+}
+.cue.hot {
+	background: rgba(48, 209, 88, 0.85);
+}
+.cue.memory.hot {
+	background: linear-gradient(rgba(255, 59, 48, 0.85) 50%, rgba(48, 209, 88, 0.85) 50%);
+}
+.cue.memory::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: -3px;
+	border: solid transparent;
+	border-width: 6px 4px 0;
+	border-top-color: #ff3b30;
+}
+.cue span {
+	display: block;
+	position: relative;
+	top: 21px;
+	left: 2px;
+	width: 8px;
+	height: 9px;
+	margin-bottom: 1px;
+	background: #30d158;
+	color: #06210d;
+	font-size: 7.5px;
+	font-weight: 700;
+	line-height: 9px;
+	text-align: center;
 }
 .trim {
 	position: absolute;

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Track } from "@shared/types";
+import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat } from "@shared/tempo";
-import { cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
+import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, workingCount } from "./media";
 import { store, useStore } from "./store";
@@ -26,12 +27,20 @@ function Position() {
 	useEffect(() => {
 		let raf = 0;
 		let last = "";
+		// The time is where the playhead is heard in the export, tempo changes included.
+		let mapDoc: PlannerDoc | null = null;
+		let map: TempoMap | null = null;
 		const frame = (): void => {
 			raf = requestAnimationFrame(frame);
 			const beat = engine.positionBeat();
+			const doc = store.get().doc;
+			if (doc !== mapDoc || !map) {
+				mapDoc = doc;
+				map = new TempoMap(tempoPoints(doc), doc.bpm);
+			}
 			const bar = Math.floor(beat / 4) + 1;
 			const inBar = Math.floor(beat % 4) + 1;
-			const text = `${bar}.${inBar}   ${fmtClock((beat * 60) / store.get().doc.bpm)}`;
+			const text = `${bar}.${inBar}   ${fmtClock(map.secondsAtBeat(beat))}`;
 			if (text !== last && ref.current) {
 				ref.current.textContent = text;
 				last = text;
@@ -40,7 +49,7 @@ function Position() {
 		raf = requestAnimationFrame(frame);
 		return () => cancelAnimationFrame(raf);
 	}, []);
-	return <div className="position" ref={ref} data-testid="position" title="Bar.beat and time" />;
+	return <div className="position" ref={ref} data-testid="position" title="Bar.beat, and time in the exported file (tempo changes included)" />;
 }
 
 function BpmField() {
@@ -382,15 +391,16 @@ export function Modals() {
 	const doc = useStore((s) => s.doc);
 	const item = queue[0];
 	const editTrack = doc.tracks.find((t) => t.id === trackBpmEdit);
-	if (item) {
+	if (item && "probe" in item) {
+		const more = queue.filter((q) => "probe" in q).length - 1;
 		return (
 			<Modal onClose={skipImport} testId="import-modal">
 				<BpmForm
 					key={item.probe.path + queue.length}
 					title="What is this track's BPM?"
 					detail={item.probe.name}
-					initial={item.probe.tagBpm ? String(item.probe.tagBpm) : ""}
-					note={`It will be stretched to ${doc.bpm} BPM. ${item.probe.tagBpm ? "Suggested from the file's tag." : "Decimals are fine."}${queue.length > 1 ? ` ${queue.length - 1} more to go.` : ""}`}
+					initial={item.probe.rekordboxBpm ? String(item.probe.rekordboxBpm) : item.probe.tagBpm ? String(item.probe.tagBpm) : ""}
+					note={`It will be stretched to ${doc.bpm} BPM. ${item.probe.rekordboxBpm ? "Suggested from Rekordbox, which analysed a different version of this file, so the track is not lined up by its grid." : item.probe.tagBpm ? "Suggested from the file's tag." : "Decimals are fine."}${more > 0 ? ` ${more} more to go.` : ""}`}
 					confirmLabel="Add track"
 					cancelLabel="Skip"
 					onConfirm={confirmImport}
@@ -487,6 +497,7 @@ export function Modals() {
 export function ClipMenu() {
 	const menu = useStore((s) => s.menu);
 	const doc = useStore((s) => s.doc);
+	useStore((s) => s.cues);
 	useEffect(() => {
 		if (!menu) return;
 		const close = (): void => store.set({ menu: null });
@@ -519,11 +530,12 @@ export function ClipMenu() {
 		</button>
 	);
 	const x = Math.min(menu.x, window.innerWidth - 230);
-	const y = Math.min(menu.y, window.innerHeight - 220);
+	const y = Math.min(menu.y, window.innerHeight - 250);
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
 			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "S", testId: "menu-split" })}
 			{item("Duplicate", duplicateSelection, { hint: "⌘D", testId: "menu-duplicate" })}
+			{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
 			{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
 			<hr />
 			{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}

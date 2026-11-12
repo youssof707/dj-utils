@@ -1,10 +1,13 @@
 // Planner state: one store, immutable updates, undo history over the document only.
 
 import { useSyncExternalStore } from "react";
-import { emptyDoc, LANES, type ExportResult, type PlannerDoc, type ProbeResult, type TempoPoint } from "@shared/planner";
+import { emptyDoc, LANES, type Cue, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type TempoPoint } from "@shared/planner";
 import { pointsToBlocks } from "@shared/tempo";
 
-export type ImportItem = { probe: ProbeResult; lane: number; beat: number | null };
+// A dropped file on its way to the timeline: either waiting for its BPM to be typed
+// (`probe`), or with everything known already (`track`) and only waiting its turn behind one
+// that is. `beat` null means right after the file dropped before it.
+export type ImportItem = { lane: number; beat: number | null } & ({ probe: ProbeResult } | { track: PlannerTrack });
 
 export type ExportUi = { phase: "options" } | { phase: "running"; stage: string; pct: number } | { phase: "done"; result: ExportResult } | { phase: "error"; message: string };
 
@@ -15,6 +18,7 @@ export type State = {
 	past: PlannerDoc[];
 	future: PlannerDoc[];
 	rev: number; // bumps on every committed document change
+	cues: Record<string, Cue[]>; // Rekordbox cue points by source file; looked up, never saved
 	mediaRev: number; // bumps when a stretched file becomes ready or fails
 	progressRev: number; // bumps while stretch progress changes (repaint only)
 	selection: string[]; // clip and tempo-block ids
@@ -51,6 +55,7 @@ let state: State = {
 	past: [],
 	future: [],
 	rev: 0,
+	cues: {},
 	mediaRev: 0,
 	progressRev: 0,
 	selection: [],

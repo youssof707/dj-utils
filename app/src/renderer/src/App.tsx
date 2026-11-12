@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Session } from "@shared/planner";
-import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, nudgeSelection, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia } from "./planner/media";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
@@ -112,6 +112,8 @@ function shortcut(e: KeyboardEvent): string | null {
 	if (k === "s") return "split";
 	if (k === "c") return "cue";
 	if (k === "home") return "home";
+	if (k === "arrowleft") return "nudge-left";
+	if (k === "arrowright") return "nudge-right";
 	if (k === "escape") return "escape";
 	return null;
 }
@@ -133,16 +135,21 @@ function onKey(e: KeyboardEvent): void {
 	const action = shortcut(e);
 	if (!action) return;
 	e.preventDefault();
-	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out") return;
+	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right") return;
 	if (action === "toggle") engine.toggle();
 	else if (action === "cue") engine.cue();
+	else if (action === "nudge-left") nudgeSelection(-1);
+	else if (action === "nudge-right") nudgeSelection(1);
 	else if (action === "home") {
 		engine.seek(0);
 		store.set({ scrollX: 0 });
 	} else if (action === "escape") {
 		// Escape during a drag only cancels the drag (handled by the timeline).
 		const dragging = document.body.classList.contains("dragging-move") || document.body.classList.contains("dragging-trim");
-		if (!dragging) store.set({ menu: null, selection: [] });
+		// Otherwise it closes an open menu, or deletes the selected clips like Delete.
+		if (dragging) return;
+		if (store.get().menu) store.set({ menu: null });
+		else runAction("delete");
 	}
 	else {
 		lastKeyAction = action;
@@ -205,6 +212,7 @@ function start(): void {
 	// Dropping a file anywhere outside the lanes must not navigate the window to it.
 	window.addEventListener("dragover", (e) => e.preventDefault());
 	window.addEventListener("drop", (e) => e.preventDefault());
+	watchCues();
 	void window.api.loadSession().then((session) => {
 		if (session) {
 			store.load(session.doc, session.filePath, session.dirty);

@@ -129,8 +129,15 @@ describe("finalize and peaks", () => {
 		expect(Math.max(...left.subarray(0, SR))).toBeGreaterThan(0.97);
 		const peaks = computePeaks(out);
 		expect(peaks.length).toBe(Math.ceil((2 * SR) / 64) * 2);
-		// a 100 Hz tone is all kick band: both layers near full scale
-		expect(peaks[400]).toBeGreaterThan(240);
-		expect(peaks[401]).toBeGreaterThan(225);
+		// a 100 Hz tone is all kick band: both layers reach near full scale. A bucket is only a
+		// seventh of the tone's period, so look across one whole period of buckets.
+		let full = 0;
+		let low = 0;
+		for (let b = 200; b < 208; b++) {
+			full = Math.max(full, peaks[b * 2]);
+			low = Math.max(low, peaks[b * 2 + 1]);
+		}
+		expect(full).toBeGreaterThan(240);
+		expect(low).toBeGreaterThan(225);
 	});
 });

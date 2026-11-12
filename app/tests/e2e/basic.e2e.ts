@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
-import { TempoMap } from "../../src/shared/tempo";
+import { TempoMap, blocksToPoints } from "../../src/shared/tempo";
 import { frequency, onsets, readAll, writeClickTrack, writeTone } from "../signals";
 import { exportTo, importTrack, launch, shot, state, waitReady, type Harness } from "./harness";
 
@@ -197,36 +197,42 @@ describe("planner", () => {
 		expect(Math.max(...errs) / SR).toBeLessThan(0.003);
 	});
 
-	it("adds tempo points that change only the export", async () => {
+	it("adds tempo changes that change only the export", async () => {
 		const lane = (await h.page.getByTestId("tempo-lane").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const tempos = (): Promise<any[]> => state(h.page, "s => s.doc.tempos.map(t => ({ startBeat: t.startBeat, lengthBeat: t.lengthBeat, bpm: t.bpm }))");
+		// a new change starts at the tempo already playing there, with its BPM box ready to type in
 		await h.page.mouse.dblclick(lane.x + 16 * ppb, lane.y + 44);
-		await h.page.getByTestId("point-bpm").fill("128");
-		await h.page.getByTestId("point-bpm").press("Enter");
-		await h.page.getByTestId("point-bar").fill("5");
-		await h.page.getByTestId("point-bar").press("Enter");
-		await h.page.mouse.dblclick(lane.x + 48 * ppb, lane.y + 30);
-		await h.page.getByTestId("point-bpm").fill("150");
-		await h.page.getByTestId("point-bpm").press("Enter");
-		await h.page.getByTestId("point-bar").fill("13");
-		await h.page.getByTestId("point-bar").press("Enter");
-		const pts: any[] = await state(h.page, "s => s.doc.points.map(p => ({beat: p.beat, bpm: p.bpm})).sort((a,b) => a.beat-b.beat)");
-		expect(pts).toEqual([
+		expect(await tempos()).toEqual([{ startBeat: 16, lengthBeat: 4, bpm: 128 }]);
+		await expect.poll(() => h.page.evaluate(() => document.activeElement === document.querySelector('[data-testid="tempo-bpm"]'))).toBe(true);
+		await h.page.getByTestId("tempo-bpm").fill("150");
+		await h.page.getByTestId("tempo-bpm").press("Enter");
+		expect(await tempos()).toEqual([{ startBeat: 16, lengthBeat: 4, bpm: 150 }]);
+		// stretch the ramp out to 32 beats by its right edge
+		const block = h.page.getByTestId("tempo-block").first();
+		let bb = (await block.boundingBox())!;
+		await h.page.mouse.move(bb.x + bb.width - 2, bb.y + bb.height / 2);
+		await h.page.mouse.down();
+		await h.page.mouse.move(bb.x + bb.width - 2 + 28 * ppb, bb.y + bb.height / 2, { steps: 6 });
+		await h.page.mouse.up();
+		expect(await tempos()).toEqual([{ startBeat: 16, lengthBeat: 32, bpm: 150 }]);
+		await shot(h.page, "07-tempo");
+		// drag the whole change along and undo
+		bb = (await block.boundingBox())!;
+		await h.page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+		await h.page.mouse.down();
+		await h.page.mouse.move(bb.x + bb.width / 2 + 8 * ppb, bb.y + bb.height / 2 + 30, { steps: 5 });
+		await h.page.mouse.up();
+		expect(await tempos()).toEqual([{ startBeat: 24, lengthBeat: 32, bpm: 150 }]);
+		await h.page.keyboard.press("Meta+z");
+		expect(await tempos()).toEqual([{ startBeat: 16, lengthBeat: 32, bpm: 150 }]);
+		// playback is untouched: the editor always runs at the project tempo
+		expect(await state(h.page, "s => s.doc.bpm")).toBe(128);
+		const pts = blocksToPoints(await state<any[]>(h.page, "s => s.doc.tempos"), 128);
+		expect(pts.map((q) => ({ beat: q.beat, bpm: q.bpm }))).toEqual([
 			{ beat: 16, bpm: 128 },
 			{ beat: 48, bpm: 150 },
 		]);
-		await shot(h.page, "07-tempo");
-		// drag the second point with the mouse and undo
-		const pt = h.page.getByTestId("tempo-point").nth(1);
-		const pb = (await pt.boundingBox())!;
-		await h.page.mouse.move(pb.x + pb.width / 2, pb.y + pb.height / 2);
-		await h.page.mouse.down();
-		await h.page.mouse.move(pb.x + 60, pb.y + 30, { steps: 5 });
-		await h.page.mouse.up();
-		const moved: any[] = await state(h.page, "s => s.doc.points");
-		expect(moved.some((p) => p.bpm < 150)).toBe(true);
-		await h.page.keyboard.press("Meta+z");
-		expect(await state(h.page, "s => s.doc.points.some(p => p.bpm === 150 && p.beat === 48)")).toBe(true);
 
 		const cs = await clips();
 		const end = Math.max(...cs.map((c) => c.startBeat + c.lengthBeat));
@@ -308,7 +314,7 @@ describe("planner", () => {
 		await waitReady(h.page);
 		expect(await state(h.page, "s => s.doc.bpm")).toBe(100);
 		expect(await clips()).toEqual(before);
-		await state(h.page, "s => { window.planner.store.commit({ ...s.doc, points: [] }); return 0; }");
+		await state(h.page, "s => { window.planner.store.commit({ ...s.doc, tempos: [] }); return 0; }");
 		const out = path.join(h.workDir, "bpm100.wav");
 		await exportTo(h.page, out, true);
 		await h.page.getByTestId("export-done").waitFor({ timeout: 120000 });

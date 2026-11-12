@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
-import { blocksToPoints, bpmAt } from "@shared/tempo";
-import { addTempo, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, tempoPoints, toggleMute, toggleSolo, zoomAround } from "./actions";
+import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type Cue, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
+import { blocksToPoints, bpmAt, TempoMap } from "@shared/tempo";
+import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, tempoPoints, toggleMute, toggleSolo, zoomAround } from "./actions";
 import { engine } from "./engine";
 import { mediaFor, type Media } from "./media";
 import { store, useStore } from "./store";
@@ -9,13 +9,14 @@ import { store, useStore } from "./store";
 export const GUTTER = 52;
 
 // Below this zoom the beat lines are hidden, so snapping goes to whole bars.
-const BEAT_GRID_MIN_PX = 9;
 
 // Everything the user moves lands on whole beats (whole bars when zoomed out); holding Option moves freely.
+function snapStep(e: { altKey: boolean }): number {
+	return e.altKey ? 0 : gridStepBeats();
+}
 function snap(beat: number, e: { altKey: boolean }): number {
-	if (e.altKey) return beat;
-	const step = store.get().pxPerBeat < BEAT_GRID_MIN_PX ? 4 : 1;
-	return Math.round(beat / step) * step;
+	const step = snapStep(e);
+	return step ? Math.round(beat / step) * step : beat;
 }
 const EDGE = 8;
 
@@ -43,7 +44,9 @@ function Ruler({ width }: { width: number }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const pxPerBeat = useStore((s) => s.pxPerBeat);
 	const scrollX = useStore((s) => s.scrollX);
-	const bpm = useStore((s) => s.doc.bpm);
+	const doc = useStore((s) => s.doc);
+	// Times are where each bar is heard in the export, tempo changes included.
+	const map = useMemo(() => new TempoMap(tempoPoints(doc), doc.bpm), [doc]);
 
 	useLayoutEffect(() => {
 		const cv = ref.current;
@@ -73,10 +76,10 @@ function Ruler({ width }: { width: number }) {
 				g.fillStyle = "#c9cedb";
 				g.fillText(String(Math.floor(b / 4) + 1), x + 4, 3);
 				g.fillStyle = "#7d8496";
-				g.fillText(fmtTime((b * 60) / bpm), x + 4, 15);
+				g.fillText(fmtTime(map.secondsAtBeat(b)), x + 4, 15);
 			}
 		}
-	}, [width, pxPerBeat, scrollX, bpm]);
+	}, [width, pxPerBeat, scrollX, map]);
 
 	const onDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
@@ -120,14 +123,19 @@ function LaneGrid({ width, pxPerBeat, scrollX }: { width: number; pxPerBeat: num
 		cv.height = 1;
 		const g = cv.getContext("2d")!;
 		g.clearRect(0, 0, w, 1);
-		const major = gridStep(pxPerBeat, 28) * 4;
-		const step = gridStep(pxPerBeat, BEAT_GRID_MIN_PX);
+		// Every bar line looks the same, and every beat line looks the same and fainter. Beat
+		// lines show only when zoomed in far enough; bar lines thin out (evenly) only when
+		// they'd be closer than 3 px.
+		const showBeats = pxPerBeat >= BEAT_GRID_MIN_PX;
+		let barStep = 4;
+		while (barStep * pxPerBeat < 3) barStep *= 2;
+		const step = showBeats ? 1 : barStep;
 		const first = Math.floor(scrollX / pxPerBeat / step) * step;
 		const lineW = Math.max(1, Math.round(dpr));
 		for (let b = first; b * pxPerBeat - scrollX < width; b += step) {
 			const x = Math.round((b * pxPerBeat - scrollX) * dpr);
 			if (x < 0) continue;
-			g.fillStyle = b % major === 0 ? "#252933" : "#17191f";
+			g.fillStyle = b % 4 === 0 ? "#252933" : "#17191f";
 			g.fillRect(x, 0, lineW, 1);
 		}
 	}, [width, pxPerBeat, scrollX]);
@@ -252,9 +260,29 @@ function TempoEditor({ block }: { block: TempoBlock }) {
 
 // ---- clips --------------------------------------------------------------------------
 
-type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void };
+// Cue points that share a moment share one line.
+type CueMark = { beat: number; memory: boolean; letters: string[] };
+const SAME_CUE_SEC = 0.003;
 
-function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected, laneH, onDown }: ClipProps) {
+function cueMarks(cues: Cue[] | undefined, track: PlannerTrack | undefined): CueMark[] {
+	if (!cues || !track) return [];
+	const out: CueMark[] = [];
+	let lastSec = -Infinity;
+	for (const c of [...cues].sort((a, b) => a.sec - b.sec || a.kind - b.kind)) {
+		if (c.sec - lastSec > SAME_CUE_SEC) {
+			out.push({ beat: (c.sec * track.bpm) / 60, memory: false, letters: [] });
+			lastSec = c.sec;
+		}
+		const m = out[out.length - 1];
+		if (c.kind === 0) m.memory = true;
+		else if (c.kind <= 26) m.letters.push(String.fromCharCode(64 + c.kind));
+	}
+	return out;
+}
+
+type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void };
+
+function ClipView({ clip, track, media, cues, pxPerBeat, scrollX, width, bpm, selected, laneH, onDown }: ClipProps) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const left = clip.startBeat * pxPerBeat - scrollX;
 	const w = Math.max(2, clip.lengthBeat * pxPerBeat);
@@ -263,16 +291,12 @@ function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected
 	const visible = visR > visL;
 	const peaks = media?.state === "ready" ? media.peaks : null;
 	const hue = trackHue(track?.id ?? clip.trackId);
-	// Each layer is scaled so its loudest point in the whole track fills the clip's height.
-	const [fullMax, lowMax] = useMemo(() => {
-		if (!peaks) return [255, 255];
-		let f = 1;
+	// Scaled so the loudest point in the whole track fills the clip's height.
+	const lowMax = useMemo(() => {
+		if (!peaks) return 255;
 		let l = 1;
-		for (let i = 0; i < peaks.length; i += 2) {
-			if (peaks[i] > f) f = peaks[i];
-			if (peaks[i + 1] > l) l = peaks[i + 1];
-		}
-		return [f, l];
+		for (let i = 1; i < peaks.length; i += 2) if (peaks[i] > l) l = peaks[i];
+		return l;
 	}, [peaks]);
 
 	useLayoutEffect(() => {
@@ -292,33 +316,23 @@ function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected
 		const mid = cv.height / 2;
 		const buckets = peaks.length >> 1;
 		const cols = cv.width;
-		const pk = new Float32Array(cols);
 		const lo = new Float32Array(cols);
 		for (let x = 0; x < cols; x++) {
 			const b0 = Math.floor(startBucket + x * bucketsPerPx);
 			const b1 = Math.max(b0 + 1, Math.floor(startBucket + (x + 1) * bucketsPerPx));
-			let m = 0;
 			let l = 0;
-			for (let b = Math.max(0, b0); b < b1 && b < buckets; b++) {
-				if (peaks[b * 2] > m) m = peaks[b * 2];
-				if (peaks[b * 2 + 1] > l) l = peaks[b * 2 + 1];
-			}
-			pk[x] = m / fullMax;
+			for (let b = Math.max(0, b0); b < b1 && b < buckets; b++) if (peaks[b * 2 + 1] > l) l = peaks[b * 2 + 1];
 			lo[x] = l / lowMax;
 		}
-		// Full signal as a dim layer behind; the kick band bright in front, so each kick is a
-		// sharp spike whose left edge is the hit.
-		g.fillStyle = `hsl(${hue} 45% 60% / 0.14)`;
-		for (let x = 0; x < cols; x++) {
-			const hh = Math.max(0.5, Math.min(1, pk[x]) * mid);
-			g.fillRect(x, mid - hh, 1, hh * 2);
-		}
+		// The kick band only, so each kick is a sharp spike whose left edge is the hit.
 		g.fillStyle = "rgba(255, 255, 255, 0.85)";
 		for (let x = 0; x < cols; x++) {
 			const hh = Math.min(1, lo[x]) * mid;
 			if (hh > 0.25) g.fillRect(x, mid - hh, 1, hh * 2);
 		}
-	}, [visible, visL, visR, left, pxPerBeat, peaks, fullMax, lowMax, clip.offsetBeat, bpm, hue, laneH]);
+	}, [visible, visL, visR, left, pxPerBeat, peaks, lowMax, clip.offsetBeat, bpm, laneH]);
+
+	const marks = useMemo(() => cueMarks(cues, track), [cues, track]);
 
 	if (!visible) return null;
 	const status = !track ? "error" : (media?.state ?? "working");
@@ -334,8 +348,6 @@ function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected
 			onPointerDown={(e) => onDown(e, clip)}
 			onContextMenu={(e) => {
 				e.preventDefault();
-				// Plain right-click deletes (handled in Lanes); Option+right-click opens the menu.
-				if (!e.altKey) return;
 				if (!store.get().selection.includes(clip.id)) store.set({ selection: [clip.id] });
 				store.set({ menu: { x: e.clientX, y: e.clientY, clipId: clip.id } });
 			}}
@@ -360,6 +372,18 @@ function ClipView({ clip, track, media, pxPerBeat, scrollX, width, bpm, selected
 					{media.message}
 				</div>
 			)}
+			{marks.map((m) => {
+				// Only the cues inside the part of the track this clip shows, and on screen.
+				const x = (m.beat - clip.offsetBeat) * pxPerBeat;
+				if (m.beat < clip.offsetBeat - 1e-6 || m.beat >= clip.offsetBeat + clip.lengthBeat || left + x < -12 || left + x > width + 12) return null;
+				return (
+					<div key={m.beat} className={`cue${m.memory ? " memory" : ""}${m.letters.length ? " hot" : ""}`} style={{ left: Math.round(left + x) - left }} data-testid="cue" data-cue={`${m.memory ? "M" : ""}${m.letters.join("")}`}>
+						{m.letters.map((l) => (
+							<span key={l}>{l}</span>
+						))}
+					</div>
+				);
+			})}
 			<div className="trim left" />
 			<div className="trim right" />
 		</div>
@@ -377,6 +401,7 @@ function Lanes({ width }: { width: number }) {
 	const pxPerBeat = useStore((s) => s.pxPerBeat);
 	const scrollX = useStore((s) => s.scrollX);
 	const selection = useStore((s) => s.selection);
+	const cues = useStore((s) => s.cues);
 	useStore((s) => s.mediaRev);
 	useStore((s) => s.progressRev);
 	const laneH = useStore((s) => s.viewportH);
@@ -400,60 +425,7 @@ function Lanes({ width }: { width: number }) {
 	const laneAt = (clientY: number): number => Math.max(0, rowAt(clientY));
 	const itemsIn = (doc: PlannerDoc, row: number): Item[] => (row === TEMPO_ROW ? doc.tempos.map((t) => ({ ...t, lane: TEMPO_ROW })) : doc.clips.filter((c) => c.lane === row));
 
-	// Right-click deletes the clip or tempo change under the pointer; right-drag deletes everything it crosses.
-	const itemAt = (clientX: number, clientY: number): string | null => {
-		const r = ref.current!.getBoundingClientRect();
-		if (clientY < r.top || clientY >= r.bottom) return null;
-		const s = store.get();
-		const beat = (clientX - r.left + s.scrollX) / s.pxPerBeat;
-		let hit: Item | null = null;
-		// Items are drawn at least 2 px wide, so short ones are hit over that width too.
-		for (const c of itemsIn(s.doc, rowAt(clientY))) if (beat >= c.startBeat && beat < c.startBeat + Math.max(c.lengthBeat, 2 / s.pxPerBeat)) hit = c;
-		return hit?.id ?? null;
-	};
-	const onRightDown = (e: ReactPointerEvent): void => {
-		if (e.altKey) return;
-		e.preventDefault();
-		e.stopPropagation();
-		store.set({ menu: null });
-		store.beginDrag();
-		let lx = e.clientX;
-		let ly = e.clientY;
-		const erase = (x: number, y: number): void => {
-			const id = itemAt(x, y);
-			if (!id) return;
-			const s = store.get();
-			store.transient({ ...s.doc, clips: s.doc.clips.filter((c) => c.id !== id), tempos: s.doc.tempos.filter((t) => t.id !== id) });
-			if (s.selection.includes(id)) store.set({ selection: s.selection.filter((other) => other !== id) });
-		};
-		erase(lx, ly);
-		const move = (ev: PointerEvent): void => {
-			if ((ev.buttons & 2) === 0) return finish();
-			// Walk the path in small steps so a fast swipe doesn't skip short items.
-			const steps = Math.max(1, Math.ceil(Math.hypot(ev.clientX - lx, ev.clientY - ly) / 3));
-			for (let i = 1; i <= steps; i++) erase(lx + ((ev.clientX - lx) * i) / steps, ly + ((ev.clientY - ly) * i) / steps);
-			lx = ev.clientX;
-			ly = ev.clientY;
-		};
-		let done = false;
-		const finish = (): void => {
-			if (done) return;
-			done = true;
-			window.removeEventListener("pointermove", move);
-			window.removeEventListener("pointerup", up);
-			window.removeEventListener("blur", finish);
-			store.endDrag();
-		};
-		const up = (ev: PointerEvent): void => {
-			if (ev.button === 2) finish();
-		};
-		window.addEventListener("pointermove", move);
-		window.addEventListener("pointerup", up);
-		window.addEventListener("blur", finish);
-	};
-
 	const onItemDown = (e: ReactPointerEvent, item: Item): void => {
-		if (e.button === 2) return onRightDown(e);
 		if (e.button !== 0) return;
 		e.stopPropagation();
 		store.set({ menu: null });
@@ -482,6 +454,10 @@ function Lanes({ width }: { width: number }) {
 		const minStart = Math.min(...group.map((c) => c.startBeat));
 		const minLane = Math.min(...groupClips.map((c) => c.lane));
 		const maxLane = Math.max(...groupClips.map((c) => c.lane));
+		// A clip from a Rekordbox track is moved by its bar line, not its left edge, so its
+		// beats stay on the grid however the clip has been trimmed or split.
+		const bar = zone === "move" && clip && track ? firstBarBeat(track) : null;
+		const anchor = clip && bar !== null ? clip.startBeat - clip.offsetBeat + bar : item.startBeat;
 		let moved = false;
 		let lastEvent: PointerEvent | null = null;
 		let scrollTimer: ReturnType<typeof setInterval> | undefined;
@@ -490,9 +466,13 @@ function Lanes({ width }: { width: number }) {
 			let d = beatAt(ev.clientX) - grabBeat;
 			// Snap the edge being moved (the grabbed item's start, or the trimmed edge) to a beat.
 			if (zone === "right") d = snap(item.startBeat + item.lengthBeat + d, ev) - (item.startBeat + item.lengthBeat);
-			else d = snap(item.startBeat + d, ev) - item.startBeat;
+			else d = snap(anchor + d, ev) - anchor;
 			if (zone === "move") {
-				d = Math.max(d, -minStart);
+				if (d < -minStart) {
+					// Against the start of the timeline: the nearest grid position that still fits.
+					const step = bar !== null ? snapStep(ev) : 0;
+					d = step ? Math.ceil((anchor - minStart) / step - 1e-9) * step - anchor : -minStart;
+				}
 				// Clips can change lanes when a clip is grabbed; tempo changes stay in their lane.
 				const dl = isTempo || groupClips.length === 0 ? 0 : Math.min(LANES - 1 - maxLane, Math.max(-minLane, laneAt(ev.clientY) - item.lane));
 				store.transient({
@@ -566,7 +546,6 @@ function Lanes({ width }: { width: number }) {
 
 	// Click on empty space moves the playhead; dragging draws a box that selects clips and tempo changes.
 	const onBackgroundDown = (e: ReactPointerEvent): void => {
-		if (e.button === 2) return onRightDown(e);
 		if (e.button !== 0) return;
 		store.set({ menu: null });
 		const el = ref.current!;
@@ -631,9 +610,7 @@ function Lanes({ width }: { width: number }) {
 			ref={ref}
 			data-testid="lanes"
 			onPointerDown={onBackgroundDown}
-			onContextMenu={(e) => {
-				if (!e.altKey) e.preventDefault();
-			}}
+			onContextMenu={(e) => e.preventDefault()}
 			onDragOver={(e) => {
 				e.preventDefault();
 				e.dataTransfer.dropEffect = "copy";
@@ -667,7 +644,7 @@ function Lanes({ width }: { width: number }) {
 							.filter((c) => c.lane === lane)
 							.map((c) => {
 								const t = tracks.get(c.trackId);
-								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} laneH={laneH} onDown={onClipDown} />;
+								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} cues={t && cues[t.sourcePath]} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} laneH={laneH} onDown={onClipDown} />;
 							})}
 					</div>
 				))}

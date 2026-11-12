@@ -45,6 +45,9 @@ function parseWav(bytes: Uint8Array): AudioBuffer {
 		let len = dv.getUint32(pos + 4, true);
 		if (id === "fmt ") {
 			format = dv.getUint16(pos + 8, true);
+			// The decoder writes the extended header for some sources (AAC files); the real
+			// format code is then further in.
+			if (format === 0xfffe && len >= 26) format = dv.getUint16(pos + 8 + 24, true);
 			channels = dv.getUint16(pos + 10, true);
 			bits = dv.getUint16(pos + 22, true);
 		} else if (id === "data") {
