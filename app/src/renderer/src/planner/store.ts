@@ -1,7 +1,8 @@
-// Planner state: one store, immutable updates, undo history over the document only.
+// Planner state: one store, immutable updates, undo history over the document, with the
+// changes made to Rekordbox's cues in between.
 
 import { useSyncExternalStore } from "react";
-import { emptyDoc, LANES, type Cue, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type SetInfo, type Settings } from "@shared/planner";
+import { emptyDoc, LANES, type Cue, type CueRow, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type SetInfo, type Settings } from "@shared/planner";
 import type { EditSection } from "@shared/trackEdit";
 import { normalizeDoc } from "@shared/renderings";
 
@@ -13,7 +14,18 @@ export type ImportItem = { lane: number; beat: number | null; edit?: boolean } &
 
 export type ExportUi = { phase: "options" } | { phase: "running"; stage: string; pct: number } | { phase: "done"; result: ExportResult } | { phase: "error"; message: string };
 
-export type MenuUi = { x: number; y: number; clipId: string } | null;
+// A place on a track that was right-clicked: the file, the beat line nearest to it (in
+// seconds into the file), and the cues under the pointer. `edit`: it was in the track editor.
+export type CueSpot = { path: string; sec: number; hits: Cue[]; edit: boolean };
+
+// The right-click menu: for a clip, for a place on a track, or on the timeline both.
+export type MenuUi = { x: number; y: number; clipId?: string; cue?: CueSpot } | null;
+
+// A change to a track's cues in Rekordbox, as a step of undo history: the rows that were
+// added and the rows that were taken out. It sits in the history between the document's
+// states, and going over it puts the cues back in Rekordbox (or takes them out again).
+export type CueStep = { cue: true; path: string; added: CueRow[]; removed: CueRow[] };
+export const isCueStep = (step: object): step is CueStep => "cue" in step;
 
 // A lane of the track editor: the result ("out"), or with two tracks open the lane a track
 // is laid out whole in, to take pieces from (0 the first track, 1 the second).
@@ -26,8 +38,8 @@ export type EditSnap = { track: PlannerTrack; second: PlannerTrack | null; secti
 
 // The editor at the bottom of the window. The result plays at the first track's tempo.
 export type TrackEditUi = EditSnap & {
-	past: EditSnap[];
-	future: EditSnap[];
+	past: (EditSnap | CueStep)[];
+	future: (EditSnap | CueStep)[];
 	lane: EditLane; // the lane clicked last: the cursor, the selection, cuts and play are its
 	selection: string[]; // ids of sections of the result, or of pieces of a track's lane
 	cursorBeat: number; // where a cut goes and where the preview starts, in beats along the ruler
@@ -42,10 +54,12 @@ export type TrackEditUi = EditSnap & {
 
 export type State = {
 	doc: PlannerDoc;
-	past: PlannerDoc[];
-	future: PlannerDoc[];
+	past: (PlannerDoc | CueStep)[];
+	future: (PlannerDoc | CueStep)[];
 	rev: number; // bumps on every committed document change
 	cues: Record<string, Cue[]>; // Rekordbox cue points by source file; looked up, never saved
+	cueEdit: Record<string, boolean>; // whether the file's cues can be changed (it is in Rekordbox)
+	cueWait: CueSpot | null; // "Add hot cue" was chosen here: waiting for its letter to be pressed
 	mediaRev: number; // bumps when a stretched file becomes ready or fails
 	progressRev: number; // bumps while stretch progress changes (repaint only)
 	selection: string[]; // clip and tempo-block ids
@@ -60,6 +74,7 @@ export type State = {
 	soloLane: number | null;
 	preSolo: boolean[] | null; // mutes to restore when the solo is lifted
 	metronome: boolean; // playback only; never saved with the set
+	showCues: boolean; // cue points drawn on the timeline's clips; for this session only
 	screen: "home" | "editor" | "settings"; // the list of sets, one set open, or the settings
 	settings: Settings | null; // null until first read
 	trackEdit: TrackEditUi | null;
@@ -79,8 +94,13 @@ export type State = {
 	menu: MenuUi;
 	toast: string | null;
 	libraryOpen: boolean;
+	libraryPlaylist: string | null; // the Rekordbox playlist the library shows; null for all tracks
+	librarySort: LibrarySort;
 	loaded: boolean;
 };
+
+// What the library is ordered by; `down` is largest first.
+export type LibrarySort = { by: "number" | "key" | "bpm"; down: boolean };
 
 const HISTORY = 300;
 
@@ -90,6 +110,8 @@ let state: State = {
 	future: [],
 	rev: 0,
 	cues: {},
+	cueEdit: {},
+	cueWait: null,
 	mediaRev: 0,
 	progressRev: 0,
 	selection: [],
@@ -104,6 +126,7 @@ let state: State = {
 	soloLane: null,
 	preSolo: null,
 	metronome: false,
+	showCues: true,
 	screen: "home",
 	settings: null,
 	trackEdit: null,
@@ -123,11 +146,20 @@ let state: State = {
 	menu: null,
 	toast: null,
 	libraryOpen: false,
+	libraryPlaylist: null,
+	librarySort: { by: "number", down: false },
 	loaded: false,
 };
 
 const listeners = new Set<() => void>();
 let dragBase: PlannerDoc | null = null;
+
+// Makes a cue step happen in Rekordbox, or with `back` undoes it (set by ./cues).
+let cueRunner: (step: CueStep, back: boolean) => void = () => {};
+export function setCueRunner(run: (step: CueStep, back: boolean) => void): void {
+	cueRunner = run;
+}
+export const runCueStep = (step: CueStep, back: boolean): void => cueRunner(step, back);
 
 function prune(s: State): State {
 	const ids = new Set([...s.doc.clips.map((c) => c.id), ...s.doc.tempos.map((t) => t.id)]);
@@ -168,20 +200,35 @@ export const store = {
 		if (dragBase) store.set({ doc: dragBase });
 		dragBase = null;
 	},
+	// A change to a track's cues that has been made in Rekordbox: one undo step.
+	pushCueStep(step: CueStep): void {
+		store.set({ past: [...state.past, step].slice(-HISTORY), future: [] });
+	},
 	undo(): void {
 		if (dragBase || state.past.length === 0) return;
 		const doc = state.past[state.past.length - 1];
+		if (isCueStep(doc)) {
+			// The document is as it was; only Rekordbox's cues go back.
+			store.set({ past: state.past.slice(0, -1), future: [doc, ...state.future] });
+			runCueStep(doc, true);
+			return;
+		}
 		store.set(prune({ ...state, doc, past: state.past.slice(0, -1), future: [state.doc, ...state.future], rev: state.rev + 1 }));
 	},
 	redo(): void {
 		if (dragBase || state.future.length === 0) return;
 		const doc = state.future[0];
+		if (isCueStep(doc)) {
+			store.set({ past: [...state.past, doc], future: state.future.slice(1) });
+			runCueStep(doc, false);
+			return;
+		}
 		store.set(prune({ ...state, doc, past: [...state.past, state.doc], future: state.future.slice(1), rev: state.rev + 1 }));
 	},
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, trackEdit: null, editFocus: false });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, trackEdit: null, editFocus: false });
 	},
 };
 

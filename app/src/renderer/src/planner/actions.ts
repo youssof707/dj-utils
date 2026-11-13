@@ -169,9 +169,9 @@ export function refreshCues(again: boolean): void {
 				return;
 			}
 			try {
-				const cues = await window.api.cues(p);
-				const had = store.get().cues[p];
-				if (JSON.stringify(had ?? []) !== JSON.stringify(cues)) store.set({ cues: { ...store.get().cues, [p]: cues } });
+				const { cues, canEdit } = await window.api.cues(p);
+				const s = store.get();
+				if (JSON.stringify(s.cues[p] ?? []) !== JSON.stringify(cues) || (s.cueEdit[p] ?? false) !== canEdit) store.set({ cues: { ...s.cues, [p]: cues }, cueEdit: { ...s.cueEdit, [p]: canEdit } });
 			} catch {
 				cuesAsked.delete(p); // asked again next time round
 			}

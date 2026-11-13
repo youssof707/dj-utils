@@ -1,11 +1,13 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type Cue, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
+import { cueMarks } from "@shared/cues";
 import { fadeGain, fitFades } from "@shared/fades";
 import { blocksToPoints, bpmAt } from "@shared/tempo";
 import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
+import { cueSpot } from "./cues";
 import { engine } from "./engine";
 import { clipTempoProgress, mediaFor, type Media } from "./media";
-import { store, useStore } from "./store";
+import { newId, store, useStore } from "./store";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
 export const GUTTER = 52;
@@ -260,26 +262,6 @@ function TempoEditor({ block }: { block: TempoBlock }) {
 
 // ---- clips --------------------------------------------------------------------------
 
-// Cue points that share a moment share one line.
-export type CueMark = { beat: number; memory: boolean; letters: string[] };
-const SAME_CUE_SEC = 0.003;
-
-export function cueMarks(cues: Cue[] | undefined, track: PlannerTrack | undefined): CueMark[] {
-	if (!cues || !track) return [];
-	const out: CueMark[] = [];
-	let lastSec = -Infinity;
-	for (const c of [...cues].sort((a, b) => a.sec - b.sec || a.kind - b.kind)) {
-		if (c.sec - lastSec > SAME_CUE_SEC) {
-			out.push({ beat: (c.sec * track.bpm) / 60, memory: false, letters: [] });
-			lastSec = c.sec;
-		}
-		const m = out[out.length - 1];
-		if (c.kind === 0) m.memory = true;
-		else if (c.kind <= 26) m.letters.push(String.fromCharCode(64 + c.kind));
-	}
-	return out;
-}
-
 type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; tempoPct: number | null; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void; onFade: (e: ReactPointerEvent, clip: Clip, side: FadeSide) => void };
 
 type FadeSide = "in" | "out";
@@ -328,6 +310,7 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 	}, [visible, visL, visR, left, pxPerBeat, peaks, lowMax, clip.offsetBeat, clip.lengthBeat, clip.lowCut, fadeIn, fadeOut, bpm, laneH]);
 
 	const marks = useMemo(() => cueMarks(cues, track), [cues, track]);
+	const showCues = useStore((s) => s.showCues);
 
 	if (!visible) return null;
 	const status = !track ? "error" : (media?.state ?? "working");
@@ -349,7 +332,10 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 				onContextMenu={(e) => {
 					e.preventDefault();
 					if (!store.get().selection.includes(clip.id)) store.set({ selection: [clip.id] });
-					store.set({ menu: { x: e.clientX, y: e.clientY, clipId: clip.id } });
+					// The place in the track under the pointer, for the menu's cue items.
+					const beat = clip.offsetBeat + (e.clientX - e.currentTarget.getBoundingClientRect().left) / pxPerBeat;
+					const cue = track && cueSpot(track, marks, beat, pxPerBeat, false, { from: clip.offsetBeat, to: clip.offsetBeat + clip.lengthBeat });
+					store.set({ menu: { x: e.clientX, y: e.clientY, clipId: clip.id, cue } });
 				}}
 			>
 				<canvas ref={ref} className="wave" style={{ left: visL - left, width: Math.ceil(visR - visL) }} />
@@ -379,7 +365,7 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 						Stretching to the new tempo… {Math.round(tempoPct * 100)}%
 					</div>
 				)}
-				{marks.map((m) => {
+				{showCues && marks.map((m) => {
 					// Only the cues inside the part of the track this clip shows, and on screen.
 					const x = (m.beat - clip.offsetBeat) * pxPerBeat;
 					if (m.beat < clip.offsetBeat - 1e-6 || m.beat >= clip.offsetBeat + clip.lengthBeat || left + x < -12 || left + x > width + 12) return null;
@@ -478,12 +464,15 @@ function Lanes({ width }: { width: number }) {
 		const zone = e.clientX - rect.left < edge ? "left" : rect.right - e.clientX < edge ? "right" : "move";
 		const s0 = store.get();
 		const wasSelected = s0.selection.includes(item.id);
-		if (e.shiftKey) store.set({ selection: wasSelected ? s0.selection.filter((id) => id !== item.id) : [...s0.selection, item.id] });
-		else if (!wasSelected || zone !== "move") store.set({ selection: [item.id] });
+		// Shift on a clip's middle is a shift-click (add to or take out of the selection) when
+		// the mouse is let go without moving, and a copy when it is dragged; so the selection
+		// is only changed once it is known which.
+		const toggle = (): void => store.set({ selection: wasSelected ? s0.selection.filter((id) => id !== item.id) : [...s0.selection, item.id] });
+		if (e.shiftKey && zone !== "move") toggle();
+		else if (!e.shiftKey && (!wasSelected || zone !== "move")) store.set({ selection: [item.id] });
 
 		const base = store.get().doc;
-		const moving = new Set(zone === "move" ? store.get().selection : [item.id]);
-		if (zone === "move" && !moving.has(item.id)) return; // shift-click that deselected
+		const moving = new Set(zone !== "move" ? [item.id] : wasSelected ? s0.selection : [item.id]);
 		const isTempo = item.lane === TEMPO_ROW;
 		const clip = isTempo ? null : (base.clips.find((c) => c.id === item.id) ?? null);
 		const grabBeat = beatAt(e.clientX);
@@ -502,6 +491,10 @@ function Lanes({ width }: { width: number }) {
 		const bar = zone === "move" && clip && track ? firstBarBeat(track) : null;
 		const anchor = clip && bar !== null ? clip.startBeat - clip.offsetBeat + bar : item.startBeat;
 		let moved = false;
+		// Shift held while dragging the middle: the originals stay and copies are dragged.
+		// The copies keep their ids for the whole drag, as Shift can be pressed or let go.
+		let copying = false;
+		const copyIds = new Map(group.map((c) => [c.id, newId(base.clips.includes(c as Clip) ? "c" : "b")]));
 		let lastEvent: PointerEvent | null = null;
 		let scrollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -518,11 +511,23 @@ function Lanes({ width }: { width: number }) {
 				}
 				// Clips can change lanes when a clip is grabbed; tempo changes stay in their lane.
 				const dl = isTempo || groupClips.length === 0 ? 0 : Math.min(LANES - 1 - maxLane, Math.max(-minLane, laneAt(ev.clientY) - item.lane));
-				store.transient({
-					...base,
-					clips: base.clips.map((c) => (moving.has(c.id) ? { ...c, startBeat: c.startBeat + d, lane: c.lane + dl } : c)),
-					tempos: base.tempos.map((t) => (moving.has(t.id) ? { ...t, startBeat: t.startBeat + d } : t)),
-				});
+				copying = ev.shiftKey;
+				document.body.classList.toggle("dragging-copy", copying);
+				const shift = <T extends Clip | TempoBlock>(c: T): T => ({ ...c, startBeat: c.startBeat + d, ...("lane" in c ? { lane: c.lane + dl } : {}) });
+				if (copying) {
+					const copy = <T extends Clip | TempoBlock>(c: T): T => ({ ...shift(c), id: copyIds.get(c.id)! });
+					store.transient({
+						...base,
+						clips: [...base.clips, ...base.clips.filter((c) => moving.has(c.id)).map(copy)],
+						tempos: [...base.tempos, ...base.tempos.filter((t) => moving.has(t.id)).map(copy)],
+					});
+				} else {
+					store.transient({
+						...base,
+						clips: base.clips.map((c) => (moving.has(c.id) ? shift(c) : c)),
+						tempos: base.tempos.map((t) => (moving.has(t.id) ? shift(t) : t)),
+					});
+				}
 			} else if (zone === "left") {
 				d = Math.min(item.lengthBeat - MIN_CLIP_BEATS, Math.max(d, -offset, -item.startBeat));
 				if (isTempo) store.transient({ ...base, tempos: base.tempos.map((t) => (t.id === item.id ? { ...t, startBeat: t.startBeat + d, lengthBeat: t.lengthBeat - d } : t)) });
@@ -554,6 +559,7 @@ function Lanes({ width }: { width: number }) {
 			if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
 			if (!moved) {
 				moved = true;
+				if (zone === "move") store.set({ selection: [...moving] });
 				store.beginDrag();
 				document.body.classList.add(zone === "move" ? "dragging-move" : "dragging-trim");
 				scrollTimer = setInterval(autoScroll, 30);
@@ -566,15 +572,30 @@ function Lanes({ width }: { width: number }) {
 			window.removeEventListener("pointerup", up);
 			window.removeEventListener("keydown", key, true);
 			clearInterval(scrollTimer);
-			document.body.classList.remove("dragging-move", "dragging-trim");
+			document.body.classList.remove("dragging-move", "dragging-trim", "dragging-copy");
+			window.removeEventListener("keydown", shiftKey);
+			window.removeEventListener("keyup", shiftKey);
 			if (moved) {
 				if (cancel) store.cancelDrag();
-				else store.endDrag();
-			} else if (!e.shiftKey && zone === "move") {
-				store.set({ selection: [item.id] });
+				else {
+					store.endDrag();
+					if (copying) store.set({ selection: [...moving].map((id) => copyIds.get(id)!) });
+				}
+			} else if (zone === "move") {
+				if (e.shiftKey) toggle();
+				else store.set({ selection: [item.id] });
 			}
 		};
 		const up = (): void => finish(false);
+		// Pressing or letting go of Shift mid-drag switches between moving and copying
+		// without waiting for the mouse to move.
+		const shiftKey = (ev: KeyboardEvent): void => {
+			if (ev.key !== "Shift" || !moved || zone !== "move" || !lastEvent) return;
+			lastEvent = new PointerEvent("pointermove", { clientX: lastEvent.clientX, clientY: lastEvent.clientY, shiftKey: ev.type === "keydown", altKey: lastEvent.altKey });
+			apply(lastEvent);
+		};
+		window.addEventListener("keydown", shiftKey);
+		window.addEventListener("keyup", shiftKey);
 		const key = (ev: KeyboardEvent): void => {
 			if (ev.key === "Escape") {
 				ev.stopPropagation();

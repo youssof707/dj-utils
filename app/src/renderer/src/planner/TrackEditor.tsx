@@ -3,15 +3,17 @@
 // opened next to it there are three lanes: each track laid out whole, to cut pieces from, and
 // under them the edit those pieces are put together in.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { PEAK_BUCKET, SAMPLE_RATE } from "@shared/planner";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { cueMarks, type CueMark } from "@shared/cues";
+import { PEAK_BUCKET, SAMPLE_RATE, trackBeats } from "@shared/planner";
 import { barPhase, insertSections, leadBeat, place, slideSections, srcOf, type EditSection, type Placed } from "@shared/trackEdit";
+import { cueSpot } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
 import { openFileInEditor } from "./actions";
 import { mediaFor } from "./media";
 import { fmtLength } from "./Panels";
 import { store, useStore, type EditLane, type TrackEditUi } from "./store";
-import { cueMarks, LaneGrid, trackHue, type CueMark } from "./Timeline";
+import { LaneGrid, trackHue } from "./Timeline";
 import { closeTrackEdit, editAddSelected, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editInsert, editMove, editPieces, editPx, editRedo, editRemoveTrack, editResize, editScroll, editSectionsOf, editSelect, editSetCursor, editSlide, editStep, editTotal, editUndo, editZoom, exportTrackEdit, laneOffset, laneTrack } from "./trackEdit";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
@@ -391,6 +393,23 @@ function Editor({ e }: { e: TrackEditUi }) {
 		window.addEventListener("keydown", key, true);
 	};
 
+	// A right-click on a track opens the menu for the cues there, and for adding one on the
+	// nearest beat line of that track. `beat` is in beats into the track.
+	const cueMenu = (ev: ReactMouseEvent, so: Source | undefined, beat: number, within?: { from: number; to: number }): void => {
+		ev.preventDefault();
+		if (!so || beat < 0 || beat > trackBeats(so.track)) return;
+		store.set({ menu: { x: ev.clientX, y: ev.clientY, cue: cueSpot(so.track, so.marks, beat, view.pxPerBeat, true, within) } });
+	};
+	const onSourceMenu = (so: Source) => (ev: ReactMouseEvent): void => cueMenu(ev, so, beatAt(ev.clientX) - so.off);
+	// On the edit, the place is in whichever stretch of a track is under the pointer.
+	const onOutMenu = (ev: ReactMouseEvent): void => {
+		const at = beatAt(ev.clientX);
+		const p = placed.find((q) => at >= q.outBeat && at < q.outBeat + q.lengthBeat);
+		if (p) cueMenu(ev, sources[srcOf(p.section)] ?? sources[0], p.section.startBeat + (at - p.outBeat), { from: p.section.startBeat, to: p.section.startBeat + p.lengthBeat });
+		else if (ownLead && at >= 0 && at < lead) cueMenu(ev, sources[0], at, { from: 0, to: lead });
+		else ev.preventDefault();
+	};
+
 	// The cursor and the preview's line, on the lane the keys act on.
 	const marksOn = (lane: EditLane) =>
 		e.lane === lane && (
@@ -520,7 +539,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 				<div className="edit-lanes" ref={lanesRef}>
 					{multi &&
 						sources.map((so) => (
-							<div key={so.i} className={`edit-row source${e.lane === so.i ? " active" : ""}`} data-testid={`edit-source-${so.i}`} onPointerDown={onSourceDown(so)} onDoubleClick={editAddSelected}>
+							<div key={so.i} className={`edit-row source${e.lane === so.i ? " active" : ""}`} data-testid={`edit-source-${so.i}`} onPointerDown={onSourceDown(so)} onContextMenu={onSourceMenu(so)} onDoubleClick={editAddSelected}>
 								{grid}
 								{so.lead > 0 && <Block className="edit-section lead" testId="edit-piece-lead" outBeat={so.off} lengthBeat={so.lead} startBeat={0} view={view} peaks={so.peaks} maxes={so.maxes} marks={so.marks} hue={so.hue} projectBpm={doc.bpm} />}
 								{so.pieces.map((p) => (
@@ -550,7 +569,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 								{marksOn(so.i)}
 							</div>
 						))}
-					<div className={`edit-row out${onEdit ? " active" : ""}`} data-testid="edit-row" ref={outRef} onPointerDown={onDown}>
+					<div className={`edit-row out${onEdit ? " active" : ""}`} data-testid="edit-row" ref={outRef} onPointerDown={onDown} onContextMenu={onOutMenu}>
 						{grid}
 						{ownLead && <Block className="edit-section lead" testId="edit-lead" outBeat={0} lengthBeat={lead} startBeat={0} view={view} peaks={peaks0} maxes={maxes0} marks={marks0} hue={hues[0]} projectBpm={doc.bpm} />}
 						{shown.map((p, i) => {

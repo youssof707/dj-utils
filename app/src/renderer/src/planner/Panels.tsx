@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { Track } from "@shared/types";
+import { cueName, sameMoment } from "@shared/cues";
 import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat } from "@shared/tempo";
-import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
+import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, toggleMetronome, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
+import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
@@ -10,8 +11,8 @@ import { openTrackEdit } from "./trackEdit";
 
 function fmtClock(sec: number): string {
 	const m = Math.floor(sec / 60);
-	const s = sec - m * 60;
-	return `${m}:${s.toFixed(1).padStart(4, "0")}`;
+	const s = Math.floor(sec - m * 60);
+	return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export function fmtLength(seconds: number): string {
@@ -57,10 +58,12 @@ export function NameEdit({ name, testId, placeholder, onDone }: { name: string; 
 // ---- top bar ------------------------------------------------------------------------
 
 function Position() {
-	const ref = useRef<HTMLDivElement>(null);
+	const barRef = useRef<HTMLSpanElement>(null);
+	const clockRef = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
 		let raf = 0;
-		let last = "";
+		let lastBar = "";
+		let lastClock = "";
 		// The time is where the playhead is heard, tempo changes included.
 		let mapDoc: PlannerDoc | null = null;
 		let map: TempoMap | null = null;
@@ -72,18 +75,27 @@ function Position() {
 				mapDoc = doc;
 				map = new TempoMap(tempoPoints(doc), doc.bpm);
 			}
-			const bar = Math.floor(beat / 4) + 1;
-			const inBar = Math.floor(beat % 4) + 1;
-			const text = `${bar}.${inBar}   ${fmtClock(map.secondsAtBeat(beat))}`;
-			if (text !== last && ref.current) {
-				ref.current.textContent = text;
-				last = text;
+			const bar = String(Math.floor(beat / 4) + 1);
+			const clock = fmtClock(map.secondsAtBeat(beat));
+			if (bar !== lastBar && barRef.current) {
+				barRef.current.textContent = bar;
+				lastBar = bar;
+			}
+			if (clock !== lastClock && clockRef.current) {
+				clockRef.current.textContent = clock;
+				lastClock = clock;
 			}
 		};
 		raf = requestAnimationFrame(frame);
 		return () => cancelAnimationFrame(raf);
 	}, []);
-	return <div className="position" ref={ref} data-testid="position" />;
+	return (
+		<div className="position" data-testid="position">
+			<span className="position-label">Bar</span>
+			<span className="position-bar" ref={barRef} />
+			<span className="position-clock" ref={clockRef} />
+		</div>
+	);
 }
 
 function BpmField() {
@@ -105,11 +117,9 @@ function BpmField() {
 		setText(String(store.get().doc.bpm));
 	};
 	return (
-		<label className="bpm-field">
-			<span>BPM</span>
+		<label className={`bpm-field${bad ? " bad" : ""}`}>
 			<input
 				data-testid="project-bpm"
-				className={bad ? "bad" : ""}
 				value={text}
 				inputMode="numeric"
 				onChange={(e) => setText(e.target.value)}
@@ -131,6 +141,7 @@ function BpmField() {
 					} else commit();
 				}}
 			/>
+			<span>BPM</span>
 		</label>
 	);
 }
@@ -145,6 +156,7 @@ export function TopBar() {
 	const doc = useStore((s) => s.doc);
 	const libraryOpen = useStore((s) => s.libraryOpen);
 	const metronome = useStore((s) => s.metronome);
+	const showCues = useStore((s) => s.showCues);
 	useStore((s) => s.mediaRev);
 	useStore((s) => s.progressRev);
 	const working = workingCount(doc);
@@ -165,14 +177,19 @@ export function TopBar() {
 	const beats = contentBeats({ ...doc, tempos: [] });
 	const length = beats > 0 ? new TempoMap(tempoPoints(doc), doc.bpm).secondsAtBeat(beats) : 0;
 	return (
-		<header className="topbar">
-			<button className="ghost" data-testid="all-sets" onClick={() => void goHome()}>
-				‹ Sets
+		<header className="topbar" data-testid="topbar">
+			<button className="ghost back" data-testid="all-sets" title="All sets" aria-label="All sets" onClick={() => void goHome()}>
+				‹
 			</button>
+			<div className="topbar-sep" />
 			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })}>
 				Library
 			</button>
-			{renaming ? (
+			<button className={`ghost${showCues ? " on" : ""}`} data-testid="cues-toggle" title={showCues ? "Hide the cue points on the clips" : "Show the cue points on the clips"} onClick={() => store.set({ showCues: !showCues })}>
+				{showCues ? "Hide cues" : "Show cues"}
+			</button>
+			{/* The set's name is in the window's title; it is only typed here when a new set asks for it. */}
+			{renaming && (
 				<NameEdit
 					key={setGen}
 					name={setName ?? ""}
@@ -183,19 +200,11 @@ export function TopBar() {
 						if (next !== null && setId) void renameSet(setId, next);
 					}}
 				/>
-			) : (
-				<div className="set-name" data-testid="set-name" onClick={() => setRenaming(true)}>
-					{name}
-				</div>
 			)}
+			<div className="topbar-sep" />
 			<BpmField />
+			<div className="topbar-sep" />
 			<div className="transport">
-				<button className="ghost icon" data-testid="to-start" onClick={() => engine.seek(0)}>
-					<svg viewBox="0 0 16 16" width="14" height="14">
-						<rect x="2" y="3" width="2" height="10" fill="currentColor" />
-						<path d="M14 3v10L5 8z" fill="currentColor" />
-					</svg>
-				</button>
 				<button className={`play${playing ? " on" : ""}`} data-testid="play" onClick={() => engine.toggle()}>
 					{playing ? (
 						<svg viewBox="0 0 16 16" width="14" height="14">
@@ -234,7 +243,7 @@ export function TopBar() {
 					{fmtLength(length)}
 				</div>
 			)}
-			<div className="zoom">
+			<div className="zoom" title="Zoom">
 				<button className="ghost icon" onClick={() => zoomAround(1 / 1.5)}>
 					−
 				</button>
@@ -249,47 +258,6 @@ export function TopBar() {
 				Export
 			</button>
 		</header>
-	);
-}
-
-// ---- library ------------------------------------------------------------------------
-
-export function Library() {
-	const [tracks, setTracks] = useState<Track[] | null>(null);
-	useEffect(() => {
-		void window.api
-			.listDownloads()
-			.then(setTracks)
-			.catch(() => setTracks([]));
-	}, []);
-	const label = (t: Track): string => t.title ?? t.files[0]?.split("/").pop() ?? "Untitled";
-	return (
-		<aside className="library" data-testid="library">
-			<h2>Downloaded songs</h2>
-			{tracks === null ? null : tracks.length === 0 ? (
-				<p className="muted">No downloads yet</p>
-			) : (
-				<ul>
-					{tracks.map((t) => {
-						const file = t.files[0];
-						return (
-							<li
-								key={t.at + label(t)}
-								draggable={!!file}
-								onDragStart={(e) => {
-									if (!file) return;
-									e.dataTransfer.setData("application/x-dj-path", file);
-									e.dataTransfer.effectAllowed = "copy";
-								}}
-								onDoubleClick={() => file && void importPaths([file], 0, store.get().playheadBeat)}
-							>
-								{label(t)}
-							</li>
-						);
-					})}
-				</ul>
-			)}
-		</aside>
 	);
 }
 
@@ -578,7 +546,8 @@ export function Modals() {
 export function ClipMenu() {
 	const menu = useStore((s) => s.menu);
 	const doc = useStore((s) => s.doc);
-	useStore((s) => s.cues);
+	const cues = useStore((s) => s.cues);
+	const cueEdit = useStore((s) => s.cueEdit);
 	useEffect(() => {
 		if (!menu) return;
 		const close = (): void => store.set({ menu: null });
@@ -591,14 +560,12 @@ export function ClipMenu() {
 	}, [menu]);
 	if (!menu) return null;
 	const clip = doc.clips.find((c) => c.id === menu.clipId);
+	const spot = menu.cue;
+	if (!clip && !spot) return null;
 	const track = clip && doc.tracks.find((t) => t.id === clip.trackId);
-	if (!clip) return null;
-	const beat = engine.positionBeat();
-	const canSplit = beat > clip.startBeat && beat < clip.startBeat + clip.lengthBeat;
-	const media = mediaFor(track, doc.bpm);
-	const targets = flagTargets(clip.id);
-	const item = (label: string, fn: () => void, opts: { disabled?: boolean; hint?: string; testId?: string } = {}): ReactNode => (
+	const item = (label: string, fn: () => void, opts: { disabled?: boolean; hint?: string; testId?: string; key?: string } = {}): ReactNode => (
 		<button
+			key={opts.key ?? label}
 			disabled={opts.disabled}
 			data-testid={opts.testId}
 			onPointerDown={(e) => e.stopPropagation()}
@@ -611,22 +578,73 @@ export function ClipMenu() {
 			{opts.hint && <kbd>{opts.hint}</kbd>}
 		</button>
 	);
+	const clipItems = (): ReactNode => {
+		if (!clip) return null;
+		const beat = engine.positionBeat();
+		const canSplit = beat > clip.startBeat && beat < clip.startBeat + clip.lengthBeat;
+		const media = mediaFor(track, doc.bpm);
+		const targets = flagTargets(clip.id);
+		return (
+			<>
+				{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "⌘S", testId: "menu-split" })}
+				{item(flagAllOn(targets, "muted") ? "Unmute clip" : "Mute clip", () => toggleClipsFlag(targets, "muted"), { hint: "⌘M", testId: "menu-mute" })}
+				{item(flagAllOn(targets, "lowCut") ? "Unmute bass" : "Mute bass", () => toggleClipsFlag(targets, "lowCut"), { hint: "⌘B", testId: "menu-lowcut" })}
+				{item("Duplicate", duplicateSelection, { hint: "⌘D", testId: "menu-duplicate" })}
+				{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
+				{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
+				<hr />
+				{track && item("Edit", () => openTrackEdit(track.id), { testId: "menu-edit" })}
+				{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}
+				{track && media?.state === "error" && item("Try again", () => retryMedia(track, doc.bpm))}
+				{track && media?.state === "error" && item("Locate file…", () => void relocateTrack(track.id))}
+				{track && item("Show original in Finder", () => void window.api.reveal(track.sourcePath))}
+			</>
+		);
+	};
+	// Rekordbox's cues at this place in the track: the ones under the pointer can be deleted,
+	// and one can be added on the nearest beat line. Only for a track Rekordbox knows.
+	const cueItems = (): ReactNode => {
+		if (!spot) return null;
+		const canEdit = cueEdit[spot.path] ?? false;
+		const taken = (cues[spot.path] ?? []).some((c) => c.kind === 0 && sameMoment(c.sec, spot.sec));
+		return (
+			<>
+				{clip && <hr />}
+				{spot.hits.map((c) => item(`Delete ${cueName(c)}`, () => deleteCue(spot, c.id), { disabled: !canEdit, testId: `menu-cue-delete-${c.kind}`, key: c.id }))}
+				{item("Add memory cue", () => addCue(spot, 0), { disabled: !canEdit || taken, testId: "menu-cue-memory" })}
+				{item("Add hot cue…", () => waitForHotCue(spot), { disabled: !canEdit, hint: "A–H", testId: "menu-cue-hot" })}
+			</>
+		);
+	};
+	const count = (clip ? 9 : 0) + (spot ? 2 + spot.hits.length : 0);
 	const x = Math.min(menu.x, window.innerWidth - 230);
-	const y = Math.min(menu.y, window.innerHeight - 340);
+	const y = Math.max(0, Math.min(menu.y, window.innerHeight - 20 - count * 31));
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
-			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "⌘S", testId: "menu-split" })}
-			{item(flagAllOn(targets, "muted") ? "Unmute clip" : "Mute clip", () => toggleClipsFlag(targets, "muted"), { hint: "⌘M", testId: "menu-mute" })}
-			{item(flagAllOn(targets, "lowCut") ? "Unmute bass" : "Mute bass", () => toggleClipsFlag(targets, "lowCut"), { hint: "⌘B", testId: "menu-lowcut" })}
-			{item("Duplicate", duplicateSelection, { hint: "⌘D", testId: "menu-duplicate" })}
-			{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
-			{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
-			<hr />
-			{track && item("Edit", () => openTrackEdit(track.id), { testId: "menu-edit" })}
-			{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}
-			{track && media?.state === "error" && item("Try again", () => retryMedia(track, doc.bpm))}
-			{track && media?.state === "error" && item("Locate file…", () => void relocateTrack(track.id))}
-			{track && item("Show original in Finder", () => void window.api.reveal(track.sourcePath))}
+			{clipItems()}
+			{cueItems()}
+		</div>
+	);
+}
+
+// Shown while "Add hot cue" waits for its letter. A click anywhere, or leaving the window,
+// gives up; the keys are handled in App.tsx.
+export function CueWait() {
+	const waiting = useStore((s) => s.cueWait !== null);
+	useEffect(() => {
+		if (!waiting) return;
+		const stop = (): void => store.set({ cueWait: null });
+		window.addEventListener("pointerdown", stop);
+		window.addEventListener("blur", stop);
+		return () => {
+			window.removeEventListener("pointerdown", stop);
+			window.removeEventListener("blur", stop);
+		};
+	}, [waiting]);
+	if (!waiting) return null;
+	return (
+		<div className="toast cue-wait" data-testid="cue-wait">
+			Press A to H for the hot cue. Esc cancels.
 		</div>
 	);
 }

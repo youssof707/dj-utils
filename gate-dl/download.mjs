@@ -7,7 +7,7 @@
 //   --force        download again even if it's recorded as downloaded
 //
 // Every successful download is recorded in ~/Library/Application Support/gate-dl/data/downloads.json
-// (app/src/shared/downloadsStore.ts, shared with the app). A track recorded there is skipped ({"ok":true,"already":true}), in playlists too.
+// (gate-dl/downloadsStore.ts). A track recorded there is skipped ({"ok":true,"already":true}), in playlists too.
 //   --gate-url     skip link discovery and use this gate URL
 //
 // Success: exit 0, one JSON line on stdout: {"ok":true,"file":…,"gate":…,…}
@@ -27,7 +27,7 @@ import { SoundCloud } from './lib/soundcloud.mjs';
 import { fetchToStore, verifyAudio, sanitize, unpackZip } from './lib/fetchfile.mjs';
 import { GateDlError, fail, CODES, step, progress } from './lib/fail.mjs';
 import { GATES, findGate } from './gates/index.mjs';
-import { downloaded, markDownloaded } from '../app/src/shared/downloadsStore.ts';
+import { downloaded, markDownloaded } from './downloadsStore.ts';
 
 const argv = process.argv.slice(2);
 const flag = f => { const i = argv.indexOf(f); if (i < 0) return false; argv.splice(i, 1); return true; };

@@ -2,7 +2,6 @@ import "./paths"; // first: points every data folder at dev-data in dev
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
 import { electronApp, is } from "@electron-toolkit/utils";
-import { listDownloads } from "../shared/downloadsStore";
 import { buildMenu, setupPlanner } from "./planner";
 import { setupSettings } from "./settings";
 import { cleanupDuplicateInstalls, registerUpdaterHandlers } from "./updater";
@@ -54,7 +53,6 @@ app.whenReady().then(() => {
 	electronApp.setAppUserModelId("com.youssof.dj-utilities");
 	// Dev runs use the stock Electron bundle, so set the dock icon by hand.
 	if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(iconPath);
-	ipcMain.handle("downloads:list", () => listDownloads());
 	ipcMain.handle("appInfo:get", () => ({ env: is.dev ? "dev" : "prod" }));
 	// Double-clicking the version chip toggles DevTools, packaged builds included.
 	ipcMain.handle("devtools:toggle", (e) => {

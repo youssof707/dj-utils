@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { Track } from "../shared/types";
 import type { UpdateCheckResult, UpdatePhase, UpdateProgress } from "../shared/updater";
-import type { EditExportRequest, EditExportResult, Settings, ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, SetFile, SetInfo, SetView, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
+import type { EditExportRequest, EditExportResult, Settings, ExportProgress, ExportRequest, ExportResult, PlannerDoc, CueChange, CueInfo, CueRow, ProbeResult, RampRequest, RekordboxGrid, RekordboxLibrary, SetFile, SetInfo, SetView, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
 
 function on<T>(channel: string, cb: (payload: T) => void): () => void {
 	const fn = (_e: unknown, payload: T): void => cb(payload);
@@ -10,14 +9,21 @@ function on<T>(channel: string, cb: (payload: T) => void): () => void {
 }
 
 const api = {
-	listDownloads: (): Promise<Track[]> => ipcRenderer.invoke("downloads:list"),
 	getAppInfo: (): Promise<{ env: "dev" | "prod" }> => ipcRenderer.invoke("appInfo:get"),
 	toggleDevTools: (): Promise<void> => ipcRenderer.invoke("devtools:toggle"),
 
 	pathForFile: (file: File): string => webUtils.getPathForFile(file),
 	probe: (path: string): Promise<ProbeResult> => ipcRenderer.invoke("planner:probe", path),
 	rekordbox: (path: string): Promise<RekordboxGrid | null> => ipcRenderer.invoke("planner:rekordbox", path),
-	cues: (path: string): Promise<Cue[]> => ipcRenderer.invoke("planner:cues", path),
+	// null when there is no Rekordbox library on this machine
+	rekordboxLibrary: (): Promise<RekordboxLibrary | null> => ipcRenderer.invoke("planner:rekordbox-library"),
+	cues: (path: string): Promise<CueInfo> => ipcRenderer.invoke("planner:cues", path),
+	// These write to Rekordbox's own database at once. `kind` 0 is a memory cue, 1 to 8 the
+	// hot cues A to H; a hot cue takes the place of the one already on its letter.
+	cueAdd: (path: string, sec: number, kind: number): Promise<CueChange> => ipcRenderer.invoke("planner:cue-add", path, sec, kind),
+	cueDelete: (path: string, ids: string[]): Promise<CueChange> => ipcRenderer.invoke("planner:cue-delete", path, ids),
+	// Takes the cues with these ids out and puts these rows back in: undo and redo.
+	cueApply: (path: string, remove: string[], insert: CueRow[]): Promise<CueChange> => ipcRenderer.invoke("planner:cue-apply", path, remove, insert),
 	stretch: (req: StretchRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:stretch", req),
 	ramp: (req: RampRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:ramp", req),
 	// Says which renderings (stretchKey, rampKey) the set still needs; other work is dropped.

@@ -116,7 +116,7 @@ describe("editing and playback", () => {
 	});
 
 	it("clicking a button then pressing space only toggles playback once", async () => {
-		await h.page.getByTestId("to-start").click();
+		await h.page.evaluate(() => (window as any).planner.engine.seek(0));
 		expect(await state(h.page, "s => s.playheadBeat")).toBe(0);
 		await h.page.getByTestId("play").click();
 		await h.page.waitForTimeout(500);
@@ -140,7 +140,7 @@ describe("editing and playback", () => {
 	});
 
 	it("selects with a box and moves the group together; escape cancels a drag", async () => {
-		await h.page.getByTestId("to-start").click();
+		await h.page.evaluate(() => (window as any).planner.engine.seek(0));
 		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		const laneH = lanes.height / 4;
@@ -176,6 +176,46 @@ describe("editing and playback", () => {
 		// one undo step restores both
 		await h.page.keyboard.press("Meta+z");
 		expect(await clips()).toEqual(before);
+	});
+
+	it("Shift-drag copies the selection instead of moving it; Shift-click still selects", async () => {
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const before = await clips();
+		const first = (await h.page.locator('[data-testid="clip"]').first().boundingBox())!;
+		const sel = [before[0].id, before[1].id];
+		await state(h.page, `s => { window.planner.store.set({ selection: ${JSON.stringify(sel)} }); return 0; }`);
+		await h.page.mouse.move(first.x + 80, first.y + 40);
+		await h.page.keyboard.down("Shift");
+		await h.page.mouse.down();
+		await h.page.mouse.move(first.x + 80 + 10 * ppb, first.y + 40, { steps: 6 });
+		// mid-drag: the originals stay, two copies follow the mouse
+		expect(await clips()).toHaveLength(before.length + 2);
+		// letting go of Shift turns it back into a move
+		await h.page.keyboard.up("Shift");
+		let cur = await clips();
+		expect(cur).toHaveLength(before.length);
+		expect(cur[0].startBeat).toBeCloseTo(before[0].startBeat + 10, 0);
+		await h.page.keyboard.down("Shift");
+		await h.page.mouse.up();
+		await h.page.keyboard.up("Shift");
+		cur = await clips();
+		expect(cur.slice(0, before.length)).toEqual(before);
+		const copies = cur.slice(before.length);
+		expect(copies.map((c) => c.trackId)).toEqual([before[0].trackId, before[1].trackId]);
+		expect(copies[0].startBeat).toBeCloseTo(before[0].startBeat + 10, 0);
+		expect(copies[1].startBeat - copies[0].startBeat).toBeCloseTo(before[1].startBeat - before[0].startBeat, 6);
+		// the copies are what is selected now
+		expect(await state<string[]>(h.page, "s => s.selection")).toEqual(copies.map((c) => c.id));
+		await h.page.keyboard.press("Meta+z");
+		expect(await clips()).toEqual(before);
+		// a Shift-click with no drag takes a clip out of the selection
+		await state(h.page, `s => { window.planner.store.set({ selection: ${JSON.stringify(sel)} }); return 0; }`);
+		await h.page.keyboard.down("Shift");
+		await h.page.mouse.click(first.x + 80, first.y + 40);
+		await h.page.keyboard.up("Shift");
+		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([before[1].id]);
+		expect(await clips()).toEqual(before);
+		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
 	});
 
 	it("cannot drag a group past the start or outside the lanes", async () => {

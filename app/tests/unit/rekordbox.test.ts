@@ -1,8 +1,10 @@
+import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { testDir } from "../testdata";
-import { findAnalysisRoot, gridFromBeats, matchTrack, measureShift, MIN_MATCH, nameKey, parseAnlz, parseWaveform, scanLibrary, type AnlzBeat } from "../../src/main/rekordbox";
+import { camelot, findAnalysisRoot, gridFromBeats, matchTrack, measureShift, MIN_MATCH, nameKey, parseAnlz, parseWaveform, readLibrary, scanLibrary, type AnlzBeat } from "../../src/main/rekordbox";
 import { firstBarBeat, SAMPLE_RATE as SR, type PlannerTrack } from "../../src/shared/planner";
 import { datFile, extFile, gridBeats, waveformOf, writeAnalysis } from "../anlz";
 import { writeBarTrack } from "../signals";
@@ -265,5 +267,95 @@ describe("matching audio to its analysis", () => {
 
 	it("compares file names without regard to case or how accents are stored", () => {
 		expect(nameKey("Café Del Mar.MP3")).toBe(nameKey("Café del mar.mp3"));
+	});
+});
+
+describe("tracks and playlists from the database", () => {
+	// A database file the way Rekordbox keeps it: SQLite pages with 80 spare bytes at the
+	// end, each page encrypted on its own, the key's salt in the first 16 bytes.
+	function writeDatabase(file: string, sql: string): void {
+		const plainFile = `${file}.plain`;
+		const made = spawnSync("/usr/bin/sqlite3", [plainFile], { input: `.filectrl reserve_bytes 80\n${sql}\nvacuum;\n`, encoding: "utf8" });
+		if (made.status !== 0) throw new Error(made.stderr);
+		const plain = fs.readFileSync(plainFile);
+		fs.rmSync(plainFile);
+		const salt = crypto.randomBytes(16);
+		const key = crypto.pbkdf2Sync("402fd482c38817c35ffa8ffb8c7d93143b749e7d315df7a81732a1ff43608497", salt, 256000, 32, "sha512");
+		const out = Buffer.alloc(plain.length);
+		for (let o = 0; o < plain.length; o += 4096) {
+			const skip = o === 0 ? 16 : 0;
+			const iv = crypto.randomBytes(16);
+			const c = crypto.createCipheriv("aes-256-cbc", key, iv);
+			c.setAutoPadding(false);
+			c.update(plain.subarray(o + skip, o + 4096 - 80)).copy(out, o + skip);
+			iv.copy(out, o + 4096 - 80);
+		}
+		salt.copy(out, 0);
+		fs.writeFileSync(file, out);
+	}
+
+	it("reads keys the way DJs sort them", () => {
+		expect(camelot("8A")).toEqual({ key: "8A", order: 14 });
+		expect(camelot("12b")).toEqual({ key: "12B", order: 23 });
+		expect(camelot("Am")?.key).toBe("8A");
+		expect(camelot("C")?.key).toBe("8B");
+		expect(camelot("F#m")?.key).toBe("11A");
+		expect(camelot("Dbm")?.key).toBe("12A");
+		expect(camelot("Bb")?.key).toBe("6B");
+		expect(camelot("Cm")?.key).toBe("5A");
+		expect(camelot("B")?.key).toBe("1B");
+		expect(camelot("Abm")?.key).toBe("1A");
+		expect(camelot("13A")).toBeNull();
+		expect(camelot("")).toBeNull();
+		expect(camelot("H")).toBeNull();
+		// 1A, 1B, 2A ... 12B
+		expect(["2A", "12B", "1B", "1A", "10A"].sort((a, b) => camelot(a)!.order - camelot(b)!.order)).toEqual(["1A", "1B", "2A", "10A", "12B"]);
+	});
+
+	it("reads tracks, and playlists in Rekordbox's order", () => {
+		const home = testDir("db-");
+		const song = path.join(home, "Here.mp3");
+		fs.writeFileSync(song, "x");
+		const db = path.join(home, "master.db");
+		const q = (v: string): string => `'${v.replace(/'/g, "''")}'`;
+		writeDatabase(
+			db,
+			[
+				"create table djmdArtist (ID text, Name text, rb_local_deleted integer);",
+				"create table djmdKey (ID text, ScaleName text, rb_local_deleted integer);",
+				"create table djmdContent (ID text, FolderPath text, Title text, ArtistID text, BPM integer, Length integer, KeyID text, rb_local_deleted integer, created_at text);",
+				"create table djmdPlaylist (ID text, Seq integer, Name text, Attribute integer, ParentID text, rb_local_deleted integer);",
+				"create table djmdSongPlaylist (ID text, PlaylistID text, ContentID text, TrackNo integer, rb_local_deleted integer);",
+				"insert into djmdArtist values ('a1', 'Orbital', 0);",
+				"insert into djmdKey values ('k1', 'Am', 0), ('k2', '7B', 0), ('k3', 'odd', 0);",
+				// added in the order t2, t1, t3; t4 was deleted; t5 is a streaming track
+				`insert into djmdContent values ('t1', ${q(song)}, 'Belfast', 'a1', 12800, 480, 'k1', 0, '2024-01-02');`,
+				`insert into djmdContent values ('t2', ${q(path.join(home, "Gone.wav"))}, '', null, 9050, 200, 'k2', 0, '2024-01-01');`,
+				`insert into djmdContent values ('t3', ${q(path.join(home, "No key.mp3"))}, 'No key', 'a1', 0, 100, 'k3', null, '2024-01-03');`,
+				`insert into djmdContent values ('t4', ${q(song)}, 'Deleted', 'a1', 12000, 100, 'k1', 1, '2024-01-04');`,
+				"insert into djmdContent values ('t5', '/bs/catalog/123', 'Streamed', 'a1', 12000, 100, null, 0, '2024-01-05');",
+				// two top-level playlists around a folder with one playlist; a smart playlist; a deleted one
+				"insert into djmdPlaylist values ('p1', 2, 'Late', 0, 'root', 0);",
+				"insert into djmdPlaylist values ('f1', 1, 'Clubs', 1, 'root', 0);",
+				"insert into djmdPlaylist values ('p2', 0, 'Warm up', 0, 'f1', 0);",
+				"insert into djmdPlaylist values ('p3', 0, 'Early', 0, 'root', 0);",
+				"insert into djmdPlaylist values ('p4', 3, 'Smart', 4, 'root', 0);",
+				"insert into djmdPlaylist values ('p5', 4, 'Binned', 0, 'root', 1);",
+				"insert into djmdSongPlaylist values ('s1', 'p2', 't1', 2, 0), ('s2', 'p2', 't3', 1, 0), ('s3', 'p2', 't4', 3, 0), ('s4', 'p2', 't2', 4, 1), ('s5', 'p1', 't2', 1, 0);",
+			].join("\n"),
+		);
+		const lib = readLibrary(db);
+		expect(lib.tracks.map((t) => t.id)).toEqual(["t2", "t1", "t3", "t5"]);
+		expect(lib.tracks.map((t) => t.added)).toEqual([0, 1, 2, 3]);
+		expect(lib.tracks[1]).toEqual({ id: "t1", title: "Belfast", artist: "Orbital", bpm: 128, key: "8A", keyOrder: 14, lengthSec: 480, path: song, available: true, added: 1 });
+		// no title: the file's name; a file that is gone cannot be loaded
+		expect(lib.tracks[0]).toMatchObject({ title: "Gone", artist: "", bpm: 90.5, key: "7B", available: false });
+		expect(lib.tracks[2]).toMatchObject({ bpm: 0, key: "odd", keyOrder: null });
+		expect(lib.tracks[3]).toMatchObject({ title: "Streamed", key: "", available: false });
+		expect(lib.playlists).toEqual([
+			{ id: "p3", name: "Early", tracks: [] },
+			{ id: "p2", name: "Clubs / Warm up", tracks: ["t3", "t1"] },
+			{ id: "p1", name: "Late", tracks: ["t2"] },
+		]);
 	});
 });

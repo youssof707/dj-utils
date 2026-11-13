@@ -41,7 +41,7 @@ describe("sets kept by the app", () => {
 		await ask.waitFor();
 		expect(await ask.evaluate((el) => el === document.activeElement)).toBe(true);
 		await h.page.keyboard.press("Escape");
-		await h.page.getByTestId("set-name").waitFor();
+		await h.page.getByTestId("topbar").waitFor();
 		expect(await h.page.getByTestId("home").count()).toBe(0);
 		// an untouched new set leaves nothing behind
 		await h.page.waitForTimeout(900);
@@ -58,29 +58,26 @@ describe("sets kept by the app", () => {
 		const s = onDisk(id);
 		expect(s.name).toMatch(/^Set \d{4}-\d\d-\d\d \d\d\.\d\d$/);
 		expect(s.doc.clips.length).toBe(1);
-		await expect.poll(() => h.page.getByTestId("set-name").textContent()).toBe(s.name);
 		await expect.poll(() => h.page.title()).toBe(s.name);
 		await waitReady(h.page);
 	});
 
-	it("renames the open set from the top bar", async () => {
-		await h.page.getByTestId("set-name").click();
-		await h.page.getByTestId("set-name-input").fill("Friday");
+	it("shows the open set's name only in the window title, and renames it from the list", async () => {
+		expect(await h.page.getByTestId("topbar").textContent()).not.toContain(onDisk(id).name);
+		await h.page.getByTestId("all-sets").click();
+		await h.page.getByTestId("home").waitFor();
+		await row(onDisk(id).name).getByTestId("set-rename").click();
+		await h.page.getByTestId("set-rename-input").fill("Friday");
 		// typing a name, spaces included, does not play, split or delete anything
 		await h.page.keyboard.type(" warm-up");
-		expect(await h.page.getByTestId("set-name-input").inputValue()).toBe("Friday warm-up");
-		expect(await state(h.page, "s => s.playing")).toBe(false);
+		expect(await h.page.getByTestId("set-rename-input").inputValue()).toBe("Friday warm-up");
 		await h.page.keyboard.press("Enter");
 		await expect.poll(() => onDisk(id).name, { timeout: 5000 }).toBe("Friday warm-up");
-		expect(await h.page.getByTestId("set-name").textContent()).toBe("Friday warm-up");
+		await row("Friday warm-up").click();
+		await h.page.getByTestId("topbar").waitFor();
+		await expect.poll(() => h.page.title()).toBe("Friday warm-up");
 		expect((await clips()).length).toBe(1);
 		expect(await state(h.page, "s => s.playing")).toBe(false);
-		// Escape leaves the name as it was
-		await h.page.getByTestId("set-name").click();
-		await h.page.getByTestId("set-name-input").fill("Nope");
-		await h.page.keyboard.press("Escape");
-		expect(await h.page.getByTestId("set-name").textContent()).toBe("Friday warm-up");
-		expect((await clips()).length).toBe(1);
 	});
 
 	it("goes back to the list and reopens the set where it was left", async () => {
@@ -98,7 +95,7 @@ describe("sets kept by the app", () => {
 		await h.page.keyboard.press("Backspace");
 		expect(await state(h.page, "s => s.playing")).toBe(false);
 		await row("Friday warm-up").click();
-		await h.page.getByTestId("set-name").waitFor();
+		await h.page.getByTestId("topbar").waitFor();
 		expect((await clips()).length).toBe(1);
 		expect(await state(h.page, "s => s.pxPerBeat")).toBeCloseTo(zoom, 6);
 		expect(await state(h.page, "s => s.playheadBeat")).toBe(8);
@@ -126,9 +123,9 @@ describe("sets kept by the app", () => {
 		await h.page.keyboard.press("Meta+n");
 		await h.page.getByTestId("set-name-input").waitFor();
 		await h.page.keyboard.press("Escape");
-		await h.page.getByTestId("set-name").waitFor();
+		await h.page.getByTestId("topbar").waitFor();
 		expect((await clips()).length).toBe(0);
-		expect(await h.page.getByTestId("set-name").textContent()).toBe("New set");
+		expect(await h.page.title()).toBe("New set");
 		// an empty set that was never touched is not kept
 		await h.page.keyboard.press("Meta+o");
 		await h.page.getByTestId("home").waitFor();
@@ -142,7 +139,6 @@ describe("sets kept by the app", () => {
 		await h.page.keyboard.type("Late night");
 		expect(await state(h.page, "s => s.playing")).toBe(false);
 		await h.page.keyboard.press("Enter");
-		expect(await h.page.getByTestId("set-name").textContent()).toBe("Late night");
 		expect(await h.page.title()).toBe("Late night");
 		// a set given a name is kept, even before anything is in it
 		await h.page.keyboard.press("Meta+o");
@@ -217,7 +213,7 @@ describe("sets kept by the app", () => {
 		expect((await rows()).sort()).toEqual(["Old Night", "Set 2026-01-02 03.04"]);
 		expect(fs.existsSync(path.join(data, "planner-session.json"))).toBe(false);
 		await row("Old Night").click();
-		await h.page.getByTestId("set-name").waitFor();
+		await h.page.getByTestId("topbar").waitFor();
 		expect((await clips()).length).toBe(1);
 		expect(await state(h.page, "s => s.pxPerBeat")).toBe(20);
 		expect(await state(h.page, "s => s.playheadBeat")).toBe(4);

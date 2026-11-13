@@ -32,8 +32,6 @@ function setup(): string {
 	app.setPath("temp", tmp);
 	// os.tmpdir() and every child process (afconvert, sqlite3) follow TMPDIR.
 	process.env["TMPDIR"] = tmp;
-	// Shared code (downloadsStore) keeps its files here too.
-	process.env["DJ_DATA_DIR"] = root;
 	return root;
 }
 

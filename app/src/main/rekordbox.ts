@@ -3,7 +3,9 @@
 // waveform Rekordbox drew from its own decode of the file).
 //
 // Cue points are not in those files: they are read from Rekordbox's database (a copy of it,
-// never the file Rekordbox has open). Nothing here talks to Rekordbox itself. A scan turns the .DAT files into a small
+// never the file Rekordbox has open). Adding and deleting cues is the one thing that writes
+// to Rekordbox: straight into its database, see `changeCues`. Nothing here talks to
+// Rekordbox itself. A scan turns the .DAT files into a small
 // index, kept as JSON between runs. A dropped file is matched by name, then confirmed by
 // lining its audio up against Rekordbox's waveform. The same step measures how far
 // Rekordbox's clock is ahead of ours for that file: Rekordbox keeps the silence that MP3 and
@@ -16,7 +18,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SAMPLE_RATE, type RekordboxGrid } from "../shared/planner";
+import { SAMPLE_RATE, type CueRow, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, type RekordboxTrack } from "../shared/planner";
 import { WavReader } from "./audio/wav";
 
 export type AnlzBeat = { no: number; tempo: number; ms: number }; // bar position 1-4, BPM x 100, time
@@ -383,8 +385,10 @@ export function matchTrack(decodedPath: string, candidates: LibraryEntry[]): Rek
 // ---- cue points ---------------------------------------------------------------------
 
 // A cue as Rekordbox stores it: time on Rekordbox's clock; kind 0 is a memory cue, 1 and up
-// are the hot cues A, B, C...
-export type LibraryCue = { ms: number; kind: number };
+// are the hot cues A, B, C... `id` is its row in the database; a loop also has an end.
+export type LibraryCue = { id: string; ms: number; kind: number; loop: boolean };
+// Every track's cues, and the track's own row, by analysis file (see `datKey`).
+export type CueLibrary = { cues: Record<string, LibraryCue[]>; contents: Record<string, { id: string; uuid: string }> };
 
 // Rekordbox's database is SQLite encrypted with SQLCipher 4, with the same key on every
 // installation.
@@ -487,11 +491,10 @@ export function datKey(dat: string): string {
 	return dat.split(/[\\/]/).slice(-3).join("/").toLowerCase();
 }
 
-// Every track's cue points, by analysis file (see `datKey`), in time order.
-export function readCues(dbPath: string): Record<string, LibraryCue[]> {
-	let plain: Buffer | null = null;
+// The database as it is now, changes still waiting beside it included. Still encrypted.
+function readEncrypted(dbPath: string): Buffer {
 	// Rekordbox may be writing while we read: take the two files again if either changed.
-	for (let attempt = 0; attempt < 3 && !plain; attempt++) {
+	for (let attempt = 0; ; attempt++) {
 		const before = databaseStamp(dbPath);
 		const db = fs.readFileSync(dbPath);
 		let wal: Buffer | null = null;
@@ -500,27 +503,281 @@ export function readCues(dbPath: string): Record<string, LibraryCue[]> {
 		} catch {
 			// Rekordbox is closed: everything is in the main file
 		}
-		if (databaseStamp(dbPath) !== before && attempt < 2) continue;
-		plain = decryptDatabase(withPendingChanges(db, wal));
+		if (databaseStamp(dbPath) === before || attempt >= 2) return withPendingChanges(db, wal);
 	}
+}
+
+// The rows each query gives, read from a plain copy of the database that is deleted again
+// straight away. Never touches the files Rekordbox has open.
+function queryDatabase(dbPath: string, sqls: string[]): Record<string, unknown>[][] {
+	const plain = decryptDatabase(readEncrypted(dbPath));
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dj-rb-"));
 	try {
 		const file = path.join(dir, "library.db");
-		fs.writeFileSync(file, plain!, { mode: 0o600 });
-		const sql =
-			"select c.AnalysisDataPath as dat, q.InMsec as ms, q.Kind as kind from djmdCue q join djmdContent c on c.ID = q.ContentID " +
-			"where coalesce(q.rb_local_deleted, 0) = 0 and coalesce(c.rb_local_deleted, 0) = 0 and q.InMsec >= 0 and q.Kind >= 0 and c.AnalysisDataPath is not null order by q.InMsec, q.Kind";
-		const r = spawnSync(SQLITE, ["-readonly", "-json", file, sql], { encoding: "utf8", maxBuffer: 1 << 28 });
-		if (r.status !== 0) throw new Error(`Rekordbox database could not be read: ${(r.stderr || String(r.error ?? "")).trim()}`);
-		const rows = r.stdout.trim() ? (JSON.parse(r.stdout) as { dat: string; ms: number; kind: number }[]) : [];
-		const out: Record<string, LibraryCue[]> = {};
-		for (const row of rows) {
-			// Hot cue kinds skip 4: A, B, C are 1 to 3 and D onward start at 5.
-			if (typeof row.dat !== "string" || !Number.isFinite(row.ms) || !Number.isInteger(row.kind) || row.kind === 4) continue;
-			(out[datKey(row.dat)] ??= []).push({ ms: row.ms, kind: row.kind > 4 ? row.kind - 1 : row.kind });
-		}
-		return out;
+		fs.writeFileSync(file, plain, { mode: 0o600 });
+		return sqls.map((sql) => {
+			const r = spawnSync(SQLITE, ["-readonly", "-json", file, sql], { encoding: "utf8", maxBuffer: 1 << 28 });
+			if (r.status !== 0) throw new Error(`Rekordbox database could not be read: ${(r.stderr || String(r.error ?? "")).trim()}`);
+			return r.stdout.trim() ? (JSON.parse(r.stdout) as Record<string, unknown>[]) : [];
+		});
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+// In the database hot cue kinds skip 4: A, B, C are 1 to 3 and D onward start at 5.
+export const rawKind = (kind: number): number => (kind >= 4 ? kind + 1 : kind);
+const appKind = (raw: number): number => (raw > 4 ? raw - 1 : raw);
+
+// The cue a database row holds, or null for a row that is not a cue we show.
+export function cueOfRow(row: Record<string, unknown>): LibraryCue | null {
+	const ms = row["InMsec"];
+	const kind = row["Kind"];
+	const id = row["ID"];
+	if ((typeof id !== "string" && typeof id !== "number") || typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
+	if (typeof kind !== "number" || !Number.isInteger(kind) || kind < 0 || kind === 4) return null;
+	const out = row["OutMsec"];
+	return { id: String(id), ms, kind: appKind(kind), loop: typeof out === "number" && out >= 0 };
+}
+
+const cueOrder = (a: LibraryCue, b: LibraryCue): number => a.ms - b.ms || a.kind - b.kind;
+
+// A track's cues after a change to them, in time order.
+export function cuesAfter(cues: LibraryCue[], removed: CueRow[], added: CueRow[]): LibraryCue[] {
+	const gone = new Set([...removed, ...added].map((r) => String(r["ID"])));
+	const more = added.map(cueOfRow).filter((c): c is LibraryCue => c !== null);
+	return [...cues.filter((c) => !gone.has(c.id)), ...more].sort(cueOrder);
+}
+
+// Every track's cue points in time order, and which row each analysed track is.
+export function readCues(dbPath: string): CueLibrary {
+	const [cueRows, contentRows] = queryDatabase(dbPath, [
+		'select c.AnalysisDataPath as dat, q.ID as "ID", q.InMsec as "InMsec", q.OutMsec as "OutMsec", q.Kind as "Kind" from djmdCue q join djmdContent c on c.ID = q.ContentID ' +
+			"where coalesce(q.rb_local_deleted, 0) = 0 and coalesce(c.rb_local_deleted, 0) = 0 and q.InMsec >= 0 and q.Kind >= 0 and c.AnalysisDataPath is not null order by q.InMsec, q.Kind",
+		"select c.AnalysisDataPath as dat, c.ID as id, c.UUID as uuid from djmdContent c where coalesce(c.rb_local_deleted, 0) = 0 and c.AnalysisDataPath is not null",
+	]);
+	const out: CueLibrary = { cues: {}, contents: {} };
+	for (const row of cueRows) {
+		const cue = cueOfRow(row);
+		if (typeof row["dat"] === "string" && cue) (out.cues[datKey(row["dat"])] ??= []).push(cue);
+	}
+	for (const row of contentRows) {
+		const id = text(row["id"]);
+		if (typeof row["dat"] === "string" && id) out.contents[datKey(row["dat"])] = { id, uuid: text(row["uuid"]) };
+	}
+	return out;
+}
+
+// ---- changing cue points ------------------------------------------------------------
+
+// The columns of a cue's row. Rekordbox's cue table has to have exactly these, or nothing
+// is written: a table that has changed is one we no longer know how to fill in.
+export const CUE_COLUMNS = [
+	"ID", "ContentID", "InMsec", "InFrame", "InMpegFrame", "InMpegAbs", "OutMsec", "OutFrame", "OutMpegFrame", "OutMpegAbs", "Kind", "Color", "ColorTableIndex", "ActiveLoop", "Comment",
+	"BeatLoopSize", "CueMicrosec", "InPointSeekInfo", "OutPointSeekInfo", "ContentUUID", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "usn",
+	"rb_local_usn", "created_at", "updated_at",
+]; // prettier-ignore
+
+// What to do to one track's cues, in this order: take out the rows with these ids and
+// whatever sits in these hot cue slots, then put these rows in. A row whose id is already
+// there, or whose hot cue slot is taken, is left out.
+export type CueChangeJob = { contentId: string; remove: string[]; clear: number[]; insert: CueRow[] };
+// The whole rows that went and came, so either can be put back exactly.
+export type CueChangeResult = { removed: CueRow[]; added: CueRow[] };
+
+const stampNow = (): string => new Date().toISOString().replace("T", " ").replace("Z", " +00:00");
+
+// The row Rekordbox itself writes for a new cue at this time (on its clock).
+export function newCueRow(content: { id: string; uuid: string }, ms: number, kind: number): CueRow {
+	const at = stampNow();
+	const row: CueRow = Object.fromEntries(CUE_COLUMNS.map((c) => [c, null]));
+	return {
+		...row,
+		ID: String(crypto.randomInt(1, 0xffffffff)),
+		ContentID: content.id,
+		InMsec: ms,
+		InFrame: Math.round(ms * 0.15), // 150 frames a second
+		InMpegFrame: 0,
+		InMpegAbs: 0,
+		OutMsec: -1,
+		OutFrame: 0,
+		OutMpegFrame: 0,
+		OutMpegAbs: 0,
+		Kind: rawKind(kind),
+		Color: -1,
+		ContentUUID: content.uuid || null,
+		UUID: crypto.randomUUID(),
+		rb_data_status: 0,
+		rb_local_data_status: 0,
+		rb_local_deleted: 0,
+		rb_local_synced: 0,
+		created_at: at,
+		updated_at: at,
+	};
+}
+
+function sqlValue(v: unknown): string {
+	if (v === null || v === undefined) return "NULL";
+	if (typeof v === "number" && Number.isFinite(v)) return String(v);
+	if (typeof v === "string") return `'${v.replace(/'/g, "''")}'`;
+	throw new Error("A cue could not be written: unexpected value");
+}
+
+// A copy of the database as it was before this app first wrote to it, kept beside it.
+// Returns where it is. Throws when it cannot be made, and then nothing may be written.
+export function backupDatabase(dbPath: string): string {
+	const to = path.join(path.dirname(dbPath), "master.before-dj-utilities.db");
+	if (fs.existsSync(to)) return to;
+	const part = `${to}.${process.pid}.part`;
+	try {
+		fs.writeFileSync(part, readEncrypted(dbPath), { mode: 0o600 });
+		fs.renameSync(part, to);
+	} finally {
+		fs.rmSync(part, { force: true });
+	}
+	return to;
+}
+
+// Changes cue rows in Rekordbox's database itself, in one step that either happens whole
+// or not at all. `bin` is the sqlcipher program, which takes its turn with Rekordbox the
+// way any two programs sharing an SQLite file do.
+export function changeCues(bin: string, dbPath: string, job: CueChangeJob): CueChangeResult {
+	for (const row of job.insert) if (row["ContentID"] !== job.contentId) throw new Error("A cue could not be written: it belongs to another track");
+	const content = sqlValue(job.contentId);
+	const cols = CUE_COLUMNS.map((c) => `"${c}"`).join(", ");
+	const whole = `json_group_array(json_object(${CUE_COLUMNS.map((c) => `'${c}', "${c}"`).join(", ")}))`;
+	const live = "coalesce(rb_local_deleted, 0) = 0";
+	const going = [
+		job.remove.length ? `ID in (${job.remove.map(sqlValue).join(", ")})` : "",
+		job.clear.length ? `(Kind in (${job.clear.map((k) => sqlValue(rawKind(k))).join(", ")}) and ${live})` : "",
+	].filter(Boolean);
+	const lines = [
+		`PRAGMA key = '${DB_KEY}';`,
+		"PRAGMA cipher_compatibility = 4;",
+		"PRAGMA busy_timeout = 3000;",
+		"PRAGMA wal_autocheckpoint = 0;", // folding changes into the main file is left to Rekordbox
+		// Stops here, before anything is changed, when the table is not the one we know.
+		"create temp table dj_check (ok integer, constraint cue_table_changed check (ok));",
+		`insert into dj_check select (select group_concat(name, ',') from (select name from pragma_table_info('djmdCue') order by cid)) = ${sqlValue(CUE_COLUMNS.join(","))};`,
+		"BEGIN IMMEDIATE;",
+	];
+	if (going.length) {
+		const where = `ContentID = ${content} and (${going.join(" or ")})`;
+		lines.push(`select 'DJ:removed:' || ${whole} from djmdCue where ${where};`, `delete from djmdCue where ${where};`);
+	}
+	for (const row of job.insert) {
+		const kind = row["Kind"];
+		const free = typeof kind === "number" && kind > 0 ? ` and not exists (select 1 from djmdCue where ContentID = ${content} and Kind = ${sqlValue(kind)} and ${live})` : "";
+		lines.push(`insert into djmdCue (${cols}) select ${CUE_COLUMNS.map((c) => sqlValue(row[c])).join(", ")} where not exists (select 1 from djmdCue where ID = ${sqlValue(row["ID"])})${free};`);
+	}
+	if (job.insert.length) lines.push(`select 'DJ:added:' || ${whole} from djmdCue where ContentID = ${content} and ID in (${job.insert.map((r) => sqlValue(r["ID"])).join(", ")});`);
+	lines.push("COMMIT;");
+
+	const r = spawnSync(bin, ["-batch", "-bail", dbPath], { input: lines.join("\n"), encoding: "utf8", maxBuffer: 1 << 26 });
+	if (r.status !== 0) {
+		const said = (r.stderr || String(r.error ?? "")).trim();
+		if (/cue_table_changed/.test(said)) throw new Error("This version of Rekordbox is not supported for changing cues yet");
+		if (/locked|busy/i.test(said)) throw new Error("Rekordbox is busy with its library. Try again in a moment");
+		throw new Error(`Rekordbox's database could not be changed: ${said.split("\n").pop()}`);
+	}
+	const rows = (tag: string): CueRow[] => {
+		const line = r.stdout.split("\n").find((l) => l.startsWith(`DJ:${tag}:`));
+		return line ? (JSON.parse(line.slice(tag.length + 4)) as CueRow[]) : [];
+	};
+	return { removed: rows("removed"), added: rows("added") };
+}
+
+// ---- tracks and playlists -----------------------------------------------------------
+
+const PITCH: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+// A key the way DJs sort it: "8A" stays, "Am" becomes "8A", "C" becomes "8B". Null for
+// anything that is not a key we know.
+export function camelot(name: string): { key: string; order: number } | null {
+	const written = name.trim();
+	let no: number;
+	let minor: boolean;
+	const wheel = /^(\d{1,2})([AB])$/i.exec(written);
+	if (wheel) {
+		no = Number(wheel[1]);
+		minor = wheel[2].toUpperCase() === "A";
+		if (no < 1 || no > 12) return null;
+	} else {
+		const note = /^([A-G])([#♯b♭]?)\s*(m|min|minor|maj|major)?$/i.exec(written);
+		if (!note) return null;
+		minor = /^m(in|inor)?$/i.test(note[3] ?? "");
+		const pitch = PITCH[note[1].toUpperCase()] + (note[2] === "" ? 0 : note[2] === "#" || note[2] === "♯" ? 1 : -1);
+		// a minor key sits with the major key three semitones up; fifths go round the wheel from C at 8
+		no = ((((pitch + (minor ? 3 : 0) + 12) % 12) * 7 + 7) % 12) + 1;
+	}
+	return { key: `${no}${minor ? "A" : "B"}`, order: (no - 1) * 2 + (minor ? 0 : 1) };
+}
+
+const text = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+// Every track and playlist in Rekordbox. Smart playlists are left out: Rekordbox stores
+// their rules, not their tracks.
+export function readLibrary(dbPath: string): RekordboxLibrary {
+	const live = (t: string): string => `coalesce(${t}.rb_local_deleted, 0) = 0`;
+	const [trackRows, listRows, memberRows] = queryDatabase(dbPath, [
+		"select c.ID as id, c.Title as title, a.Name as artist, c.BPM as bpm, k.ScaleName as key, c.Length as length, c.FolderPath as path " +
+			`from djmdContent c left join djmdArtist a on a.ID = c.ArtistID left join djmdKey k on k.ID = c.KeyID where ${live("c")} order by c.created_at, c.ID`,
+		`select p.ID as id, p.Name as name, p.ParentID as parent, p.Attribute as kind from djmdPlaylist p where ${live("p")} order by p.Seq, p.ID`,
+		`select s.PlaylistID as list, s.ContentID as track from djmdSongPlaylist s where ${live("s")} order by s.TrackNo, s.ID`,
+	]);
+
+	const tracks: RekordboxTrack[] = [];
+	const known = new Set<string>();
+	for (const row of trackRows) {
+		const id = text(row["id"]);
+		const file = text(row["path"]);
+		if (!id || known.has(id)) continue;
+		known.add(id);
+		const key = camelot(text(row["key"]));
+		tracks.push({
+			id,
+			title: text(row["title"]).trim() || path.basename(file).replace(/\.[^.]+$/, "") || "Untitled",
+			artist: text(row["artist"]).trim(),
+			bpm: num(row["bpm"]) / 100,
+			key: key ? key.key : text(row["key"]).trim(),
+			keyOrder: key ? key.order : null,
+			lengthSec: num(row["length"]),
+			path: file,
+			// streaming tracks have an address of the service's own instead of a file
+			available: path.isAbsolute(file) && fs.existsSync(file),
+			added: tracks.length,
+		});
+	}
+
+	const members = new Map<string, string[]>();
+	for (const row of memberRows) {
+		const list = text(row["list"]);
+		const track = text(row["track"]);
+		if (!known.has(track)) continue;
+		const into = members.get(list) ?? [];
+		if (into.length === 0) members.set(list, into);
+		into.push(track);
+	}
+
+	// Rekordbox's own order: each folder's playlists under it, top to bottom.
+	const children = new Map<string, { id: string; name: string; kind: number }[]>();
+	for (const row of listRows) {
+		const parent = text(row["parent"]);
+		const into = children.get(parent) ?? [];
+		if (into.length === 0) children.set(parent, into);
+		into.push({ id: text(row["id"]), name: text(row["name"]).trim() || "Untitled", kind: num(row["kind"]) });
+	}
+	const playlists: RekordboxPlaylist[] = [];
+	const seen = new Set<string>();
+	const walk = (parent: string, prefix: string): void => {
+		for (const p of children.get(parent) ?? []) {
+			if (!p.id || seen.has(p.id)) continue;
+			seen.add(p.id);
+			if (p.kind === 0) playlists.push({ id: p.id, name: prefix + p.name, tracks: members.get(p.id) ?? [] });
+			else if (p.kind === 1) walk(p.id, `${prefix}${p.name} / `);
+		}
+	};
+	walk("root", "");
+	return { tracks, playlists };
 }

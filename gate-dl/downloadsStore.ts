@@ -1,23 +1,29 @@
-// Ledger of successfully downloaded tracks. Shared by the app (main process) and the
-// gate-dl script, which imports this .ts file directly via Node's native type stripping,
-// so keep it to node builtins and erasable TS syntax only.
+// Ledger of successfully downloaded tracks. The gate-dl script imports this .ts file
+// directly via Node's native type stripping, so keep it to node builtins and erasable TS
+// syntax only.
 //
 // One pretty-printed JSON file, written atomically (temp file + rename), created on first write:
 //   ~/Library/Application Support/gate-dl/data/downloads.json
-// except in the app's dev and test runs, which set DJ_DATA_DIR: there it is <DJ_DATA_DIR>/downloads.json.
 // Shape: { "tracks": { "<normalized track url>": { id, title, files, gate, gateUrl, at } } }
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { DownloadsDb, Track } from './types';
+export type Track = {
+  id?: number;
+  title?: string;
+  files: string[];
+  gate?: string;
+  gateUrl?: string;
+  at: string;
+  seededFrom?: string;
+};
 
-export type { DownloadsDb, Track };
+export type DownloadsDb = { tracks: Record<string, Track> };
 
-// Read on every call: the app sets DJ_DATA_DIR at startup, after this module may have loaded.
 function dataDir(): string {
-  return process.env['DJ_DATA_DIR'] || path.join(os.homedir(), 'Library', 'Application Support', 'gate-dl', 'data');
+  return path.join(os.homedir(), 'Library', 'Application Support', 'gate-dl', 'data');
 }
 
 function storeFile(): string {
@@ -60,8 +66,4 @@ export function markDownloaded(url: string, rec: Omit<Track, 'at'>): void {
   const db = load();
   db.tracks[trackKey(url)] = { ...rec, at: new Date().toISOString() };
   writeAtomic(db);
-}
-
-export function listDownloads(): Track[] {
-  return Object.values(load().tracks).sort((a, b) => b.at.localeCompare(a.at));
 }

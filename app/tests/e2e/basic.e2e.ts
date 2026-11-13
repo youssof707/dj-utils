@@ -285,16 +285,12 @@ describe("planner", () => {
 		expect(onDisk().doc).toEqual(before);
 	});
 
-	it("shows the downloads library and adds a song from it", async () => {
+	it("opens and closes the library", async () => {
 		await h.page.getByTestId("library-toggle").click();
 		await h.page.getByTestId("library").waitFor();
+		// tests never look at the Rekordbox library on this machine
+		await h.page.getByTestId("library-missing").waitFor();
 		await shot(h.page, "08b-library");
-		const items = h.page.locator('[data-testid="library"] li');
-		if ((await items.count()) > 0) {
-			await items.first().dblclick();
-			await h.page.getByTestId("import-modal").waitFor();
-			await h.page.getByTestId("bpm-cancel").click();
-		}
 		await h.page.getByTestId("library-toggle").click();
 		await h.page.getByTestId("library").waitFor({ state: "detached" });
 	});

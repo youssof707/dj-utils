@@ -8,6 +8,7 @@ import { testDir } from "../testdata";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
 import type { AnlzBeat } from "../../src/main/rekordbox";
 import { datFile, gridBeats, waveformOf, writeAnalysis } from "../anlz";
+import { cueRows, makeMasterDb, storedDat } from "../rekordboxDb";
 import { onsets, readAll, writeBarTrack, writeClickTrack } from "../signals";
 import { exportTo, importTrack, launch, setFile, shot, state, stored, waitReady, type Harness } from "./harness";
 
@@ -21,6 +22,10 @@ const GRID_MS = 0.2;
 let h: Harness;
 let work: string;
 let root: string; // the Rekordbox analysis folder
+let db: string; // Rekordbox's database: track A and its cues
+const A_ID = "100";
+// Track A's beat lines, in Rekordbox's milliseconds: the first a quarter second in.
+const aBeatMs = (n: number): number => Math.round((0.25 + n * BEAT_SEC) * 1000);
 const f: Record<string, string> = {};
 const dats: Record<string, string> = {};
 
@@ -102,7 +107,20 @@ beforeAll(async () => {
 	f.late = file("Late.wav");
 	writeBarTrack(f.late, 128, 20, { firstSec: 0.3, firstNo: 4, seed: 9 });
 
-	h = await launch(undefined, work, { DJ_REKORDBOX_DIR: root });
+	// Track A has a memory cue, hot cue C, and a memory cue with hot cue A on one line.
+	db = path.join(work, "rekordbox", "master.db");
+	makeMasterDb(
+		db,
+		[{ id: A_ID, uuid: "uuid-a", dat: storedDat(dats.a) }],
+		[
+			{ id: "1", contentId: A_ID, ms: aBeatMs(8), kind: 0 },
+			{ id: "2", contentId: A_ID, ms: aBeatMs(16), kind: 3 },
+			{ id: "3", contentId: A_ID, ms: aBeatMs(24), kind: 0 },
+			{ id: "4", contentId: A_ID, ms: aBeatMs(24), kind: 1 },
+		],
+	);
+
+	h = await launch(undefined, work, { DJ_REKORDBOX_DIR: root, DJ_REKORDBOX_DB: db });
 });
 const extraDirs: string[] = [];
 afterAll(async () => {
@@ -654,5 +672,155 @@ describe("rekordbox", () => {
 		expect(await drop(f.a, 0, 0)).toBe("asked");
 		await h.page.getByTestId("bpm-cancel").click();
 		expect(JSON.parse(fs.readFileSync(path.join(data, "rekordbox-cache.json"), "utf8")).root).toBe(junk);
+	});
+});
+
+describe("cue points", () => {
+	const rows = (): { id: unknown; ms: unknown; kind: unknown }[] => cueRows(db, A_ID).map((r) => ({ id: r["ID"], ms: r["InMsec"], kind: r["Kind"] }));
+	const START = [
+		{ id: "1", ms: aBeatMs(8), kind: 0 },
+		{ id: "2", ms: aBeatMs(16), kind: 3 },
+		{ id: "3", ms: aBeatMs(24), kind: 0 },
+		{ id: "4", ms: aBeatMs(24), kind: 1 },
+	];
+	const marks = (testId: string): Promise<string[]> => h.page.locator(`[data-testid="${testId}"]`).evaluateAll((els) => els.map((el) => el.getAttribute("data-cue") ?? ""));
+	// Right-clicks on the cue line with these letters, or `dx` pixels to the right of it.
+	async function rightClick(testId: string, cue: string, dx = 0): Promise<void> {
+		const box = (await h.page.locator(`[data-testid="${testId}"][data-cue="${cue}"]`).first().boundingBox())!;
+		await h.page.mouse.click(box.x + box.width / 2 + dx, box.y + box.height / 2, { button: "right" });
+		await h.page.getByTestId("clip-menu").waitFor();
+	}
+
+	it("deletes and adds cues from a clip's menu, in Rekordbox at once, and undoes them", async () => {
+		await newSet();
+		expect(await drop(f.a, 0, 0)).toBe("placed");
+		await expect.poll(() => marks("cue")).toEqual(["M", "C", "MA"]);
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+
+		// the top bar's toggle hides the cues on the clips, and shows them again
+		const toggle = h.page.getByTestId("cues-toggle");
+		expect(await toggle.textContent()).toBe("Hide cues");
+		await toggle.click();
+		expect(await toggle.textContent()).toBe("Show cues");
+		expect(await marks("cue")).toEqual([]);
+		await toggle.click();
+		await expect.poll(() => marks("cue")).toEqual(["M", "C", "MA"]);
+
+		// a line with two cues offers each of them
+		await rightClick("cue", "MA");
+		expect(await h.page.getByTestId("menu-cue-delete-0").textContent()).toBe("Delete memory cue");
+		expect(await h.page.getByTestId("menu-cue-delete-1").textContent()).toBe("Delete hot cue A");
+		expect(await h.page.getByTestId("menu-cue-memory").isDisabled()).toBe(true); // there is one here already
+		await h.page.getByTestId("menu-cue-delete-1").click();
+		await expect.poll(rows).toEqual(START.filter((r) => r.id !== "4"));
+		await expect.poll(() => marks("cue")).toEqual(["M", "C", "M"]);
+
+		// away from any cue there is nothing to delete; a memory cue goes on the nearest beat line
+		await rightClick("cue", "C", 2.4 * ppb);
+		expect(await h.page.locator('[data-testid^="menu-cue-delete"]').count()).toBe(0);
+		await h.page.getByTestId("menu-cue-memory").click();
+		await expect.poll(() => rows().filter((r) => r.ms === aBeatMs(18) && r.kind === 0).length).toBe(1);
+		await expect.poll(() => marks("cue")).toEqual(["M", "C", "M", "M"]);
+
+		// a clip edit in between: undo goes back through all three in order
+		await h.page.keyboard.press("Meta+d");
+		expect((await clips()).length).toBe(2);
+		await h.page.keyboard.press("Meta+z");
+		expect((await clips()).length).toBe(1);
+		expect(rows().length).toBe(4);
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START.filter((r) => r.id !== "4"));
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START); // the same row as before, id and all
+		await expect.poll(() => marks("cue")).toEqual(["M", "C", "MA"]);
+		expect((await clips()).length).toBe(1);
+		// and redo
+		await h.page.keyboard.press("Meta+Shift+z");
+		await expect.poll(rows).toEqual(START.filter((r) => r.id !== "4"));
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START);
+		await shot(h.page, "rb-cues-01");
+	});
+
+	it("waits for a letter for a hot cue, and replaces the one on that letter in one step", async () => {
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const wait = h.page.getByTestId("cue-wait");
+
+		// Escape gives up
+		await rightClick("cue", "C", 4 * ppb);
+		await h.page.getByTestId("menu-cue-hot").click();
+		await wait.waitFor();
+		await h.page.keyboard.press("Escape");
+		expect(await wait.count()).toBe(0);
+		expect((await clips()).length).toBe(1); // and did not delete the clip
+		expect(rows()).toEqual(START);
+
+		// keys that are no hot cue do nothing, whatever else they mean; then C
+		await rightClick("cue", "C", 4 * ppb);
+		await h.page.getByTestId("menu-cue-hot").click();
+		await wait.waitFor();
+		for (const key of ["x", "1", "Space", "Backspace", "Meta+z"]) await h.page.keyboard.press(key);
+		await h.page.keyboard.down("s");
+		expect(await h.page.evaluate(() => document.body.classList.contains("split-tool"))).toBe(false);
+		await h.page.keyboard.up("s");
+		expect(await wait.count()).toBe(1);
+		expect(await state(h.page, "s => s.playing")).toBe(false);
+		expect((await clips()).length).toBe(1);
+		expect(rows()).toEqual(START);
+		await h.page.keyboard.press("c");
+		expect(await wait.count()).toBe(0);
+		await expect.poll(() => rows().filter((r) => r.kind === 3).map((r) => r.ms)).toEqual([aBeatMs(20)]);
+		expect(rows().some((r) => r.id === "2")).toBe(false);
+		// the line has moved four beats along
+		await expect.poll(async () => (await h.page.locator('[data-testid="cue"][data-cue="C"]').boundingBox())!.x - (await h.page.locator('[data-testid="cue"][data-cue="M"]').boundingBox())!.x).toBeCloseTo(12 * ppb, 0);
+		await shot(h.page, "rb-cues-02-hot");
+
+		// one undo brings the old C back and takes the new one out
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START);
+		await h.page.keyboard.press("Meta+Shift+z");
+		await expect.poll(() => rows().filter((r) => r.kind === 3).map((r) => r.ms)).toEqual([aBeatMs(20)]);
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START);
+
+		// a capital letter is the same letter; D is stored the way Rekordbox stores it
+		await rightClick("cue", "C", 4 * ppb);
+		await h.page.getByTestId("menu-cue-hot").click();
+		await h.page.keyboard.press("Shift+D");
+		await expect.poll(() => rows().filter((r) => r.kind === 5).map((r) => r.ms)).toEqual([aBeatMs(20)]);
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(rows).toEqual(START);
+	});
+
+	it("does the same in the track editor, with its own undo", async () => {
+		await h.page.locator('[data-testid="clip"]').first().click({ button: "right", position: { x: 30, y: 40 } });
+		await h.page.getByTestId("menu-edit").click();
+		await expect.poll(() => marks("edit-cue")).toEqual(["M", "C", "MA"]);
+		const timelinePast: number = await state(h.page, "s => s.past.length");
+
+		await rightClick("edit-cue", "C");
+		expect(await h.page.getByTestId("menu-split").count()).toBe(0); // no clip here: only the cue items
+		await h.page.getByTestId("menu-cue-delete-3").click();
+		await expect.poll(rows).toEqual(START.filter((r) => r.id !== "2"));
+		await expect.poll(() => marks("edit-cue")).toEqual(["M", "MA"]);
+		expect(await marks("cue")).toEqual(["M", "MA"]); // the timeline shows the same track
+
+		expect(await state(h.page, "s => s.past.length")).toBe(timelinePast);
+		await h.page.getByTestId("edit-undo").click();
+		await expect.poll(rows).toEqual(START);
+		await h.page.getByTestId("edit-redo").click();
+		await expect.poll(rows).toEqual(START.filter((r) => r.id !== "2"));
+		await h.page.keyboard.press("Meta+z"); // the editor was clicked last: its undo
+		await expect.poll(rows).toEqual(START);
+		await shot(h.page, "rb-cues-03-editor");
+	});
+
+	it("offers no cue changes on a track Rekordbox does not have", async () => {
+		await newSet();
+		await importTrack(h.page, f.plain, 128, 0, 0);
+		await h.page.locator('[data-testid="clip"]').first().click({ button: "right", position: { x: 30, y: 40 } });
+		expect(await h.page.getByTestId("menu-cue-memory").isDisabled()).toBe(true);
+		expect(await h.page.getByTestId("menu-cue-hot").isDisabled()).toBe(true);
+		await h.page.keyboard.press("Escape");
 	});
 });

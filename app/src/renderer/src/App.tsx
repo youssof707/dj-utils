@@ -4,7 +4,9 @@ import { stopEditPreview, toggleEditPreview } from "./planner/editPlayer";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
 import { Home } from "./planner/Home";
-import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
+import { Library } from "./planner/Library";
+import { cueWaitKey } from "./planner/cues";
+import { ClipMenu, CueWait, Modals, TopBar, Toast } from "./planner/Panels";
 import { closeSettings, Settings } from "./planner/Settings";
 import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
@@ -21,7 +23,7 @@ function isTyping(): boolean {
 
 function modalOpen(): boolean {
 	const s = store.get();
-	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.pendingDuplicate !== null || s.exportUi !== null;
+	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.pendingDuplicate !== null || s.exportUi !== null || s.cueWait !== null;
 }
 
 function menuAction(action: string): void {
@@ -177,9 +179,14 @@ const dropSplitTool = (): void => document.body.classList.remove(...Object.value
 function onKey(e: KeyboardEvent): void {
 	// A shortcut with Command never leaves the cut tool on: its key-up may not arrive.
 	if (e.metaKey || e.ctrlKey) dropSplitTool();
+	// A hot cue is waiting for its letter: every key is its, before any other meaning.
+	if (store.get().cueWait) {
+		cueWaitKey(e);
+		return;
+	}
 	if (modalOpen()) return;
-	// A set name being typed takes every key, Space included.
-	if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("name-edit")) return;
+	// A set name or a search being typed takes every key, Space included.
+	if (document.activeElement instanceof HTMLInputElement && (document.activeElement.classList.contains("name-edit") || document.activeElement.classList.contains("search"))) return;
 	// Space is otherwise the transport key outside dialogs. The other fields outside dialogs
 	// are BPM boxes, where a space means nothing, so let go of whatever holds focus (a BPM box
 	// commits on blur) and play.
@@ -433,6 +440,7 @@ export default function App() {
 					<Modals />
 					<ClipMenu />
 					<Toast />
+					<CueWait />
 				</>
 			)}
 			<Updater />

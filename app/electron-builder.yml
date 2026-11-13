@@ -13,6 +13,10 @@ files:
 extraResources:
   - from: build/icon.png
     to: icon.png
+  # Writes cue points into Rekordbox's database (src/main/rekordbox.ts); built by
+  # scripts/build-sqlcipher.sh.
+  - from: resources/sqlcipher
+    to: sqlcipher
 mac:
   icon: build/icon.icns
   target:

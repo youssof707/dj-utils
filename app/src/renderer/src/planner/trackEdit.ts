@@ -5,7 +5,7 @@ import { trackBeats, type PlannerTrack } from "@shared/planner";
 import { BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT } from "./actions";
 import { playEditPreview, stopEditPreview } from "./editPlayer";
 import { reconcileMedia } from "./media";
-import { errorText, newId, store, type EditLane, type EditSnap, type TrackEditUi } from "./store";
+import { errorText, isCueStep, newId, runCueStep, store, type CueStep, type EditLane, type EditSnap, type TrackEditUi } from "./store";
 
 const HISTORY = 200;
 const PAD = 12; // px left free at the right edge when the whole edit is fitted to the panel
@@ -331,7 +331,13 @@ export function editAddSelected(): void {
 	commit({ sections: [...e.sections, ...added] }, { selection: added.map((s) => s.id), lane: "out", cursorBeat: at, scrollX: x < 0 || x > e.width - 60 ? at * px - e.width / 3 : e.scrollX });
 }
 
-function restore(snap: EditSnap, past: EditSnap[], future: EditSnap[]): void {
+// A change to the cues of one of the editor's tracks, made in Rekordbox: one undo step here.
+export function editPushCueStep(step: CueStep): void {
+	const e = ed();
+	if (e) patch({ past: [...e.past, step].slice(-HISTORY), future: [] });
+}
+
+function restore(snap: EditSnap, past: (EditSnap | CueStep)[], future: (EditSnap | CueStep)[]): void {
 	const e = ed();
 	if (!e) return;
 	stopEditPreview();
@@ -341,13 +347,26 @@ function restore(snap: EditSnap, past: EditSnap[], future: EditSnap[]): void {
 export function editUndo(): void {
 	const e = ed();
 	if (!e || e.past.length === 0) return;
-	restore(e.past[e.past.length - 1], e.past.slice(0, -1), [snapOf(e), ...e.future]);
+	const step = e.past[e.past.length - 1];
+	if (isCueStep(step)) {
+		// The edit is as it was; only Rekordbox's cues go back.
+		patch({ past: e.past.slice(0, -1), future: [step, ...e.future] });
+		runCueStep(step, true);
+		return;
+	}
+	restore(step, e.past.slice(0, -1), [snapOf(e), ...e.future]);
 }
 
 export function editRedo(): void {
 	const e = ed();
 	if (!e || e.future.length === 0) return;
-	restore(e.future[0], [...e.past, snapOf(e)], e.future.slice(1));
+	const step = e.future[0];
+	if (isCueStep(step)) {
+		patch({ past: [...e.past, step], future: e.future.slice(1) });
+		runCueStep(step, false);
+		return;
+	}
+	restore(step, [...e.past, snapOf(e)], e.future.slice(1));
 }
 
 export function editZoom(factor: number, anchorPx?: number): void {

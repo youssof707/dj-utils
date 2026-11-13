@@ -64,8 +64,26 @@ export type PlannerDoc = {
 export type RekordboxGrid = { bpm: number; downbeatSec: number };
 
 // A Rekordbox cue point, in seconds into our own decode of the file. Kind 0 is a memory
-// cue; 1 and up are the hot cues A, B, C...
-export type Cue = { sec: number; kind: number };
+// cue; 1 and up are the hot cues A, B, C... `id` is Rekordbox's own for it.
+export type Cue = { id: string; sec: number; kind: number; loop?: boolean };
+// A track's cues, and whether they can be added to and deleted from here.
+export type CueInfo = { cues: Cue[]; canEdit: boolean };
+// A cue exactly as Rekordbox's database holds it, every column: what undo puts back.
+export type CueRow = Record<string, string | number | null>;
+// What a change to a track's cues did, and the cues the track has now.
+export type CueChange = { cues: Cue[]; added: CueRow[]; removed: CueRow[] };
+export const HOT_CUES = 8; // A to H
+
+// A track in the Rekordbox library. `bpm` is 0 and `key` is "" when Rekordbox has none.
+// `key` is in Camelot form (8A, 7B) where Rekordbox's can be read that way, and `keyOrder`
+// then puts keys in the order 1A, 1B, 2A ... 12B; it is null for any other key. `added`
+// counts up in the order tracks were added to Rekordbox. `available` is false when there
+// is no file to load: a streaming track, or a file that is gone.
+export type RekordboxTrack = { id: string; title: string; artist: string; bpm: number; key: string; keyOrder: number | null; lengthSec: number; path: string; available: boolean; added: number };
+// A playlist with the folders it sits in as part of its name ("Folder / Playlist"), and
+// its tracks' ids in playlist order.
+export type RekordboxPlaylist = { id: string; name: string; tracks: string[] };
+export type RekordboxLibrary = { tracks: RekordboxTrack[]; playlists: RekordboxPlaylist[] };
 
 export type ProbeResult = {
 	path: string;

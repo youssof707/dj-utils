@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type CueChange, type CueInfo, type CueRow, HOT_CUES, type PlannerDoc, type ProbeResult, type RekordboxGrid, type RekordboxLibrary, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
 import { normalizeDoc, renderingsFor, tempoMapOf } from "../shared/renderings";
 import { afconvertToWav } from "./audio/dsp";
 import { readGridTag, type SpliceResult } from "./audio/splice";
@@ -14,7 +14,7 @@ import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
 import { dataRoot } from "./paths";
 import { exportDir } from "./settings";
-import { databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, type LibraryCue, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
+import { cuesAfter, databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, newCueRow, parseAnlz, type CueChangeJob, type CueChangeResult, type CueLibrary, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
 
 const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "caf", "mp4", "alac"];
 
@@ -286,9 +286,18 @@ async function rekordboxGrid(sourcePath: string): Promise<RekordboxGrid | null> 
 // Cue points come from Rekordbox's database, read again whenever Rekordbox has written to
 // it, so cues set a moment ago are there.
 let rekordboxDb: string | null = null;
-let cueIndex: Record<string, LibraryCue[]> = {};
+let cueLibrary: CueLibrary = { cues: {}, contents: {} };
 let cueStamp = "";
 let cueLoad: Promise<void> | null = null;
+// Reading the cues and changing them take turns, so a read never brings back the cues as
+// they were before a change that has since been made.
+let cueTurn: Promise<unknown> = Promise.resolve();
+
+function inCueTurn<T>(fn: () => Promise<T>): Promise<T> {
+	const p = cueTurn.then(fn, fn);
+	cueTurn = p.catch(() => {});
+	return p;
+}
 
 function findRekordboxDb(): string | null {
 	const forced = process.env["DJ_REKORDBOX_DB"];
@@ -298,29 +307,123 @@ function findRekordboxDb(): string | null {
 
 function loadCues(): Promise<void> {
 	if (!rekordboxDb) return Promise.resolve();
-	if (cueLoad) return cueLoad;
 	const dbPath = rekordboxDb;
-	const stamp = databaseStamp(dbPath);
-	if (stamp === cueStamp) return Promise.resolve();
-	cueLoad = runWorker<Record<string, LibraryCue[]>>({ type: "rekordbox-cues", job: { dbPath } }, () => {})
-		.then((cues) => {
-			cueIndex = cues;
-		})
-		.catch((e) => console.error("Rekordbox cues could not be read:", e)) // keeps the cues we had
-		.finally(() => {
-			cueStamp = stamp;
-			cueLoad = null;
-		});
+	cueLoad ??= inCueTurn(async () => {
+		const stamp = databaseStamp(dbPath);
+		if (stamp === cueStamp) return;
+		try {
+			cueLibrary = await runWorker<CueLibrary>({ type: "rekordbox-cues", job: { dbPath } }, () => {});
+		} catch (e) {
+			console.error("Rekordbox cues could not be read:", e); // keeps the cues we had
+		}
+		cueStamp = stamp;
+	}).finally(() => {
+		cueLoad = null;
+	});
 	return cueLoad;
 }
 
+// The program that writes to Rekordbox's database. Packaged: copied to Resources by
+// extraResources. Dev: app/resources/sqlcipher (scripts/build-sqlcipher.sh makes it).
+const sqlcipherPath = (): string => (app.isPackaged ? path.join(process.resourcesPath, "sqlcipher") : path.join(app.getAppPath(), "resources/sqlcipher"));
+
+const cuesOf = (m: RekordboxMatch): Cue[] => (cueLibrary.cues[datKey(m.dat)] ?? []).map((c) => ({ id: c.id, sec: c.ms / 1000 - m.shiftSec, kind: c.kind, ...(c.loop ? { loop: true } : {}) }));
+
 // The file's memory cues and hot cues, on our own decode of it.
-async function rekordboxCues(sourcePath: string): Promise<Cue[]> {
-	if (!rekordboxDb) return [];
+async function rekordboxCues(sourcePath: string): Promise<CueInfo> {
+	if (!rekordboxDb) return { cues: [], canEdit: false };
 	const m = await rekordboxMatch(sourcePath, false);
-	if (!m) return [];
+	if (!m) return { cues: [], canEdit: false };
 	await loadCues();
-	return (cueIndex[datKey(m.dat)] ?? []).map((c) => ({ sec: c.ms / 1000 - m.shiftSec, kind: c.kind }));
+	return { cues: cuesOf(m), canEdit: datKey(m.dat) in cueLibrary.contents && fs.existsSync(sqlcipherPath()) };
+}
+
+const BEAT_PULL_MS = 30;
+
+// The time Rekordbox would give a cue set here: exactly on its own beat line when there is
+// one this close, which is where a cue from here is meant to be.
+function onRekordboxBeat(dat: string, ms: number): number {
+	try {
+		const beats = parseAnlz(fs.readFileSync(dat))?.beats ?? [];
+		let best = ms;
+		let far = BEAT_PULL_MS;
+		for (const b of beats) {
+			const d = Math.abs(b.ms - ms);
+			if (d <= far) {
+				far = d;
+				best = b.ms;
+			}
+		}
+		return best;
+	} catch {
+		return ms;
+	}
+}
+
+// Makes one change to the file's cues in Rekordbox's database, and says what it did.
+// `plan` is given the track's row in Rekordbox and how to turn our seconds into its time.
+async function changeCues(sourcePath: string, plan: (content: { id: string; uuid: string }, toMs: (sec: number) => number) => Omit<CueChangeJob, "contentId">): Promise<CueChange> {
+	const dbPath = rekordboxDb;
+	const m = dbPath ? await rekordboxMatch(sourcePath, false) : null;
+	if (!dbPath || !m) throw new Error("This track is not in Rekordbox");
+	await loadCues();
+	return inCueTurn(async () => {
+		const key = datKey(m.dat);
+		const content = cueLibrary.contents[key];
+		if (!content) throw new Error("This track is not in Rekordbox");
+		const bin = sqlcipherPath();
+		if (!fs.existsSync(bin)) throw new Error("Cues cannot be changed in this build of the app");
+		const change = { contentId: content.id, ...plan(content, (sec) => onRekordboxBeat(m.dat, Math.max(0, Math.round((sec + m.shiftSec) * 1000)))) };
+		const done = await runWorker<CueChangeResult>({ type: "rekordbox-cue-change", job: { bin, dbPath, change } }, () => {});
+		cueLibrary.cues[key] = cuesAfter(cueLibrary.cues[key] ?? [], done.removed, done.added);
+		return { cues: cuesOf(m), added: done.added, removed: done.removed };
+	});
+}
+
+async function addCue(sourcePath: string, sec: number, kind: number): Promise<CueChange> {
+	if (!Number.isFinite(sec) || !Number.isInteger(kind) || kind < 0 || kind > HOT_CUES) throw new Error("That is not a cue");
+	const done = await changeCues(sourcePath, (content, toMs) => ({ remove: [], clear: kind > 0 ? [kind] : [], insert: [newCueRow(content, toMs(sec), kind)] }));
+	if (done.added.length === 0) throw new Error("The cue was not added. Try again");
+	return done;
+}
+
+const ids = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+
+function deleteCues(sourcePath: string, remove: string[]): Promise<CueChange> {
+	return changeCues(sourcePath, () => ({ remove: ids(remove), clear: [], insert: [] }));
+}
+
+function applyCues(sourcePath: string, remove: string[], insert: CueRow[]): Promise<CueChange> {
+	return changeCues(sourcePath, () => ({ remove: ids(remove), clear: [], insert: Array.isArray(insert) ? insert : [] }));
+}
+
+// Rekordbox's tracks and playlists, read again when Rekordbox has written to its database.
+// Null when there is no Rekordbox library here. If a later read fails, the last one stands.
+let library: RekordboxLibrary | null = null;
+let libraryStamp = "";
+let libraryLoad: Promise<void> | null = null;
+
+async function rekordboxLibrary(): Promise<RekordboxLibrary | null> {
+	if (!rekordboxDb) return null;
+	const dbPath = rekordboxDb;
+	const stamp = databaseStamp(dbPath);
+	if (stamp !== libraryStamp || !library) {
+		libraryLoad ??= runWorker<RekordboxLibrary>({ type: "rekordbox-library", job: { dbPath } }, () => {})
+			.then((read) => {
+				library = read;
+				libraryStamp = stamp;
+			})
+			.finally(() => {
+				libraryLoad = null;
+			});
+		try {
+			await libraryLoad;
+		} catch (e) {
+			console.error("Rekordbox library could not be read:", e);
+			if (!library) throw e;
+		}
+	}
+	return library;
 }
 
 // The file's beat grid: Rekordbox's when it has analysed the file, otherwise the one an
@@ -971,6 +1074,10 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:probe", (_e, p: string) => probe(p));
 	ipcMain.handle("planner:rekordbox", (_e, p: string) => trackGrid(p));
 	ipcMain.handle("planner:cues", (_e, p: string) => rekordboxCues(p));
+	ipcMain.handle("planner:cue-add", (_e, p: string, sec: number, kind: number) => addCue(p, sec, kind));
+	ipcMain.handle("planner:cue-delete", (_e, p: string, remove: string[]) => deleteCues(p, remove));
+	ipcMain.handle("planner:cue-apply", (_e, p: string, remove: string[], insert: CueRow[]) => applyCues(p, remove, insert));
+	ipcMain.handle("planner:rekordbox-library", () => rekordboxLibrary());
 	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => ensureStretch(req));
 	ipcMain.handle("planner:ramp", (_e, req: RampRequest) => ensureRamp(req));
 	ipcMain.handle("planner:keep", (_e, keys: string[]) => keepOnly(keys));
