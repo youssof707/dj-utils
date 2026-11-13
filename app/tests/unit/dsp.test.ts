@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { computePeaks, finalize, keylock, mixClips, stretchFile, varispeed } from "../../src/main/audio/dsp";
-import { SAMPLE_RATE as SR } from "../../src/shared/planner";
+import { computePeaks, finalize, keylock, mixClips, renderRamp, stretchFile, varispeed } from "../../src/main/audio/dsp";
+import { JOIN_FADE_SEC, SAMPLE_RATE as SR } from "../../src/shared/planner";
 import { TempoMap } from "../../src/shared/tempo";
 import { frequency, onsets, readAll, writeClickTrack, writeTone } from "../signals";
 
@@ -91,7 +91,7 @@ describe("tempo stage", () => {
 	it("key lock follows the curve and holds pitch", async () => {
 		const out = path.join(dir, "key.wav");
 		await keylock(src, out, points, 120, dir);
-		checkTiming(out, 0.012);
+		checkTiming(out, 0.003);
 	});
 
 	it("key lock holds a pure tone's pitch through a ramp", async () => {
@@ -106,6 +106,80 @@ describe("tempo stage", () => {
 			console.log("beat", beat, "freq", f.toFixed(2));
 			expect(Math.abs(f - 440)).toBeLessThan(4);
 		}
+	});
+});
+
+describe("ramp rendering", () => {
+	// A stretch of a 120 BPM track that plays while the set goes from 128 to 140.
+	const job = { bpm: 120, fromBeat: 20, lengthBeat: 32, bpmA: 128, bpmB: 140 };
+	const map = new TempoMap(
+		[
+			{ beat: 0, bpm: 128 },
+			{ beat: 32, bpm: 140 },
+		],
+		128,
+	);
+
+	it("puts every beat where the tempo curve says, starting a moment early", async () => {
+		const src = path.join(dir, "ramp-src.wav");
+		writeClickTrack(src, 120, 60, { kind: "float32" });
+		const out = path.join(dir, "ramp.wav");
+		const frames = await renderRamp({ ...job, decodedPath: src, outPath: out, tmpDir: dir });
+		const lead = JOIN_FADE_SEC;
+		expect(Math.abs(frames / SR - (lead + map.secondsAtBeat(32)))).toBeLessThan(0.001);
+		// the 33rd beat falls right on the end of the file, and may just show
+		const on = onsets(readAll(out).left, 0.4).slice(0, 32);
+		expect(on.length).toBe(32);
+		let worst = 0;
+		on.forEach((o, i) => {
+			worst = Math.max(worst, Math.abs(o / SR - lead - map.secondsAtBeat(i)));
+		});
+		console.log("ramp: clicks", on.length, "worst timing error (ms)", worst * 1000);
+		expect(worst).toBeLessThan(0.002);
+		expect(fs.readdirSync(dir).filter((f) => f.startsWith("rampjob-"))).toEqual([]);
+	});
+
+	it("holds the pitch from the first moment to the last", async () => {
+		const src = path.join(dir, "ramp-tone.wav");
+		writeTone(src, 440, 60);
+		const out = path.join(dir, "ramp-tone-out.wav");
+		const frames = await renderRamp({ ...job, decodedPath: src, outPath: out, tmpDir: dir });
+		const { left } = readAll(out);
+		const len = frames / SR;
+		for (const at of [0, 0.3, len / 2, len - 0.6, len - 0.3]) {
+			const f = frequency(left, at, 0.25);
+			console.log("ramp tone at", at.toFixed(2), "freq", f.toFixed(2));
+			expect(Math.abs(f - 440)).toBeLessThan(4);
+		}
+		// no dip or bump in level at either edge
+		const rms = (a: number, b: number): number => Math.sqrt(left.subarray(Math.round(a * SR), Math.round(b * SR)).reduce((s, v) => s + v * v, 0) / Math.round((b - a) * SR));
+		const mid = rms(len / 2, len / 2 + 0.2);
+		expect(rms(0, 0.05) / mid).toBeGreaterThan(0.9);
+		expect(rms(len - 0.05, len) / mid).toBeGreaterThan(0.9);
+	});
+
+	it("renders a ramp at the very start and the very end of a track", async () => {
+		const src = path.join(dir, "ramp-short.wav");
+		writeClickTrack(src, 120, 10, { kind: "float32" }); // 20 beats
+		const out = path.join(dir, "ramp-edge.wav");
+		const whole = { bpm: 120, fromBeat: 0, lengthBeat: 20, bpmA: 100, bpmB: 130 };
+		const frames = await renderRamp({ ...whole, decodedPath: src, outPath: out, tmpDir: dir });
+		const m = new TempoMap(
+			[
+				{ beat: 0, bpm: 100 },
+				{ beat: 20, bpm: 130 },
+			],
+			100,
+		);
+		expect(Math.abs(frames / SR - (JOIN_FADE_SEC + m.secondsAtBeat(20)))).toBeLessThan(0.001);
+		const on = onsets(readAll(out).left, 0.4);
+		let worst = 0;
+		on.forEach((o, i) => {
+			worst = Math.max(worst, Math.abs(o / SR - JOIN_FADE_SEC - m.secondsAtBeat(i)));
+		});
+		console.log("ramp over a whole track: clicks", on.length, "worst timing error (ms)", worst * 1000);
+		expect(on.length).toBe(20);
+		expect(worst).toBeLessThan(0.002);
 	});
 });
 

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, SAMPLE_RATE, stretchKey, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type Session, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type Session, type StretchRequest, type StretchResult } from "../shared/planner";
 import { afconvertToWav } from "./audio/dsp";
 import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
@@ -69,14 +69,17 @@ const decoding = new Map<string, Promise<string>>();
 
 // Decodes any supported file to a 44.1 kHz stereo float WAV. MP3 and WAV are read
 // directly by the system decoder; so is everything else it understands.
+function decodedPathOf(sourcePath: string): string {
+	return path.join(decodedDir, `${sourceHash(sourcePath)}.wav`);
+}
+
 function decode(sourcePath: string): Promise<string> {
-	let hash: string;
+	let out: string;
 	try {
-		hash = sourceHash(sourcePath);
+		out = decodedPathOf(sourcePath);
 	} catch {
 		return Promise.reject(new Error("The source file is missing"));
 	}
-	const out = path.join(decodedDir, `${hash}.wav`);
 	if (fs.existsSync(out)) return Promise.resolve(out);
 	let p = decoding.get(out);
 	if (!p) {
@@ -322,35 +325,141 @@ async function probe(sourcePath: string): Promise<ProbeResult> {
 	return { path: sourcePath, name: path.basename(sourcePath).replace(/\.[^.]+$/, ""), durationSec, tagBpm: readTagBpm(sourcePath), rekordbox, rekordboxBpm };
 }
 
-// Stretch queue: a few at a time, one job per (file, track BPM, project BPM).
+// Stretch queue: a few at a time, one job per rendering (see stretchKey and rampKey). The
+// window says which renderings the set still needs; work on anything else is dropped, so
+// trying a few tempos in a row does not leave a queue of stretches nobody will hear.
 const stretching = new Map<string, Promise<StretchResult>>();
-const waiting: (() => void)[] = [];
+const waiting: { key: string; go: () => void; drop: () => void }[] = [];
+const workers = new Map<string, Worker>();
+let wanted: Set<string> | null = null;
 let active = 0;
 const MAX_ACTIVE = 3;
 const decodedUsers = new Map<string, number>();
+const decodedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
+const DECODED_LINGER_MS = 30000;
 
-function slot(): Promise<void> {
+function dropped(key: string): boolean {
+	return wanted !== null && !wanted.has(key);
+}
+
+function slot(key: string): Promise<void> {
 	if (active < MAX_ACTIVE) {
 		active++;
 		return Promise.resolve();
 	}
-	return new Promise((res) => waiting.push(res));
+	return new Promise((res, rej) => waiting.push({ key, go: res, drop: () => rej(new Error("cancelled")) }));
 }
 function release(): void {
 	const next = waiting.shift();
-	if (next) next();
+	if (next) next.go();
 	else active--;
+}
+
+function stopWorker(w: Worker): void {
+	cancelled.add(w);
+	w.postMessage("cancel");
+	// The worker exits by itself once it has stopped its helper process.
+	const t = setTimeout(() => void w.terminate(), 2000);
+	w.once("exit", () => clearTimeout(t));
+}
+
+function keepOnly(keys: string[]): void {
+	wanted = new Set(keys);
+	for (let i = waiting.length - 1; i >= 0; i--) {
+		if (!dropped(waiting[i].key)) continue;
+		waiting[i].drop();
+		waiting.splice(i, 1);
+	}
+	for (const [key, w] of workers) if (dropped(key)) stopWorker(w);
+}
+
+// Runs one queued job in a worker, on the decoded copy of its source. The copy is claimed
+// before it is made, so a job that finishes meanwhile cannot clear it away from under this one.
+async function queued<T>(key: string, sourcePath: string, task: (decodedPath: string) => Task): Promise<T> {
+	await slot(key);
+	let claimed = "";
+	try {
+		try {
+			claimed = decodedPathOf(sourcePath);
+		} catch {
+			throw new Error("The source file is missing");
+		}
+		decodedUsers.set(claimed, (decodedUsers.get(claimed) ?? 0) + 1);
+		const decodedPath = await decode(sourcePath);
+		if (dropped(key)) throw new Error("cancelled");
+		return await runWorker<T>(
+			task(decodedPath),
+			(pr) => send("planner:stretch-progress", { key, pct: pr.pct }),
+			(w) => {
+				workers.set(key, w);
+				w.once("exit", () => {
+					if (workers.get(key) === w) workers.delete(key);
+				});
+			},
+		);
+	} finally {
+		release();
+		if (claimed) {
+			// The decoded copy is only needed while stretching. It is dropped a little after
+			// its last use, not at once: one edit to a tempo change is often followed by another,
+			// which would only decode the same files again.
+			const file = claimed;
+			const left = (decodedUsers.get(file) ?? 1) - 1;
+			if (left > 0) decodedUsers.set(file, left);
+			else {
+				decodedUsers.delete(file);
+				clearTimeout(decodedExpiry.get(file));
+				decodedExpiry.set(
+					file,
+					setTimeout(() => {
+						decodedExpiry.delete(file);
+						if (!decodedUsers.has(file)) fs.rmSync(file, { force: true });
+					}, DECODED_LINGER_MS),
+				);
+			}
+		}
+	}
+}
+
+// What a stopped job left half-written next to its target.
+function removeParts(cachePath: string): void {
+	const stem = `${path.basename(cachePath)}.`;
+	try {
+		for (const f of fs.readdirSync(cacheDir)) if (f.startsWith(stem) && f.includes(".part.")) fs.rmSync(path.join(cacheDir, f), { force: true });
+	} catch {
+		// clean-up is best effort
+	}
 }
 
 function cachePathFor(req: StretchRequest): string {
 	return path.join(cacheDir, `${sourceHash(req.sourcePath)}-${req.bpm}-${req.projectBpm}.wav`);
 }
 
+function cached(cachePath: string): StretchResult | null {
+	if (!fs.existsSync(cachePath)) return null;
+	try {
+		const frames = wavFrames(cachePath);
+		const now = new Date();
+		fs.utimesSync(cachePath, now, now); // mark as recently used for cache clean-up
+		return { cachePath, frames };
+	} catch {
+		return null; // damaged cache file: rebuild it
+	}
+}
+
+function once(key: string, job: () => Promise<StretchResult>): Promise<StretchResult> {
+	wanted?.add(key);
+	let p = stretching.get(key);
+	if (!p) {
+		p = job().finally(() => stretching.delete(key));
+		stretching.set(key, p);
+	}
+	return p;
+}
+
 function ensureStretch(req: StretchRequest): Promise<StretchResult> {
 	const key = stretchKey(req);
-	let p = stretching.get(key);
-	if (p) return p;
-	p = (async () => {
+	return once(key, async () => {
 		let cachePath: string;
 		try {
 			cachePath = cachePathFor(req);
@@ -358,39 +467,48 @@ function ensureStretch(req: StretchRequest): Promise<StretchResult> {
 			throw new Error("The source file is missing");
 		}
 		const peaksPath = `${cachePath}${PEAKS_EXT}`;
-		if (fs.existsSync(cachePath)) {
+		const have = cached(cachePath);
+		if (have) {
 			try {
-				const frames = wavFrames(cachePath);
 				// Stretched audio from before the current waveform format: only redo the waveform.
 				if (!fs.existsSync(peaksPath)) await runWorker({ type: "peaks", job: { wavPath: cachePath, peaksPath } }, () => {});
-				const now = new Date();
-				fs.utimesSync(cachePath, now, now); // mark as recently used for cache clean-up
-				return { cachePath, frames };
+				return have;
 			} catch {
 				// damaged cache file: rebuild it
 			}
 		}
-		await slot();
-		let decodedPath = "";
 		try {
-			decodedPath = await decode(req.sourcePath);
-			decodedUsers.set(decodedPath, (decodedUsers.get(decodedPath) ?? 0) + 1);
-			const { frames } = await runWorker<{ frames: number }>({ type: "prepare", job: { decodedPath, outPath: cachePath, peaksPath, fromBpm: req.bpm, toBpm: req.projectBpm } }, (pr) => send("planner:stretch-progress", { key, pct: pr.pct }));
+			const { frames } = await queued<{ frames: number }>(key, req.sourcePath, (decodedPath) => ({ type: "prepare", job: { decodedPath, outPath: cachePath, peaksPath, fromBpm: req.bpm, toBpm: req.projectBpm } }));
+			return { cachePath, frames };
+		} catch (e) {
+			removeParts(cachePath);
+			throw e;
+		}
+	});
+}
+
+function ensureRamp(req: RampRequest): Promise<StretchResult> {
+	const key = rampKey(req);
+	return once(key, async () => {
+		let cachePath: string;
+		try {
+			const id = createHash("sha1").update(`${req.bpm}|${req.fromBeat}|${req.lengthBeat}|${req.bpmA}|${req.bpmB}`).digest("hex").slice(0, 16);
+			cachePath = path.join(cacheDir, `ramp-${sourceHash(req.sourcePath)}-${id}.wav`);
+		} catch {
+			throw new Error("The source file is missing");
+		}
+		const have = cached(cachePath);
+		if (have) return have;
+		const tmpDir = `${cachePath}.work`;
+		fs.mkdirSync(tmpDir, { recursive: true });
+		try {
+			const { frames } = await queued<{ frames: number }>(key, req.sourcePath, (decodedPath) => ({ type: "ramp", job: { decodedPath, outPath: cachePath, bpm: req.bpm, fromBeat: req.fromBeat, lengthBeat: req.lengthBeat, bpmA: req.bpmA, bpmB: req.bpmB, tmpDir } }));
 			return { cachePath, frames };
 		} finally {
-			release();
-			if (decodedPath) {
-				// The decoded copy is only needed while stretching; drop it once nobody uses it.
-				const left = (decodedUsers.get(decodedPath) ?? 1) - 1;
-				if (left <= 0) {
-					decodedUsers.delete(decodedPath);
-					void fs.promises.rm(decodedPath, { force: true });
-				} else decodedUsers.set(decodedPath, left);
-			}
+			removeParts(cachePath);
+			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
-	})().finally(() => stretching.delete(key));
-	stretching.set(key, p);
-	return p;
+	});
 }
 
 function inCache(file: string): boolean {
@@ -469,6 +587,8 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:rekordbox", (_e, p: string) => rekordboxGrid(p));
 	ipcMain.handle("planner:cues", (_e, p: string) => rekordboxCues(p));
 	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => ensureStretch(req));
+	ipcMain.handle("planner:ramp", (_e, req: RampRequest) => ensureRamp(req));
+	ipcMain.handle("planner:keep", (_e, keys: string[]) => keepOnly(keys));
 	ipcMain.handle("planner:read-audio", async (_e, file: string) => {
 		if (!inCache(file)) throw new Error("Not a cache file");
 		return fs.promises.readFile(file);

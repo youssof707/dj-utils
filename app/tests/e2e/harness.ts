@@ -12,8 +12,12 @@ export async function launch(dataDir?: string, workDir?: string, env: Record<str
 	const data = dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "planner-data-"));
 	const work = workDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "planner-work-"));
 	fs.mkdirSync(SHOTS, { recursive: true });
-	const app = await _electron.launch({ args: [APP_DIR], cwd: APP_DIR, env: { ...process.env, ...env, DJ_PLANNER_DATA: data } });
+	// --mute-audio: everything still plays and can be recorded from the audio graph, but nothing
+	// reaches the speakers.
+	const app = await _electron.launch({ args: ["--mute-audio", APP_DIR], cwd: APP_DIR, env: { ...process.env, ...env, DJ_PLANNER_DATA: data } });
 	const page = await app.firstWindow();
+	// And mute the window itself as well, so a test run is never heard.
+	await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.webContents.setAudioMuted(true)));
 	page.on("console", (m) => {
 		if (m.type() === "error") console.log("[renderer error]", m.text());
 	});
@@ -56,6 +60,18 @@ export async function waitReady(page: Page, timeout = 300000): Promise<void> {
 			const els = Array.from(document.querySelectorAll('[data-testid="clip"]'));
 			const p = (window as any).planner;
 			return p.store.get().doc.tracks.length > 0 && document.querySelector('[data-testid="working"]') === null && els.every((e) => (e as HTMLElement).dataset.status !== "working");
+		},
+		undefined,
+		{ timeout, polling: 200 },
+	);
+}
+
+// Waits until every clip under a tempo change has the audio it plays there.
+export async function waitTempoReady(page: Page, timeout = 300000): Promise<void> {
+	await page.waitForFunction(
+		() => {
+			const p = (window as any).planner;
+			return p.tempoProgress(p.store.get().doc).left === 0;
 		},
 		undefined,
 		{ timeout, polling: 200 },

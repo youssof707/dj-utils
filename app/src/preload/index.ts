@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { Track } from "../shared/types";
-import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RekordboxGrid, Session, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
+import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, Session, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
 
 function on<T>(channel: string, cb: (payload: T) => void): () => void {
 	const fn = (_e: unknown, payload: T): void => cb(payload);
@@ -16,6 +16,9 @@ const api = {
 	rekordbox: (path: string): Promise<RekordboxGrid | null> => ipcRenderer.invoke("planner:rekordbox", path),
 	cues: (path: string): Promise<Cue[]> => ipcRenderer.invoke("planner:cues", path),
 	stretch: (req: StretchRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:stretch", req),
+	ramp: (req: RampRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:ramp", req),
+	// Says which renderings (stretchKey, rampKey) the set still needs; other work is dropped.
+	keepRenderings: (keys: string[]): Promise<void> => ipcRenderer.invoke("planner:keep", keys),
 	readAudio: (cachePath: string): Promise<Uint8Array> => ipcRenderer.invoke("planner:read-audio", cachePath),
 	readPeaks: (cachePath: string): Promise<Uint8Array> => ipcRenderer.invoke("planner:read-peaks", cachePath),
 	chooseAudio: (): Promise<string[]> => ipcRenderer.invoke("planner:choose-audio"),

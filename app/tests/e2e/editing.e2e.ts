@@ -192,14 +192,14 @@ describe("editing and playback", () => {
 		expect(cur.map((c) => c.lane)).toEqual([1, 2, 3]);
 		expect(cur[2].startBeat - cur[0].startBeat).toBeCloseTo(before[2].startBeat - before[0].startBeat, 6);
 		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Escape");
+		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
 	});
 
 	it("split from the context menu, then trim the two halves apart", async () => {
 		const ruler = (await h.page.getByTestId("ruler").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		await h.page.mouse.click(ruler.x + 40 * ppb, ruler.y + 10);
-		await h.page.locator('[data-testid="clip"]').first().click({ button: "right", modifiers: ["Alt"], position: { x: 50, y: 40 } });
+		await h.page.locator('[data-testid="clip"]').first().click({ button: "right", position: { x: 50, y: 40 } });
 		await shot(h.page, "11-menu");
 		await h.page.getByTestId("menu-split").click();
 		const cs = await clips();
@@ -212,33 +212,43 @@ describe("editing and playback", () => {
 		expect((await clips()).length).toBe(3);
 	});
 
-	it("right-click deletes a clip; right-drag deletes every clip it crosses as one undo step", async () => {
+	it("right-click opens the clip's menu and never deletes; Delete and Escape delete the selection", async () => {
 		const before = await clips();
 		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		const laneH = lanes.height / 4;
 		const third = before.find((c) => c.lane === 2)!;
 		await h.page.mouse.click(lanes.x + (third.startBeat + 4) * ppb, lanes.y + laneH * 2.5, { button: "right" });
+		await h.page.getByTestId("clip-menu").waitFor();
+		expect(await clips()).toEqual(before);
+		expect(await state(h.page, "s => s.selection")).toEqual([third.id]);
+		// Escape closes the menu first, and leaves the clip alone
+		await h.page.keyboard.press("Escape");
 		expect(await h.page.getByTestId("clip-menu").count()).toBe(0);
+		expect(await clips()).toEqual(before);
+		// Delete from the menu
+		await h.page.mouse.click(lanes.x + (third.startBeat + 4) * ppb, lanes.y + laneH * 2.5, { button: "right" });
+		await h.page.getByTestId("menu-delete").click();
 		expect((await clips()).map((c) => c.id)).toEqual(before.filter((c) => c.id !== third.id).map((c) => c.id));
 		await h.page.keyboard.press("Meta+z");
 		expect(await clips()).toEqual(before);
-		// swipe down through lanes 0, 1 and 2 with the right button held
+		// a right-drag across clips does nothing
+		const past: number = await state(h.page, "s => s.past.length");
 		await h.page.mouse.move(lanes.x + 40 * ppb, lanes.y + laneH * 0.5);
 		await h.page.mouse.down({ button: "right" });
 		await h.page.mouse.move(lanes.x + 41 * ppb, lanes.y + laneH * 2.5, { steps: 3 });
 		await h.page.mouse.up({ button: "right" });
-		expect(await clips()).toEqual([]);
-		await h.page.keyboard.press("Meta+z");
-		expect(await clips()).toEqual(before);
-		// a swipe over empty space deletes nothing and adds no undo step
-		const past: number = await state(h.page, "s => s.past.length");
-		await h.page.mouse.move(lanes.x + 200 * ppb, lanes.y + laneH * 3.5);
-		await h.page.mouse.down({ button: "right" });
-		await h.page.mouse.move(lanes.x + 210 * ppb, lanes.y + laneH * 3.5, { steps: 3 });
-		await h.page.mouse.up({ button: "right" });
+		await h.page.keyboard.press("Escape"); // closes the menu the press opened
 		expect(await clips()).toEqual(before);
 		expect(await state(h.page, "s => s.past.length")).toBe(past);
+		// Escape with nothing else going on deletes the selection, like Delete
+		await state(h.page, `s => { window.planner.store.set({ menu: null, selection: [${JSON.stringify(third.id)}] }); return 0; }`);
+		await h.page.keyboard.press("Escape");
+		expect((await clips()).map((c) => c.id)).toEqual(before.filter((c) => c.id !== third.id).map((c) => c.id));
+		await h.page.keyboard.press("Meta+z");
+		await h.page.keyboard.press("Delete");
+		expect((await clips()).length).toBe(before.length); // undo cleared the selection: nothing to delete
+		expect(await clips()).toEqual(before);
 	});
 
 	it("C jumps back to where playback started and plays again", async () => {

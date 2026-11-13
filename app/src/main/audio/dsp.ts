@@ -4,7 +4,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { PEAK_BUCKET, SAMPLE_RATE, type ExportClip } from "../../shared/planner";
+import { JOIN_FADE_SEC, PEAK_BUCKET, RAMP_PAD_FRAMES, SAMPLE_RATE, type ExportClip } from "../../shared/planner";
 import { TempoMap, isFlat, type Pt } from "../../shared/tempo";
 import { WavReader, WavWriter } from "./wav";
 
@@ -173,7 +173,9 @@ function sincTable(cutoff: number): Float32Array {
 
 // Plays the mixed file back along the tempo curve by resampling: where the curve is above
 // the project BPM the audio runs faster. Pitch moves with speed. Timing is exact.
-export function varispeed(inPath: string, outPath: string, points: Pt[], projectBpm: number, onProgress: Progress = () => {}): number {
+// `lagFrames` is for input that runs late by that many frames for each 100% of speed-up
+// (and early when slowed down), which this reads ahead to undo; see SHIFT_LAG_FRAMES.
+export function varispeed(inPath: string, outPath: string, points: Pt[], projectBpm: number, onProgress: Progress = () => {}, lagFrames = 0): number {
 	const map = new TempoMap(points, projectBpm);
 	const r = new WavReader(inPath);
 	const w = new WavWriter(outPath, SAMPLE_RATE, "float32");
@@ -185,7 +187,10 @@ export function varispeed(inPath: string, outPath: string, points: Pt[], project
 		const step = 64; // source position is exact every `step` frames, linear between
 		const out = new Float32Array(block * 2);
 		let src = new Float32Array(0);
-		const srcPosAt = (n: number): number => map.beatAtSeconds(n / SAMPLE_RATE) * framesPerBeat;
+		const srcPosAt = (n: number): number => {
+			const beat = map.beatAtSeconds(n / SAMPLE_RATE);
+			return beat * framesPerBeat + (lagFrames ? lagFrames * (map.bpmAtBeat(beat) / projectBpm - 1) : 0);
+		};
 		for (let n0 = 0; n0 < outFrames; n0 += block) {
 			const n = Math.min(block, outFrames - n0);
 			const p0 = srcPosAt(n0);
@@ -279,6 +284,13 @@ export async function stretchFile(inPath: string, outPath: string, fromBpm: numb
 	await run(RUBBERBAND, ["--tempo", `${fromBpm}:${toBpm}`, "--ignore-clipping", inPath, outPath], percentFeed(onProgress));
 }
 
+// Rubber Band's pitch shifting along a frequency map (which runs in its real-time mode)
+// delays the audio a little, in step with how far the pitch is being moved: shifting down
+// by the factor 1/s puts everything about 2150 * (s - 1) frames late, and shifting up puts
+// it early by the same rule. Measured on clicks for factors from 0.7 to 1.4; what is left
+// after allowing for it is under a millisecond.
+const SHIFT_LAG_FRAMES = 2150;
+
 // Key-locked tempo curve: the tempo follows the curve while pitch stays where it was.
 // Two steps. First Rubber Band shifts the pitch by the inverse of the speed change at
 // each moment, leaving timing alone. Then the varispeed pass speeds the audio along the
@@ -303,9 +315,65 @@ export async function keylock(inPath: string, outPath: string, points: Pt[], pro
 	const shifted = path.join(tmpDir, "shifted.wav");
 	await fs.promises.writeFile(mapFile, lines.join("\n") + "\n");
 	await run(RUBBERBAND, ["--time", "1", "--freqmap", mapFile, "--ignore-clipping", inPath, shifted], percentFeed((p) => onProgress(p * 0.7)));
-	const frames = varispeed(shifted, outPath, points, projectBpm, (p) => onProgress(0.7 + p * 0.3));
+	const frames = varispeed(shifted, outPath, points, projectBpm, (p) => onProgress(0.7 + p * 0.3), SHIFT_LAG_FRAMES);
 	await fs.promises.rm(shifted, { force: true });
 	return frames;
+}
+
+// Copies frames [from, to) of one WAV into a new float32 WAV; frames outside the source are silent.
+function copyFrames(inPath: string, outPath: string, from: number, to: number): number {
+	const r = new WavReader(inPath);
+	const w = new WavWriter(outPath, SAMPLE_RATE, "float32");
+	try {
+		const chunk = SAMPLE_RATE * 2;
+		const buf = new Float32Array(chunk * 2);
+		for (let pos = from; pos < to; pos += chunk) {
+			const n = Math.min(chunk, to - pos);
+			buf.fill(0, 0, n * 2);
+			r.read(pos, n, buf);
+			w.write(buf, n);
+		}
+		return Math.max(0, to - from);
+	} finally {
+		w.close();
+		r.close();
+	}
+}
+
+export type RampJob = { decodedPath: string; outPath: string; bpm: number; fromBeat: number; lengthBeat: number; bpmA: number; bpmB: number; tmpDir: string };
+
+// The part of a track that plays while the set's tempo is moving: `lengthBeat` beats of the
+// source from `fromBeat` (the track's own beats), with the tempo going from bpmA to bpmB
+// across them and the pitch held. The file starts JOIN_FADE_SEC early, with the audio before
+// the ramp at bpmA. A little more of the source is rendered on each side and
+// cut off, so the stretcher has settled by the time the kept part begins.
+export async function renderRamp(job: RampJob, onProgress: Progress = () => {}): Promise<number> {
+	const dir = await fs.promises.mkdtemp(path.join(job.tmpDir, "rampjob-"));
+	try {
+		const framesPerBeat = (60 / job.bpm) * SAMPLE_RATE;
+		const r = new WavReader(job.decodedPath);
+		const total = r.frames;
+		r.close();
+		const first = Math.round(job.fromBeat * framesPerBeat);
+		const last = Math.min(total, Math.round((job.fromBeat + job.lengthBeat) * framesPerBeat));
+		if (last <= first) throw new Error("Nothing to render");
+		// Past either end of the track the padding is silence.
+		const snippet = path.join(dir, "snippet.wav");
+		copyFrames(job.decodedPath, snippet, first - RAMP_PAD_FRAMES, last + RAMP_PAD_FRAMES);
+		const lead = RAMP_PAD_FRAMES / framesPerBeat; // beats of the snippet before the ramp
+		const points: Pt[] = [
+			{ beat: lead, bpm: job.bpmA },
+			{ beat: lead + job.lengthBeat, bpm: job.bpmB },
+		];
+		const full = path.join(dir, "full.wav");
+		await keylock(snippet, full, points, job.bpm, dir, (p) => onProgress(p * 0.95));
+		const map = new TempoMap(points, job.bpm);
+		const startSec = map.secondsAtBeat(lead);
+		const endSec = map.secondsAtBeat(lead + (last - first) / framesPerBeat);
+		return copyFrames(full, job.outPath, Math.round((startSec - JOIN_FADE_SEC) * SAMPLE_RATE), Math.round(endSec * SAMPLE_RATE));
+	} finally {
+		await fs.promises.rm(dir, { recursive: true, force: true });
+	}
 }
 
 // Converts the float32 working file to the final 16-bit WAV, turning the level down only
