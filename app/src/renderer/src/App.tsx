@@ -7,6 +7,7 @@ import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
 import { store, useStore } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
 import { Updater, updateModalOpen } from "./Updater";
+import { VersionChip } from "./VersionChip";
 
 function isTyping(): boolean {
 	const el = document.activeElement;
@@ -93,6 +94,7 @@ function shortcut(e: KeyboardEvent): string | null {
 		if (k === "z") return e.shiftKey ? "redo" : "undo";
 		if (k === "a") return "select-all";
 		if (k === "d") return "duplicate";
+		if (k === "s" && !e.shiftKey) return "split";
 		if (k === "o") return "sets";
 		if (k === "n") return "new";
 		if (k === "i") return "import";
@@ -105,7 +107,6 @@ function shortcut(e: KeyboardEvent): string | null {
 	if (mod || e.altKey) return null;
 	if (e.code === "Space") return "toggle";
 	if (k === "backspace" || k === "delete") return "delete";
-	if (k === "s") return "split";
 	if (k === "c") return "cue";
 	if (k === "home") return "home";
 	if (k === "arrowleft") return "nudge-left";
@@ -114,7 +115,13 @@ function shortcut(e: KeyboardEvent): string | null {
 	return null;
 }
 
+// While S is held, a click on a clip cuts it there (the timeline reads this class).
+const SPLIT_TOOL = "split-tool";
+const dropSplitTool = (): void => document.body.classList.remove(SPLIT_TOOL);
+
 function onKey(e: KeyboardEvent): void {
+	// A shortcut with Command never leaves the cut tool on: its key-up may not arrive.
+	if (e.metaKey || e.ctrlKey) dropSplitTool();
 	if (modalOpen()) return;
 	// A set name being typed takes every key, Space included.
 	if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("name-edit")) return;
@@ -130,6 +137,12 @@ function onKey(e: KeyboardEvent): void {
 		}
 	}
 	if (isTyping()) return;
+	if (e.key.toLowerCase() === "s" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+		if (store.get().screen === "home") return;
+		e.preventDefault();
+		document.body.classList.add(SPLIT_TOOL);
+		return;
+	}
 	const action = shortcut(e);
 	if (!action) return;
 	if (store.get().screen === "home" && action !== "new") return;
@@ -200,6 +213,10 @@ function start(): void {
 	window.addEventListener("keyup", (e) => {
 		if (e.code === "Space" && document.activeElement instanceof HTMLButtonElement && !modalOpen()) e.preventDefault();
 	});
+	window.addEventListener("keyup", (e) => {
+		if (e.key.toLowerCase() === "s") dropSplitTool();
+	});
+	window.addEventListener("blur", dropSplitTool);
 	window.addEventListener("click", () => {
 		if (document.activeElement instanceof HTMLButtonElement && !modalOpen()) document.activeElement.blur();
 	});
@@ -303,6 +320,7 @@ export default function App() {
 				</>
 			)}
 			<Updater />
+			<VersionChip />
 		</div>
 	);
 }

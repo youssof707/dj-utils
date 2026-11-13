@@ -24,8 +24,9 @@ export type Clip = {
 	startBeat: number; // where the clip sits on the timeline
 	offsetBeat: number; // how far into the track the clip starts
 	lengthBeat: number;
-	// Reserved for later versions (volume, fades).
-	gain?: number;
+	gain?: number; // reserved for a later version
+	// Volume fades: up from silence over this many beats at the start, and down to silence
+	// over this many at the end (see fades.ts). Left out when there is no fade.
 	fadeInBeat?: number;
 	fadeOutBeat?: number;
 };
@@ -82,7 +83,8 @@ export const JOIN_FADE_SEC = 0.02;
 export const RAMP_PAD_FRAMES = SAMPLE_RATE / 2;
 export type StretchProgress = { key: string; pct: number };
 
-export type ExportClip = { cachePath: string; startFrame: number; offsetFrame: number; frames: number };
+// `fadeInFrames` and `fadeOutFrames` are the clip's volume fades, counted inside `frames`.
+export type ExportClip = { cachePath: string; startFrame: number; offsetFrame: number; frames: number; fadeInFrames?: number; fadeOutFrames?: number };
 export type ExportRequest = {
 	outPath: string;
 	projectBpm: number;

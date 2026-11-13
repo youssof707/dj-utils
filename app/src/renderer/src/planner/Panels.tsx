@@ -590,7 +590,7 @@ export function ClipMenu() {
 	const y = Math.min(menu.y, window.innerHeight - 250);
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
-			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "S", testId: "menu-split" })}
+			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "⌘S", testId: "menu-split" })}
 			{item("Duplicate", duplicateSelection, { hint: "⌘D", testId: "menu-duplicate" })}
 			{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
 			{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}

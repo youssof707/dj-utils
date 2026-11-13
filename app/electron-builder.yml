@@ -9,7 +9,12 @@ directories:
 files:
   - "out/**"
   - "package.json"
+# icon.png is read at runtime for the window/dock icon (src/main/index.ts).
+extraResources:
+  - from: build/icon.png
+    to: icon.png
 mac:
+  icon: build/icon.icns
   target:
     - target: dmg
       arch:
@@ -20,3 +25,7 @@ mac:
   identity: null
 dmg:
   artifactName: ${name}-${version}-${arch}.${ext}
+win:
+  icon: build/icon.ico
+linux:
+  icon: build/icon.png

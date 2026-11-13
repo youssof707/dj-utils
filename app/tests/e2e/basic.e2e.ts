@@ -158,7 +158,7 @@ describe("planner", () => {
 		await h.page.mouse.click(ruler.x + 30 * ppb - sx, ruler.y + 10);
 		expect(await state(h.page, "s => s.playheadBeat")).toBeCloseTo(30, 0);
 		await h.page.locator('[data-testid="clip"]').first().click({ position: { x: 30, y: 30 } });
-		await h.page.keyboard.press("s");
+		await h.page.keyboard.press("Meta+s");
 		let cs = await clips();
 		expect(cs.length).toBe(3);
 		const parts = cs.filter((c) => c.lane === 0).sort((p, q) => p.startBeat - q.startBeat);

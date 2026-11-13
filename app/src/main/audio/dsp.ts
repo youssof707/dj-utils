@@ -4,6 +4,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fadeGain } from "../../shared/fades";
 import { JOIN_FADE_SEC, PEAK_BUCKET, RAMP_PAD_FRAMES, SAMPLE_RATE, type ExportClip } from "../../shared/planner";
 import { TempoMap, isFlat, type Pt } from "../../shared/tempo";
 import { WavReader, WavWriter } from "./wav";
@@ -100,6 +101,7 @@ export function mixClips(clips: ExportClip[], outPath: string, onProgress: Progr
 	const w = new WavWriter(outPath, SAMPLE_RATE, "float32");
 	const chunk = SAMPLE_RATE * 2;
 	const buf = new Float32Array(chunk * 2);
+	const scratch = new Float32Array(chunk * 2);
 	let peak = 0;
 	try {
 		for (let pos = 0; pos < total; pos += chunk) {
@@ -114,7 +116,22 @@ export function mixClips(clips: ExportClip[], outPath: string, onProgress: Progr
 					r = new WavReader(c.cachePath);
 					readers.set(c.cachePath, r);
 				}
-				r.read(c.offsetFrame + (from - c.startFrame), to - from, buf, from - pos, true);
+				const fadeIn = c.fadeInFrames ?? 0;
+				const fadeOut = c.fadeOutFrames ?? 0;
+				if (!fadeIn && !fadeOut) {
+					r.read(c.offsetFrame + (from - c.startFrame), to - from, buf, from - pos, true);
+					continue;
+				}
+				// A faded clip is read on its own, then added at the volume of each frame.
+				const count = to - from;
+				const rel = from - c.startFrame;
+				scratch.fill(0, 0, count * 2);
+				r.read(c.offsetFrame + rel, count, scratch);
+				for (let i = 0, o = (from - pos) * 2; i < count; i++, o += 2) {
+					const g = fadeGain(rel + i, c.frames, fadeIn, fadeOut);
+					buf[o] += scratch[i * 2] * g;
+					buf[o + 1] += scratch[i * 2 + 1] * g;
+				}
 			}
 			for (let i = 0; i < n * 2; i++) {
 				const v = Math.abs(buf[i]);

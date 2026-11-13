@@ -50,6 +50,30 @@ describe("mix", () => {
 		const on = onsets(readAll(out).left, 0.5);
 		expect(on).toEqual([0, SR / 2, 3 * SR, 3.5 * SR]);
 	});
+
+	it("fades a clip in along a curve and out in a straight line", () => {
+		const a = path.join(dir, "fade-tone.wav");
+		writeTone(a, 440, 4, 0.5);
+		const out = path.join(dir, "fade-mix.wav");
+		// placed at 1 s so the fades cross the mixer's 2 s chunks; 1 s fade at each end of 3 s
+		mixClips([{ cachePath: a, startFrame: SR, offsetFrame: 0, frames: 3 * SR, fadeInFrames: SR, fadeOutFrames: SR }], out);
+		const { left, frames } = readAll(out);
+		expect(frames).toBe(4 * SR);
+		// loudest sample in the 20 ms after `sec` seconds into the clip
+		const level = (sec: number): number => {
+			let m = 0;
+			const from = Math.round((1 + sec) * SR);
+			for (let i = from; i < from + SR * 0.02; i++) m = Math.max(m, Math.abs(left[i]));
+			return m;
+		};
+		expect(level(0)).toBeLessThan(0.015);
+		// (while fading in, the loudest sample is at the end of the 20 ms)
+		expect(level(0.25)).toBeCloseTo(0.5 * 0.27 ** 2, 2);
+		expect(level(0.5)).toBeCloseTo(0.5 * 0.52 ** 2, 2);
+		expect(level(1.5)).toBeCloseTo(0.5, 2);
+		expect(level(2.5)).toBeCloseTo(0.5 * 0.5, 2);
+		expect(level(2.97)).toBeLessThan(0.02);
+	});
 });
 
 const points = [

@@ -212,6 +212,119 @@ describe("editing and playback", () => {
 		expect((await clips()).length).toBe(3);
 	});
 
+	it("hold S and click cuts on the nearest visible line", async () => {
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const sx: number = await state(h.page, "s => s.scrollX");
+		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
+		// the spacing of the lines drawn at this zoom
+		let step = 1;
+		if (ppb < 9) for (step = 4; step * ppb < 3; ) step *= 2;
+		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
+		const before = await clips();
+		const [a, b] = before;
+		const headWas = await playhead();
+		// clicks clip `id` a little to the right of the line at `line`
+		const cutNear = async (id: string, line: number): Promise<void> => {
+			const box = (await h.page.locator(`[data-clip-id="${id}"]`).boundingBox())!;
+			await h.page.mouse.click(lanes.x + (line + 0.3 * step) * ppb - sx, box.y + box.height / 2);
+		};
+		const lineIn = (lo: number, hi: number): number => Math.round((lo + hi) / 2 / step) * step;
+
+		// S alone does nothing
+		await h.page.keyboard.press("s");
+		expect((await clips()).length).toBe(before.length);
+
+		// one clip: only it is cut, on the line; the playhead and selection stay put
+		const line = lineIn(a.startBeat, a.startBeat + a.lengthBeat);
+		await h.page.keyboard.down("s");
+		await cutNear(a.id, line);
+		let cs = await clips();
+		expect(cs.length).toBe(before.length + 1);
+		const halves = cs.filter((c) => c.lane === a.lane).sort((p, q) => p.startBeat - q.startBeat);
+		expect(halves[0].startBeat + halves[0].lengthBeat).toBeCloseTo(line, 6);
+		expect(halves[1].startBeat).toBeCloseTo(line, 6);
+		expect(await playhead()).toBeCloseTo(headWas, 6);
+		expect(await state(h.page, "s => s.selection.length")).toBe(0);
+
+		// a miss on an empty lane changes nothing
+		const empty = (await h.page.getByTestId("lane-3").boundingBox())!;
+		await h.page.mouse.click(empty.x + empty.width / 2, empty.y + empty.height / 2);
+		expect((await clips()).length).toBe(before.length + 1);
+		expect(await playhead()).toBeCloseTo(headWas, 6);
+		await h.page.keyboard.up("s");
+		await h.page.keyboard.press("Meta+z");
+		expect((await clips()).length).toBe(before.length);
+
+		// two selected clips: clicking one cuts both
+		await h.page.evaluate((ids) => (window as any).planner.store.set({ selection: ids }), [a.id, b.id]);
+		const both = lineIn(Math.max(a.startBeat, b.startBeat), Math.min(a.startBeat + a.lengthBeat, b.startBeat + b.lengthBeat));
+		await h.page.keyboard.down("s");
+		await cutNear(a.id, both);
+		await h.page.keyboard.up("s");
+		cs = await clips();
+		expect(cs.length).toBe(before.length + 2);
+		expect(cs.filter((c) => Math.abs(c.startBeat - both) < 1e-6).length).toBe(2);
+		await h.page.keyboard.press("Meta+z");
+		expect((await clips()).length).toBe(before.length);
+		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
+	});
+
+	it("drags volume fades out from a clip's corners; a split leaves each fade on its own half", async () => {
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const el = h.page.locator('[data-testid="clip"]').first();
+		const before = await clips();
+		// drags a fade dot `beats` towards the middle of the clip (Option: no snapping)
+		const drag = async (id: "fade-in" | "fade-out", beats: number): Promise<void> => {
+			await el.hover({ position: { x: 80, y: 40 } });
+			const b = (await h.page.getByTestId(id).first().boundingBox())!;
+			const x = b.x + b.width / 2;
+			const y = b.y + b.height / 2;
+			await h.page.mouse.move(x, y);
+			await h.page.mouse.down();
+			await h.page.mouse.move(x + (id === "fade-in" ? 1 : -1) * beats * ppb, y, { steps: 6 });
+		};
+		await h.page.keyboard.down("Alt");
+		// escape cancels the drag
+		await drag("fade-in", 16);
+		expect((await clips())[0].fadeInBeat).toBeCloseTo(16, 0);
+		await h.page.keyboard.press("Escape");
+		await h.page.mouse.up();
+		expect(await clips()).toEqual(before);
+		// dropped: the clip is faded, not trimmed or moved
+		await drag("fade-in", 16);
+		await h.page.mouse.up();
+		let c = (await clips())[0];
+		expect(c.fadeInBeat).toBeCloseTo(16, 0);
+		expect(c.fadeOutBeat).toBeUndefined();
+		expect({ ...c, fadeInBeat: undefined }).toEqual(before[0]);
+		// the fade-out cannot reach into the fade-in
+		await drag("fade-out", before[0].lengthBeat + 20);
+		await h.page.mouse.up();
+		c = (await clips())[0];
+		expect(c.fadeInBeat! + c.fadeOutBeat!).toBeCloseTo(c.lengthBeat, 6);
+		await shot(h.page, "11-fades");
+		// one undo step per drag
+		await h.page.keyboard.press("Meta+z");
+		expect((await clips())[0].fadeOutBeat).toBeUndefined();
+		await drag("fade-out", 16);
+		await h.page.mouse.up();
+		await h.page.keyboard.up("Alt");
+		expect((await clips())[0].fadeOutBeat).toBeCloseTo(16, 0);
+		// split at beat 40: fade-in on the left half only, fade-out on the right half only
+		const ruler = (await h.page.getByTestId("ruler").boundingBox())!;
+		await h.page.mouse.click(ruler.x + 40 * ppb, ruler.y + 10);
+		await el.click({ button: "right", position: { x: 50, y: 40 } });
+		await h.page.getByTestId("menu-split").click();
+		const halves = (await clips()).filter((k) => k.lane === 0).sort((p, q) => p.startBeat - q.startBeat);
+		expect(halves).toHaveLength(2);
+		expect(halves[0].fadeInBeat).toBeCloseTo(16, 0);
+		expect(halves[0].fadeOutBeat).toBeUndefined();
+		expect(halves[1].fadeInBeat).toBeUndefined();
+		expect(halves[1].fadeOutBeat).toBeCloseTo(16, 0);
+		for (let i = 0; i < 3; i++) await h.page.keyboard.press("Meta+z");
+		expect(await clips()).toEqual(before);
+	});
+
 	it("right-click opens the clip's menu and never deletes; Delete and Escape delete the selection", async () => {
 		const before = await clips();
 		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;

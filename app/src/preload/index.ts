@@ -11,6 +11,8 @@ function on<T>(channel: string, cb: (payload: T) => void): () => void {
 
 const api = {
 	listDownloads: (): Promise<Track[]> => ipcRenderer.invoke("downloads:list"),
+	getAppInfo: (): Promise<{ env: "dev" | "prod" }> => ipcRenderer.invoke("appInfo:get"),
+	toggleDevTools: (): Promise<void> => ipcRenderer.invoke("devtools:toggle"),
 
 	pathForFile: (file: File): string => webUtils.getPathForFile(file),
 	probe: (path: string): Promise<ProbeResult> => ipcRenderer.invoke("planner:probe", path),

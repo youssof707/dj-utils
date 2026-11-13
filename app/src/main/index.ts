@@ -6,8 +6,12 @@ import { listDownloads } from "../shared/downloadsStore";
 import { buildMenu, setupPlanner } from "./planner";
 import { cleanupDuplicateInstalls, registerUpdaterHandlers } from "./updater";
 
+// Packaged: copied to Resources by extraResources. Dev: app/build/icon.png.
+const iconPath = app.isPackaged ? join(process.resourcesPath, "icon.png") : join(app.getAppPath(), "build/icon.png");
+
 function createWindow(): void {
 	const win = new BrowserWindow({
+		icon: iconPath, // Windows/Linux; macOS uses the bundle's icon.icns
 		width: 1440,
 		height: 860,
 		minWidth: 900,
@@ -47,7 +51,15 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
 	electronApp.setAppUserModelId("com.youssof.dj-utilities");
+	// Dev runs use the stock Electron bundle, so set the dock icon by hand.
+	if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(iconPath);
 	ipcMain.handle("downloads:list", () => listDownloads());
+	ipcMain.handle("appInfo:get", () => ({ env: is.dev ? "dev" : "prod" }));
+	// Double-clicking the version chip toggles DevTools, packaged builds included.
+	ipcMain.handle("devtools:toggle", (e) => {
+		if (e.sender.isDevToolsOpened()) e.sender.closeDevTools();
+		else e.sender.openDevTools({ mode: "detach" });
+	});
 	setupPlanner();
 	registerUpdaterHandlers();
 	buildMenu();

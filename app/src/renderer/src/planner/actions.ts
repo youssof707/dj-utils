@@ -1,6 +1,7 @@
 // Everything the user can do to a set, as plain functions over the store.
 
 import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type SetView, type TempoBlock } from "@shared/planner";
+import { fitFades } from "@shared/fades";
 import { blocksToPoints } from "@shared/tempo";
 import { engine } from "./engine";
 import { forgetMedia, mediaFor, workingCount } from "./media";
@@ -272,8 +273,9 @@ export function splitAt(beat: number, onlyIds?: string[]): void {
 			continue;
 		}
 		changed = true;
-		const right: Clip = { ...c, id: newId("c"), startBeat: beat, offsetBeat: c.offsetBeat + cut, lengthBeat: c.lengthBeat - cut };
-		out.push({ ...c, lengthBeat: cut }, right);
+		// The fade-in stays on the left half and the fade-out on the right half.
+		const right = fitFades({ ...c, id: newId("c"), startBeat: beat, offsetBeat: c.offsetBeat + cut, lengthBeat: c.lengthBeat - cut, fadeInBeat: 0 });
+		out.push(fitFades({ ...c, lengthBeat: cut, fadeOutBeat: 0 }), right);
 		if (selection.includes(c.id)) selection.push(right.id);
 	}
 	if (!changed) return;
@@ -304,7 +306,7 @@ export function setTrackBpm(trackId: string, bpm: number): void {
 	store.commit({
 		...s.doc,
 		tracks: s.doc.tracks.map((t) => (t.id === trackId ? { ...t, bpm } : t)),
-		clips: s.doc.clips.map((c) => (c.trackId === trackId ? { ...c, offsetBeat: c.offsetBeat * k, lengthBeat: c.lengthBeat * k } : c)),
+		clips: s.doc.clips.map((c) => (c.trackId === trackId ? fitFades({ ...c, offsetBeat: c.offsetBeat * k, lengthBeat: c.lengthBeat * k, fadeInBeat: (c.fadeInBeat ?? 0) * k, fadeOutBeat: (c.fadeOutBeat ?? 0) * k }) : c)),
 	});
 }
 
@@ -594,7 +596,9 @@ export function exportClips(doc: PlannerDoc): { clips: ExportClip[]; notReady: n
 		const offsetFrame = Math.round(c.offsetBeat * framesPerBeat);
 		const frames = Math.min(Math.round(c.lengthBeat * framesPerBeat), m.frames - offsetFrame);
 		if (frames <= 0) continue;
-		clips.push({ cachePath: m.cachePath, startFrame: Math.round(c.startBeat * framesPerBeat), offsetFrame, frames });
+		const fadeInFrames = Math.min(frames, Math.round((c.fadeInBeat ?? 0) * framesPerBeat));
+		const fadeOutFrames = Math.min(frames - fadeInFrames, Math.round((c.fadeOutBeat ?? 0) * framesPerBeat));
+		clips.push({ cachePath: m.cachePath, startFrame: Math.round(c.startBeat * framesPerBeat), offsetFrame, frames, ...(fadeInFrames > 0 && { fadeInFrames }), ...(fadeOutFrames > 0 && { fadeOutFrames }) });
 	}
 	return { clips, notReady, failed };
 }

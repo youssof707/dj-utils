@@ -1067,7 +1067,7 @@ export function buildMenu(): void {
 				{ role: "paste" },
 				{ label: "Select All", accelerator: "CmdOrCtrl+A", click: act("select-all") },
 				{ type: "separator" },
-				{ label: "Split at Playhead", click: act("split") },
+				{ label: "Split at Playhead", accelerator: "CmdOrCtrl+S", click: act("split") },
 				{ label: "Duplicate", accelerator: "CmdOrCtrl+D", click: act("duplicate") },
 				{ label: "Delete", click: act("delete") },
 			],

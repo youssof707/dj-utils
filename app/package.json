@@ -15,7 +15,8 @@
 		"typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
 		"typecheck": "npm run typecheck:node && npm run typecheck:web",
 		"test": "vitest run",
-		"test:e2e": "node scripts/e2e.mjs"
+		"test:e2e": "node scripts/e2e.mjs",
+		"icon": "node scripts/gen-icon.mjs build"
 	},
 	"devDependencies": {
 		"@electron-toolkit/tsconfig": "^2.0.0",

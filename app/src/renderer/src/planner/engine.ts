@@ -4,6 +4,7 @@
 // the tempo of that part of the set (see media.ts). A document change while playing throws
 // the schedule away and rebuilds it; newly ready audio is swapped in without a break.
 
+import { fadeGain } from "@shared/fades";
 import { clipPieces } from "@shared/pieces";
 import { JOIN_FADE_SEC, LANES, SAMPLE_RATE } from "@shared/planner";
 import type { TempoMap } from "@shared/tempo";
@@ -25,12 +26,17 @@ type Item = {
 	rateB: number;
 	lead: number; // fades in over this long before `start`, across the join with the piece before
 	fadeOut: number; // fades out over this long before its end, under the next piece's fade-in
+	// The clip's volume fades, shared by all its pieces: the clip runs from `start` to `end`,
+	// is at full volume from `inEnd` to `outStart`, and silent at both ends.
+	fades: { start: number; inEnd: number; outStart: number; end: number } | null;
 };
 
-type Voice = { src: AudioBufferSourceNode; gain: GainNode; sig: string; endAt: number };
+// `fade` carries the clip's volume fade, after `gain` (joins and swaps), when the clip has one.
+type Voice = { src: AudioBufferSourceNode; gain: GainNode; fade: GainNode | null; sig: string; endAt: number };
 
-const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}`;
+const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}|${it.fades ? `${it.fades.start}|${it.fades.inEnd}|${it.fades.outStart}|${it.fades.end}` : ""}`;
 
+const FADE_IN_STEPS = 24; // straight pieces the fade-in curve is drawn with in playback
 const SWAP_SEC = 0.03; // crossfade when a better rendering replaces one that is sounding
 const LOOKAHEAD = 20; // seconds ahead of the playhead that get loaded and scheduled
 const KEEP_BEHIND = 5;
@@ -158,6 +164,8 @@ class Engine {
 			const track = tracks.get(c.trackId);
 			if (!track) continue;
 			let prev: Item | null = null;
+			const end = c.startBeat + c.lengthBeat;
+			const fades = c.fadeInBeat || c.fadeOutBeat ? { start: map.secondsAtBeat(c.startBeat), inEnd: map.secondsAtBeat(c.startBeat + (c.fadeInBeat ?? 0)), outStart: map.secondsAtBeat(end - (c.fadeOutBeat ?? 0)), end: map.secondsAtBeat(end) } : null;
 			clipPieces(c, track, map).forEach((p, i) => {
 				const src = pieceSource(track, p);
 				const start = map.secondsAtBeat(p.fromBeat);
@@ -182,7 +190,7 @@ class Engine {
 				if (dur <= 0) return;
 				const lead = before ? Math.max(0, Math.min(JOIN_FADE_SEC, room, before.dur)) : 0;
 				if (before) before.fadeOut = lead;
-				const item: Item = { id: `${c.id}:${i}`, lane: c.lane, cachePath: src.cachePath, start, dur, offset, rateA, rateB, lead, fadeOut: 0 };
+				const item: Item = { id: `${c.id}:${i}`, lane: c.lane, cachePath: src.cachePath, start, dur, offset, rateA, rateB, lead, fadeOut: 0, fades };
 				out.push(item);
 				prev = item;
 			});
@@ -333,10 +341,26 @@ class Engine {
 			gain.gain.setValueAtTime(1, fadeFrom);
 			gain.gain.linearRampToValueAtTime(0, endAt);
 		}
-		src.connect(gain).connect(this.laneGains[it.lane] ?? this.master!);
+		// The clip's volume fade, picked up wherever this piece starts sounding. The fade-in's
+		// curve is followed in short straight steps.
+		let fade: GainNode | null = null;
+		const f = it.fades;
+		if (f) {
+			const clock = (sec: number): number => this.t0 + (sec - this.startSec);
+			const level = (at: number): number => fadeGain(at - clock(f.start), f.end - f.start, f.inEnd - f.start, f.end - f.outStart);
+			fade = new GainNode(ctx, { gain: level(when) });
+			fade.gain.setValueAtTime(level(when), when);
+			const steps = Array.from({ length: FADE_IN_STEPS }, (_, k) => clock(f.start + ((f.inEnd - f.start) * (k + 1)) / FADE_IN_STEPS));
+			for (const at of [...steps, clock(f.outStart), endAt]) {
+				if (at > when && at <= endAt) fade.gain.linearRampToValueAtTime(level(at), at);
+			}
+			gain.connect(fade);
+		}
+		src.connect(gain);
+		(fade ?? gain).connect(this.laneGains[it.lane] ?? this.master!);
 		src.start(when, offset);
 		src.stop(endAt);
-		return { src, gain, sig: sigOf(it), endAt };
+		return { src, gain, fade, sig: sigOf(it), endAt };
 	}
 
 	private tick(token: number): void {
@@ -372,6 +396,7 @@ class Engine {
 		}
 		v.src.disconnect();
 		v.gain.disconnect();
+		v.fade?.disconnect();
 	}
 
 	private silence(): void {
@@ -483,6 +508,7 @@ class Engine {
 				old.src.onended = () => {
 					old.src.disconnect();
 					old.gain.disconnect();
+					old.fade?.disconnect();
 				};
 				this.sources.set(id, v);
 			});
