@@ -8,6 +8,8 @@
 	"scripts": {
 		"dev": "electron-vite dev",
 		"build": "electron-vite build",
+		"clean": "rm -rf dist out",
+		"dist": "npm run clean && electron-vite build && electron-builder",
 		"start": "electron-vite preview",
 		"typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
 		"typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
@@ -22,6 +24,7 @@
 		"@types/react-dom": "^19.3.0",
 		"@vitejs/plugin-react": "^5.2.0",
 		"electron": "^42.11.18",
+		"electron-builder": "^26.18.0",
 		"electron-vite": "^5.0.0",
 		"playwright": "^1.65.0",
 		"react": "^19.3.1",

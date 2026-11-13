@@ -1030,7 +1030,22 @@ export function setupPlanner(): void {
 export function buildMenu(): void {
 	const act = (action: string) => (): void => send("planner:menu", action);
 	const template: MenuItemConstructorOptions[] = [
-		{ role: "appMenu" },
+		{
+			role: "appMenu",
+			submenu: [
+				{ role: "about" },
+				// The renderer runs the check and shows the result, same as the startup check.
+				{ label: "Check for Updates…", click: () => send("updater:menu-triggered", {}) },
+				{ type: "separator" },
+				{ role: "services" },
+				{ type: "separator" },
+				{ role: "hide" },
+				{ role: "hideOthers" },
+				{ role: "unhide" },
+				{ type: "separator" },
+				{ role: "quit" },
+			],
+		},
 		{
 			label: "File",
 			submenu: [
