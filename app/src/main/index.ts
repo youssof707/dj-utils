@@ -1,3 +1,4 @@
+import "./paths"; // first: points every data folder at dev-data in dev
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
 import { electronApp, is } from "@electron-toolkit/utils";

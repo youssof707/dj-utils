@@ -1,8 +1,8 @@
 // Planner state: one store, immutable updates, undo history over the document only.
 
 import { useSyncExternalStore } from "react";
-import { emptyDoc, LANES, type Cue, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type TempoPoint } from "@shared/planner";
-import { pointsToBlocks } from "@shared/tempo";
+import { emptyDoc, LANES, type Cue, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type SetInfo } from "@shared/planner";
+import { normalizeDoc } from "@shared/renderings";
 
 // A dropped file on its way to the timeline: either waiting for its BPM to be typed
 // (`probe`), or with everything known already (`track`) and only waiting its turn behind one
@@ -33,14 +33,17 @@ export type State = {
 	soloLane: number | null;
 	preSolo: boolean[] | null; // mutes to restore when the solo is lifted
 	metronome: boolean; // playback only; never saved with the set
-	filePath: string | null;
-	dirty: boolean;
+	screen: "home" | "editor"; // the list of sets, or one set open
+	sets: SetInfo[] | null; // what the list of sets shows; null until first read
+	setId: string | null; // the set that is open
+	setName: string | null; // null until the set is first stored, which names it
+	askName: boolean; // a set just made from the UI: the top bar asks for its name
+	pendingDelete: SetInfo | null;
 	setGen: number; // bumps whenever a different set is loaded
 	importQueue: ImportItem[];
 	lastPlacedEnd: number;
 	trackBpmEdit: string | null;
 	pendingProjectBpm: number | null;
-	pendingDiscard: "new" | "open" | null;
 	exportUi: ExportUi | null;
 	menu: MenuUi;
 	toast: string | null;
@@ -70,14 +73,17 @@ let state: State = {
 	soloLane: null,
 	preSolo: null,
 	metronome: false,
-	filePath: null,
-	dirty: false,
+	screen: "home",
+	sets: null,
+	setId: null,
+	setName: null,
+	askName: false,
+	pendingDelete: null,
 	setGen: 0,
 	importQueue: [],
 	lastPlacedEnd: 0,
 	trackBpmEdit: null,
 	pendingProjectBpm: null,
-	pendingDiscard: null,
 	exportUi: null,
 	menu: null,
 	toast: null,
@@ -108,7 +114,7 @@ export const store = {
 	// A finished edit: goes on the undo stack.
 	commit(doc: PlannerDoc): void {
 		if (doc === state.doc) return;
-		store.set(prune({ ...state, doc, past: [...state.past, state.doc].slice(-HISTORY), future: [], rev: state.rev + 1, dirty: true }));
+		store.set(prune({ ...state, doc, past: [...state.past, state.doc].slice(-HISTORY), future: [], rev: state.rev + 1 }));
 	},
 	// Drags change the document many times; only the end result is one undo step.
 	beginDrag(): void {
@@ -121,7 +127,7 @@ export const store = {
 		const base = dragBase;
 		dragBase = null;
 		if (!base || base === state.doc) return;
-		store.set(prune({ ...state, past: [...state.past, base].slice(-HISTORY), future: [], rev: state.rev + 1, dirty: true }));
+		store.set(prune({ ...state, past: [...state.past, base].slice(-HISTORY), future: [], rev: state.rev + 1 }));
 	},
 	cancelDrag(): void {
 		if (dragBase) store.set({ doc: dragBase });
@@ -130,22 +136,17 @@ export const store = {
 	undo(): void {
 		if (dragBase || state.past.length === 0) return;
 		const doc = state.past[state.past.length - 1];
-		store.set(prune({ ...state, doc, past: state.past.slice(0, -1), future: [state.doc, ...state.future], rev: state.rev + 1, dirty: true }));
+		store.set(prune({ ...state, doc, past: state.past.slice(0, -1), future: [state.doc, ...state.future], rev: state.rev + 1 }));
 	},
 	redo(): void {
 		if (dragBase || state.future.length === 0) return;
 		const doc = state.future[0];
-		store.set(prune({ ...state, doc, past: [...state.past, state.doc], future: state.future.slice(1), rev: state.rev + 1, dirty: true }));
+		store.set(prune({ ...state, doc, past: [...state.past, state.doc], future: state.future.slice(1), rev: state.rev + 1 }));
 	},
-	// Replace everything (new, open, session restore). Clears history.
-	load(loaded: PlannerDoc, filePath: string | null, dirty: boolean): void {
+	// Replace everything (a new set, or one being opened). Clears history.
+	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		// Project and tempo BPMs are whole numbers. Older files kept the tempo as curve points.
-		const { points, ...rest } = loaded as PlannerDoc & { points?: TempoPoint[] };
-		const bpm = Math.round(rest.bpm);
-		const tempos = rest.tempos ?? pointsToBlocks((points ?? []).map((p) => ({ ...p, bpm: Math.round(p.bpm) })), bpm, 0.05).map((b, i) => ({ ...b, id: `b${Date.now().toString(36)}${i}` }));
-		const doc: PlannerDoc = { ...rest, bpm, tempos: tempos.map((t) => ({ ...t, bpm: Math.round(t.bpm) })) };
-		store.set({ doc, past: [], future: [], rev: state.rev + 1, selection: [], filePath, dirty, setGen: state.setGen + 1, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0 });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null });
 	},
 };
 

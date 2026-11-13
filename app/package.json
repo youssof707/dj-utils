@@ -15,7 +15,7 @@
 		"typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
 		"typecheck": "npm run typecheck:node && npm run typecheck:web",
 		"test": "vitest run",
-		"test:e2e": "electron-vite build && vitest run -c vitest.e2e.config.ts"
+		"test:e2e": "node scripts/e2e.mjs"
 	},
 	"devDependencies": {
 		"@electron-toolkit/tsconfig": "^2.0.0",

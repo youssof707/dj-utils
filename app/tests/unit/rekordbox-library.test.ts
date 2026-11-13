@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { testDir } from "../testdata";
 import { afconvertToWav } from "../../src/main/audio/dsp";
 import { findAnalysisRoot, matchTrack, measureShift, nameKey, parseWaveform, scanLibrary, type LibraryEntry } from "../../src/main/rekordbox";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
@@ -25,7 +26,7 @@ describe.skipIf(!MUSIC || !fs.existsSync(ROOT))("the real Rekordbox library", ()
 	it("scans quickly, and measures every kind of file the way Rekordbox decodes it", async () => {
 		// the app finds this library by itself, from Rekordbox's own settings
 		if (!process.env["DJ_REKORDBOX_DIR"]) expect(findAnalysisRoot(os.homedir())).toBe(ROOT);
-		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rb-real-"));
+		const tmp = testDir("rb-real-");
 		const cache = path.join(tmp, "cache.json");
 		let t = performance.now();
 		const entries = scanLibrary(ROOT, cache);
