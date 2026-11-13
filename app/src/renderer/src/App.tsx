@@ -283,22 +283,25 @@ export default function App() {
 	const screen = useStore((s) => s.screen);
 	const loaded = useStore((s) => s.loaded);
 	useEffect(start, []);
-	if (screen === "home") {
-		return (
-			<div className="app">
-				{loaded && <Home />}
-				<Modals />
-				<Toast />
-			</div>
-		);
-	}
+	// The updater sits outside both screens, so it stays mounted (and keeps its state) when
+	// the screen changes, and its dialog shows on the Home screen too.
 	return (
 		<div className="app">
-			<TopBar />
-			<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<div className="bottom-area" />} />
-			<Modals />
-			<ClipMenu />
-			<Toast />
+			{screen === "home" ? (
+				<>
+					{loaded && <Home />}
+					<Modals />
+					<Toast />
+				</>
+			) : (
+				<>
+					<TopBar />
+					<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<div className="bottom-area" />} />
+					<Modals />
+					<ClipMenu />
+					<Toast />
+				</>
+			)}
 			<Updater />
 		</div>
 	);
