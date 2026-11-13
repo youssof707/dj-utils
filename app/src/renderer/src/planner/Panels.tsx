@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Track } from "@shared/types";
 import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat } from "@shared/tempo";
-import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
+import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, deleteSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
@@ -13,11 +13,43 @@ function fmtClock(sec: number): string {
 	return `${m}:${s.toFixed(1).padStart(4, "0")}`;
 }
 
-function fmtLength(sec: number): string {
+export function fmtLength(sec: number): string {
 	const h = Math.floor(sec / 3600);
 	const m = Math.floor((sec % 3600) / 60);
 	const s = Math.round(sec % 60);
 	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// A name being typed over: Enter or clicking away keeps it, Escape leaves it as it was.
+// `onDone` gets the new name, or null when nothing is to change.
+export function NameEdit({ name, testId, placeholder, onDone }: { name: string; testId: string; placeholder?: string; onDone: (name: string | null) => void }) {
+	const [text, setText] = useState(name);
+	const done = useRef(false);
+	const finish = (keep: boolean): void => {
+		if (done.current) return;
+		done.current = true;
+		const next = text.trim();
+		onDone(keep && next && next !== name ? next : null);
+	};
+	return (
+		<input
+			className="name-edit"
+			data-testid={testId}
+			autoFocus
+			value={text}
+			maxLength={80}
+			placeholder={placeholder}
+			onFocus={(e) => e.currentTarget.select()}
+			onChange={(e) => setText(e.target.value)}
+			onClick={(e) => e.stopPropagation()}
+			onBlur={() => finish(true)}
+			onKeyDown={(e) => {
+				e.stopPropagation();
+				if (e.key === "Enter") finish(true);
+				else if (e.key === "Escape") finish(false);
+			}}
+		/>
+	);
 }
 
 // ---- top bar ------------------------------------------------------------------------
@@ -103,8 +135,11 @@ function BpmField() {
 
 export function TopBar() {
 	const playing = useStore((s) => s.playing);
-	const filePath = useStore((s) => s.filePath);
-	const dirty = useStore((s) => s.dirty);
+	const setName = useStore((s) => s.setName);
+	const setId = useStore((s) => s.setId);
+	const [renaming, setRenaming] = useState(false);
+	const askName = useStore((s) => s.askName);
+	const setGen = useStore((s) => s.setGen);
 	const doc = useStore((s) => s.doc);
 	const libraryOpen = useStore((s) => s.libraryOpen);
 	const metronome = useStore((s) => s.metronome);
@@ -112,21 +147,45 @@ export function TopBar() {
 	useStore((s) => s.progressRev);
 	const working = workingCount(doc);
 	const tempo = working > 0 ? null : tempoProgress(doc);
-	const name = filePath ? filePath.split("/").pop()!.replace(/\.djset$/, "") : "Untitled set";
+	const name = setName ?? "New set";
+	// A set just made from the UI opens on its name.
 	useEffect(() => {
-		document.title = `${name}${dirty ? " (edited)" : ""}`;
-	}, [name, dirty]);
+		if (!askName) return;
+		setRenaming(true);
+		store.set({ askName: false });
+	}, [askName]);
+	useEffect(() => {
+		document.title = name;
+		return () => {
+			document.title = "DJ Utilities";
+		};
+	}, [name]);
 	const beats = contentBeats({ ...doc, tempos: [] });
 	const length = beats > 0 ? new TempoMap(tempoPoints(doc), doc.bpm).secondsAtBeat(beats) : 0;
 	return (
 		<header className="topbar">
+			<button className="ghost" data-testid="all-sets" onClick={() => void goHome()} title="Back to your sets (Cmd+O)">
+				‹ Sets
+			</button>
 			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })} title="Downloaded songs">
 				Library
 			</button>
-			<div className="set-name" data-testid="set-name" title={filePath ?? "Not saved to a file yet"}>
-				{name}
-				{dirty && <span className="dirty" title="Unsaved changes" />}
-			</div>
+			{renaming ? (
+				<NameEdit
+					key={setGen}
+					name={setName ?? ""}
+					testId="set-name-input"
+					placeholder="Name this set"
+					onDone={(next) => {
+						setRenaming(false);
+						if (next !== null && setId) void renameSet(setId, next);
+					}}
+				/>
+			) : (
+				<div className="set-name" data-testid="set-name" title="Click to rename. Every change is kept as you go." onClick={() => setRenaming(true)}>
+					{name}
+				</div>
+			)}
 			<BpmField />
 			<div className="transport">
 				<button className="ghost icon" data-testid="to-start" onClick={() => engine.seek(0)} title="Back to start (Home)">
@@ -395,7 +454,7 @@ export function Modals() {
 	const trackBpmEdit = useStore((s) => s.trackBpmEdit);
 	const pending = useStore((s) => s.pendingProjectBpm);
 	const exportUi = useStore((s) => s.exportUi);
-	const discard = useStore((s) => s.pendingDiscard);
+	const pendingDelete = useStore((s) => s.pendingDelete);
 	const doc = useStore((s) => s.doc);
 	const item = queue[0];
 	const editTrack = doc.tracks.find((t) => t.id === trackBpmEdit);
@@ -464,33 +523,23 @@ export function Modals() {
 			</Modal>
 		);
 	}
-	if (discard !== null) {
-		const close = (): void => store.set({ pendingDiscard: null });
+	if (pendingDelete) {
+		const close = (): void => store.set({ pendingDelete: null });
 		const go = (): void => {
 			close();
-			if (discard === "new") newSet();
-			else void openSet();
+			void deleteSet(pendingDelete.id);
 		};
 		return (
-			<Modal onClose={close} testId="discard-modal">
-				<h3>Save changes to this set first?</h3>
-				<p className="muted">Unsaved changes will be lost if you don't save.</p>
+			<Modal onClose={close} onEnter={go} testId="delete-set-modal">
+				<h3>Delete this set?</h3>
+				<p className="file-name">{pendingDelete.name}</p>
+				<p className="muted">It cannot be brought back. Your audio files are not touched.</p>
 				<div className="buttons">
 					<button className="ghost" onClick={close}>
 						Cancel
 					</button>
-					<button className="ghost" data-testid="discard-confirm" onClick={go}>
-						Don't save
-					</button>
-					<button
-						className="primary"
-						onClick={() => {
-							void saveSet().then((ok) => {
-								if (ok) go();
-							});
-						}}
-					>
-						Save
+					<button className="primary" data-testid="delete-set-confirm" onClick={go}>
+						Delete set
 					</button>
 				</div>
 			</Modal>

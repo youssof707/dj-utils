@@ -93,14 +93,11 @@ export type ExportRequest = {
 export type ExportResult = { path: string; seconds: number; gainDb: number };
 export type ExportProgress = { stage: string; pct: number };
 
-export type Session = {
-	doc: PlannerDoc;
-	filePath: string | null;
-	dirty: boolean;
-	pxPerBeat: number;
-	scrollX: number;
-	playheadBeat: number;
-};
+// A set as the app stores it. The app keeps every set itself; there are no set files to
+// save or open. `view` is where the timeline was left.
+export type SetView = { pxPerBeat: number; scrollX: number; playheadBeat: number };
+export type SetFile = { id: string; name: string; createdAt: number; updatedAt: number; openedAt: number; view: SetView; doc: PlannerDoc };
+export type SetInfo = { id: string; name: string; updatedAt: number; tracks: number; lengthSec: number };
 
 export function stretchKey(r: StretchRequest): string {
 	return `${r.sourcePath}|${r.bpm}|${r.projectBpm}`;
@@ -138,6 +135,9 @@ export function firstBarBeat(t: PlannerTrack): number | null {
 	return bar;
 }
 
-export function emptyDoc(): PlannerDoc {
-	return { version: 1, bpm: 128, tracks: [], clips: [], tempos: [] };
+// The tempo a new set starts at.
+export const DEFAULT_BPM = 150;
+
+export function emptyDoc(bpm = DEFAULT_BPM): PlannerDoc {
+	return { version: 1, bpm, tracks: [], clips: [], tempos: [] };
 }

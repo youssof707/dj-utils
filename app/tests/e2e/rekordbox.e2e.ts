@@ -2,14 +2,14 @@
 // drops, and the exported audio measured against the grid.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { testDir } from "../testdata";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
 import type { AnlzBeat } from "../../src/main/rekordbox";
 import { datFile, gridBeats, waveformOf, writeAnalysis } from "../anlz";
 import { onsets, readAll, writeBarTrack, writeClickTrack } from "../signals";
-import { exportTo, importTrack, launch, shot, state, waitReady, type Harness } from "./harness";
+import { exportTo, importTrack, launch, setFile, shot, state, stored, waitReady, type Harness } from "./harness";
 
 const LAME = ["/opt/homebrew/bin/lame", "/usr/local/bin/lame"].find((p) => fs.existsSync(p));
 const BEAT = (60 / 128) * SR; // frames per beat at the project tempo
@@ -29,7 +29,7 @@ function beatCount(seconds: number, bpm: number, firstSec: number): number {
 }
 
 beforeAll(async () => {
-	work = fs.mkdtempSync(path.join(os.tmpdir(), "planner-work-"));
+	work = testDir("planner-work-");
 	root = path.join(work, "rekordbox", "share", "PIONEER", "USBANLZ");
 	fs.mkdirSync(root, { recursive: true });
 	const file = (name: string): string => path.join(work, name);
@@ -104,8 +104,10 @@ beforeAll(async () => {
 
 	h = await launch(undefined, work, { DJ_REKORDBOX_DIR: root });
 });
+const extraDirs: string[] = [];
 afterAll(async () => {
 	await h?.close();
+	for (const dir of [work, ...extraDirs]) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 const clips = (): Promise<any[]> => state(h.page, "s => s.doc.clips");
@@ -545,7 +547,7 @@ describe("rekordbox", () => {
 			return p;
 		};
 		// same BPM as Rekordbox: the track gains the grid, old clips stay put
-		await h.page.evaluate((p) => (window as any).planner.openSet(p), legacy(128));
+		await h.page.evaluate((p) => (window as any).planner.openSetFile(p), legacy(128));
 		expect(await drop(f.a, 1, 16)).toBe("placed");
 		let ts = await tracks();
 		let cs = await clips();
@@ -557,7 +559,7 @@ describe("rekordbox", () => {
 		expect(cs[1].offsetBeat).toBeCloseTo((0.25 + 2 * BEAT_SEC) / BEAT_SEC, 3);
 
 		// typed a different BPM back then: new clips follow Rekordbox, old ones keep their stretch
-		await h.page.evaluate((p) => (window as any).planner.openSet(p), legacy(127));
+		await h.page.evaluate((p) => (window as any).planner.openSetFile(p), legacy(127));
 		expect(await drop(f.a, 1, 16)).toBe("placed");
 		ts = await tracks();
 		cs = await clips();
@@ -576,16 +578,11 @@ describe("rekordbox", () => {
 	it("keeps the grid through save and reopen", async () => {
 		await newSet();
 		expect(await drop(f.a, 0, 8)).toBe("placed");
-		const p = path.join(work, "saved.djset");
-		await h.page.evaluate((file) => {
-			const pl = (window as any).planner;
-			pl.store.set({ filePath: file });
-			return pl.saveSet();
-		}, p);
-		const saved = JSON.parse(fs.readFileSync(p, "utf8"));
+		const id = await stored(h.page);
+		const saved = JSON.parse(fs.readFileSync(setFile(h, id), "utf8")).doc;
 		expect(saved.tracks[0].downbeatSec).toBeCloseTo(0.25 + 2 * BEAT_SEC, 3);
 		await newSet();
-		await h.page.evaluate((file) => (window as any).planner.openSet(file), p);
+		await h.page.evaluate((i) => (window as any).planner.openSet(i), id);
 		const [t] = await tracks();
 		const [c] = await clips();
 		expect(t.downbeatSec).toBeCloseTo(0.25 + 2 * BEAT_SEC, 3);
@@ -608,8 +605,7 @@ describe("rekordbox", () => {
 		const before = fs.statSync(cache).mtimeMs;
 		await newSet();
 		expect(await drop(f.a, 0, 8)).toBe("placed");
-		await h.page.waitForTimeout(700); // let the session be written
-		h = await h.relaunch();
+				h = await h.relaunch();
 		// the restored set still has its track and grid
 		expect((await tracks())[0].downbeatSec).toBeCloseTo(0.25 + 2 * BEAT_SEC, 3);
 		expect(await drop(f.b, 1, 0)).toBe("placed");
@@ -651,7 +647,8 @@ describe("rekordbox", () => {
 		fs.mkdirSync(path.join(junk, "abc", "def"), { recursive: true });
 		fs.writeFileSync(path.join(junk, "abc", "def", "ANLZ0000.DAT"), Buffer.from("PMAI\0\0\0\x1c garbage that is not an analysis file"));
 		fs.writeFileSync(path.join(junk, "abc", "def", "ANLZ0000.EXT"), Buffer.alloc(3));
-		const data = fs.mkdtempSync(path.join(os.tmpdir(), "planner-data-"));
+		const data = testDir("planner-data-");
+		extraDirs.push(data);
 		fs.writeFileSync(path.join(data, "rekordbox-cache.json"), "{{{ not json");
 		h = await launch(data, work, { DJ_REKORDBOX_DIR: junk });
 		expect(await drop(f.a, 0, 0)).toBe("asked");

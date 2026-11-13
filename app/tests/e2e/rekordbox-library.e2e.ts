@@ -71,8 +71,7 @@ describe.skipIf(!MUSIC || !fs.existsSync(ROOT))("the real Rekordbox library, thr
 			n++;
 			await h.page.evaluate((bpm) => {
 				const p = (window as any).planner;
-				p.newSet();
-				p.store.load({ version: 1, bpm, tracks: [], clips: [], tempos: [] }, null, false);
+				return p.newSet().then(() => p.store.load({ version: 1, bpm, tracks: [], clips: [], tempos: [] }, p.store.get().setId, null));
 			}, pick.entry.bpm);
 			const t0 = Date.now();
 			expect(await drop(pick.file, 0, 8), `${kind}: ${path.basename(pick.file)}`).toBe("placed");

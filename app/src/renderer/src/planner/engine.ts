@@ -7,7 +7,7 @@
 import { clipPieces } from "@shared/pieces";
 import { JOIN_FADE_SEC, LANES, SAMPLE_RATE } from "@shared/planner";
 import type { TempoMap } from "@shared/tempo";
-import { pieceSource, tempoMap } from "./media";
+import { lostMedia, pieceSource, tempoMap } from "./media";
 import { store } from "./store";
 
 // One piece of a clip. Times are seconds on the set's clock, tempo changes included.
@@ -205,6 +205,7 @@ class Engine {
 				})
 				.catch((e) => {
 					console.error("Could not load audio", cachePath, e);
+					lostMedia([cachePath]);
 					return null;
 				})
 				.finally(() => this.loading.delete(cachePath));
@@ -500,6 +501,11 @@ class Engine {
 			for (const it of items) if (it.start + it.dur > from && it.start < from + LOOKAHEAD) void this.load(it.cachePath);
 			this.evict(from, items);
 		}, 150);
+	}
+
+	// Lets go of the audio held for the set that was open.
+	forget(): void {
+		this.buffers.clear();
 	}
 
 	debug(): { buffers: number; sources: number; contextTime: number; state: string } {

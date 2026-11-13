@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { testDir } from "../testdata";
 import { findAnalysisRoot, gridFromBeats, matchTrack, measureShift, MIN_MATCH, nameKey, parseAnlz, parseWaveform, scanLibrary, type AnlzBeat } from "../../src/main/rekordbox";
 import { firstBarBeat, SAMPLE_RATE as SR, type PlannerTrack } from "../../src/shared/planner";
 import { datFile, extFile, gridBeats, waveformOf, writeAnalysis } from "../anlz";
@@ -9,7 +9,7 @@ import { writeBarTrack } from "../signals";
 
 let dir: string;
 beforeAll(() => {
-	dir = fs.mkdtempSync(path.join(os.tmpdir(), "rekordbox-"));
+	dir = testDir("rekordbox-");
 });
 
 describe("analysis files", () => {
@@ -141,10 +141,10 @@ describe("finding the library", () => {
 		fs.writeFileSync(path.join(dirPath, "options.json"), text);
 	};
 	it("is null when Rekordbox was never installed", () => {
-		expect(findAnalysisRoot(fs.mkdtempSync(path.join(os.tmpdir(), "home-")))).toBeNull();
+		expect(findAnalysisRoot(testDir("home-"))).toBeNull();
 	});
 	it("is the standard place by default", () => {
-		const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
+		const home = testDir("home-");
 		fs.mkdirSync(standard(home), { recursive: true });
 		expect(findAnalysisRoot(home)).toBe(standard(home));
 		// settings that say nothing about it, or are damaged, change nothing
@@ -156,8 +156,8 @@ describe("finding the library", () => {
 		expect(findAnalysisRoot(home)).toBe(standard(home));
 	});
 	it("follows a library that was moved, and falls back if the new place is not there", () => {
-		const home = fs.mkdtempSync(path.join(os.tmpdir(), "home-"));
-		const drive = fs.mkdtempSync(path.join(os.tmpdir(), "drive-"));
+		const home = testDir("home-");
+		const drive = testDir("drive-");
 		fs.mkdirSync(standard(home), { recursive: true });
 		settings(home, JSON.stringify({ options: [["db-path", path.join(drive, "master.db")], ["analysis-data-root-path", path.join(drive, "share")]] }));
 		expect(findAnalysisRoot(home)).toBe(standard(home)); // the drive is not plugged in

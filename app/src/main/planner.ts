@@ -1,34 +1,30 @@
-// Main-process side of the set planner: import, stretch cache, export, project files.
+// Main-process side of the set planner: import, stretch cache, export, and the stored sets.
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type Session, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
+import { normalizeDoc, renderingsFor, tempoMapOf } from "../shared/renderings";
 import { afconvertToWav } from "./audio/dsp";
 import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
+import { dataRoot } from "./paths";
 import { databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, type LibraryCue, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
 
 const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "caf", "mp4", "alac"];
 
 let cacheDir = "";
 let decodedDir = "";
-let sessionFile = "";
 let setsDir = "";
 
-// A new auto-saved set gets a dated name in the sets folder, never overwriting another file.
-function newSetPath(): string {
-	fs.mkdirSync(setsDir, { recursive: true });
+// A new set is named after the moment it was made.
+function datedName(): string {
 	const d = new Date();
 	const p2 = (n: number): string => String(n).padStart(2, "0");
-	const stem = `Set ${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}.${p2(d.getMinutes())}`;
-	for (let i = 1; ; i++) {
-		const file = path.join(setsDir, `${stem}${i === 1 ? "" : ` ${i}`}.djset`);
-		if (!fs.existsSync(file)) return file;
-	}
+	return `Set ${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}.${p2(d.getMinutes())}`;
 }
 
 function send(channel: string, payload: unknown): void {
@@ -60,9 +56,19 @@ function runWorker<T>(task: Task, onProgress: (p: { pct: number; stage?: string 
 	});
 }
 
+// The last hash seen for each source file, so that the cache files of a track whose source
+// is out of reach for now (a drive that is unplugged) are still known to be its own.
+let knownHashes: Record<string, string> = {};
+let hashesChanged = false;
+
 function sourceHash(sourcePath: string): string {
 	const st = fs.statSync(sourcePath);
-	return createHash("sha1").update(`${sourcePath}|${st.size}|${st.mtimeMs}`).digest("hex").slice(0, 16);
+	const hash = createHash("sha1").update(`${sourcePath}|${st.size}|${st.mtimeMs}`).digest("hex").slice(0, 16);
+	if (knownHashes[sourcePath] !== hash) {
+		knownHashes[sourcePath] = hash;
+		hashesChanged = true;
+	}
+	return hash;
 }
 
 const decoding = new Map<string, Promise<string>>();
@@ -364,6 +370,7 @@ function stopWorker(w: Worker): void {
 }
 
 function keepOnly(keys: string[]): void {
+	noteDropped(wanted, keys);
 	wanted = new Set(keys);
 	for (let i = waiting.length - 1; i >= 0; i--) {
 		if (!dropped(waiting[i].key)) continue;
@@ -431,8 +438,19 @@ function removeParts(cachePath: string): void {
 	}
 }
 
+// Cache files are named by the audio they hold, never by the set that asked for them: the
+// same track at the same tempo is one file however many sets use it.
+function stretchFile(hash: string, req: StretchRequest): string {
+	return `${hash}-${req.bpm}-${req.projectBpm}.wav`;
+}
+
+function rampFile(hash: string, req: RampRequest): string {
+	const id = createHash("sha1").update(`${req.bpm}|${req.fromBeat}|${req.lengthBeat}|${req.bpmA}|${req.bpmB}`).digest("hex").slice(0, 16);
+	return `ramp-${hash}-${id}.wav`;
+}
+
 function cachePathFor(req: StretchRequest): string {
-	return path.join(cacheDir, `${sourceHash(req.sourcePath)}-${req.bpm}-${req.projectBpm}.wav`);
+	return path.join(cacheDir, stretchFile(sourceHash(req.sourcePath), req));
 }
 
 function cached(cachePath: string): StretchResult | null {
@@ -446,6 +464,9 @@ function cached(cachePath: string): StretchResult | null {
 		return null; // damaged cache file: rebuild it
 	}
 }
+
+// Where each rendering asked for since launch is cached.
+const keyPaths = new Map<string, string>();
 
 function once(key: string, job: () => Promise<StretchResult>): Promise<StretchResult> {
 	wanted?.add(key);
@@ -466,6 +487,7 @@ function ensureStretch(req: StretchRequest): Promise<StretchResult> {
 		} catch {
 			throw new Error("The source file is missing");
 		}
+		keyPaths.set(key, cachePath);
 		const peaksPath = `${cachePath}${PEAKS_EXT}`;
 		const have = cached(cachePath);
 		if (have) {
@@ -492,11 +514,11 @@ function ensureRamp(req: RampRequest): Promise<StretchResult> {
 	return once(key, async () => {
 		let cachePath: string;
 		try {
-			const id = createHash("sha1").update(`${req.bpm}|${req.fromBeat}|${req.lengthBeat}|${req.bpmA}|${req.bpmB}`).digest("hex").slice(0, 16);
-			cachePath = path.join(cacheDir, `ramp-${sourceHash(req.sourcePath)}-${id}.wav`);
+			cachePath = path.join(cacheDir, rampFile(sourceHash(req.sourcePath), req));
 		} catch {
 			throw new Error("The source file is missing");
 		}
+		keyPaths.set(key, cachePath);
 		const have = cached(cachePath);
 		if (have) return have;
 		const tmpDir = `${cachePath}.work`;
@@ -516,10 +538,9 @@ function inCache(file: string): boolean {
 	return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
-function parseDoc(text: string): PlannerDoc {
-	const d = JSON.parse(text) as PlannerDoc;
+function checkDoc(d: PlannerDoc): PlannerDoc {
 	if (!d || d.version !== 1 || !Array.isArray(d.tracks) || !Array.isArray(d.clips) || !(Array.isArray(d.tempos) || Array.isArray((d as { points?: unknown }).points)) || typeof d.bpm !== "number") {
-		throw new Error("This is not a set file");
+		throw new Error("This is not a set");
 	}
 	return d;
 }
@@ -530,34 +551,343 @@ function writeAtomic(file: string, text: string): void {
 	fs.renameSync(tmp, file);
 }
 
-// Stretched files are large. Keep the ones used in the last 45 days, and never more than
-// 60 GB in total; anything dropped is rebuilt from the original the next time it is needed.
-function pruneCache(): void {
+// ---- sets ---------------------------------------------------------------------------
+// The app keeps every set itself, one file each in its own data folder. Nothing is ever
+// saved to or opened from a place the user has to pick.
+
+function setFilePath(id: string): string {
+	if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("Not a set");
+	return path.join(setsDir, `${id}.json`);
+}
+
+function readSet(id: string): SetFile {
+	const s = JSON.parse(fs.readFileSync(setFilePath(id), "utf8")) as SetFile;
+	checkDoc(s.doc);
+	return s;
+}
+
+function allSets(): SetFile[] {
+	const out: SetFile[] = [];
+	for (const f of fs.readdirSync(setsDir)) {
+		if (!f.endsWith(".json")) continue;
+		try {
+			out.push(readSet(f.slice(0, -5)));
+		} catch {
+			// not a set, or damaged: leave it alone
+		}
+	}
+	return out;
+}
+
+// Set names are kept apart: a name already taken by another set gets a number after it.
+function freeName(want: string, id: string | null): string {
+	const taken = new Set(allSets().filter((s) => s.id !== id).map((s) => s.name));
+	if (!taken.has(want)) return want;
+	for (let i = 2; ; i++) if (!taken.has(`${want} ${i}`)) return `${want} ${i}`;
+}
+
+function newSetId(): string {
+	return `s${randomBytes(8).toString("hex")}`;
+}
+
+// Stores a set and returns its name. A set stored for the first time without a name gets
+// one. Only a change to the set itself counts as an edit; where the view was left does not.
+function storeSet(id: string, name: string | null, view: SetView, doc: PlannerDoc): string {
+	checkDoc(doc);
+	let old: SetFile | null = null;
 	try {
-		const now = Date.now();
-		const entries = fs
-			.readdirSync(cacheDir)
-			.filter((f) => f.endsWith(".wav"))
-			.map((f) => {
-				const full = path.join(cacheDir, f);
-				const st = fs.statSync(full);
-				return { full, size: st.size, used: st.mtimeMs };
-			})
-			.sort((a, b) => b.used - a.used);
-		let total = 0;
-		for (const e of entries) {
-			total += e.size;
-			if (now - e.used > 45 * 86400e3 || total > 60e9) {
-				fs.rmSync(e.full, { force: true });
-				fs.rmSync(`${e.full}${PEAKS_EXT}`, { force: true });
+		old = readSet(id);
+	} catch {
+		// a new set
+	}
+	const now = Date.now();
+	const asked = (name ?? "").trim();
+	const finalName = asked && asked !== old?.name ? freeName(asked, id) : (old?.name ?? freeName(datedName(), id));
+	const changed = !old || old.name !== finalName || JSON.stringify(old.doc) !== JSON.stringify(doc);
+	const s: SetFile = { id, name: finalName, createdAt: old?.createdAt ?? now, updatedAt: changed ? now : old!.updatedAt, openedAt: now, view, doc };
+	writeAtomic(setFilePath(id), JSON.stringify(s));
+	return finalName;
+}
+
+function addSet(doc: PlannerDoc, name: string | null, at: number, view?: SetView): string {
+	const id = newSetId();
+	const s: SetFile = { id, name: freeName((name ?? "").trim() || datedName(), id), createdAt: at, updatedAt: at, openedAt: at, view: view ?? { pxPerBeat: 12, scrollX: 0, playheadBeat: 0 }, doc: checkDoc(doc) };
+	writeAtomic(setFilePath(id), JSON.stringify(s));
+	return id;
+}
+
+function setInfo(s: SetFile): SetInfo {
+	let lengthSec = 0;
+	try {
+		const doc = normalizeDoc(s.doc);
+		const beats = doc.clips.reduce((end, c) => Math.max(end, c.startBeat + c.lengthBeat), 0);
+		lengthSec = beats > 0 ? tempoMapOf(doc).secondsAtBeat(beats) : 0;
+	} catch {
+		// the list still shows the set
+	}
+	return { id: s.id, name: s.name, updatedAt: s.updatedAt, tracks: new Set(s.doc.clips.map((c) => c.trackId)).size, lengthSec };
+}
+
+// Sets from before the app kept them itself: the one that was open last, and the ones that
+// were auto-saved as files. They are copied in once; the old files are left where they are.
+function bringInOldSets(base: string): void {
+	const marker = path.join(setsDir, ".migrated");
+	if (fs.existsSync(marker)) return;
+	const sessionFile = path.join(base, "planner-session.json");
+	const oldDir = process.env["DJ_PLANNER_DATA"] ? path.join(base, "sets") : path.join(app.getPath("documents"), "DJ Sets");
+	try {
+		for (const f of fs.readdirSync(oldDir)) {
+			if (!f.endsWith(".djset")) continue;
+			try {
+				const file = path.join(oldDir, f);
+				addSet(JSON.parse(fs.readFileSync(file, "utf8")) as PlannerDoc, f.slice(0, -6), fs.statSync(file).mtimeMs);
+			} catch {
+				// not a set
 			}
 		}
-		for (const f of fs.readdirSync(cacheDir)) {
-			if (f.startsWith("export-")) fs.rmSync(path.join(cacheDir, f), { recursive: true, force: true });
-			else if (f.includes(".part.")) fs.rmSync(path.join(cacheDir, f), { force: true });
+	} catch {
+		// no such folder
+	}
+	try {
+		const s = JSON.parse(fs.readFileSync(sessionFile, "utf8")) as { doc: PlannerDoc; filePath: string | null; dirty: boolean; pxPerBeat: number; scrollX: number; playheadBeat: number };
+		const alreadyIn = !!s.filePath && !s.dirty && path.dirname(s.filePath) === oldDir && fs.existsSync(s.filePath);
+		if (!alreadyIn && s.doc.clips.length > 0) {
+			const name = s.filePath ? path.basename(s.filePath).replace(/\.djset$/, "") : null;
+			addSet(s.doc, name, Date.now(), { pxPerBeat: s.pxPerBeat, scrollX: s.scrollX, playheadBeat: s.playheadBeat });
+		}
+	} catch {
+		// nothing was open
+	}
+	fs.rmSync(sessionFile, { force: true });
+	fs.writeFileSync(marker, "");
+}
+
+// ---- cache clean-up -----------------------------------------------------------------
+// Stretched files are large. A file stays while the open set needs it, or a set that was
+// opened or edited in the last week does. Anything else (a tempo that was tried and dropped,
+// a ramp from before a clip moved, the files of a deleted set) goes once it has sat unused
+// for an hour. Whatever is dropped is made again from the original when a set next needs it.
+
+const RECENT_SET_MS = 7 * 86400e3;
+const UNUSED_MS = 3600e3;
+const cacheCap = (): number => Number(process.env["DJ_PLANNER_CACHE_CAP"]) || 20e9;
+
+function cacheFilesOf(doc: PlannerDoc, hashOf: (sourcePath: string) => string | undefined = syncHash): string[] {
+	const out: string[] = [];
+	for (const r of renderingsFor(doc)) {
+		const hash = hashOf(r.req.sourcePath);
+		if (hash) out.push(r.ramp ? rampFile(hash, r.req) : stretchFile(hash, r.req));
+	}
+	return out;
+}
+
+function syncHash(sourcePath: string): string | undefined {
+	try {
+		return sourceHash(sourcePath);
+	} catch {
+		return knownHashes[sourcePath];
+	}
+}
+
+function pruneCache(atLaunch = false): void {
+	const removed: string[] = [];
+	try {
+		const now = Date.now();
+		// What the open set plays, and anything being made right now.
+		const open = new Set<string>();
+		for (const key of [...(wanted ?? []), ...stretching.keys()]) {
+			const file = keyPaths.get(key);
+			if (file) open.add(path.basename(file));
+		}
+		const keep = new Set(open);
+		const sources = new Set<string>();
+		for (const s of allSets()) {
+			try {
+				const doc = normalizeDoc(s.doc);
+				for (const t of doc.tracks) sources.add(t.sourcePath);
+				if (now - Math.max(s.openedAt, s.updatedAt) > RECENT_SET_MS) continue;
+				for (const f of cacheFilesOf(doc)) keep.add(f);
+			} catch {
+				// a damaged set keeps nothing
+			}
+		}
+		const names = fs.readdirSync(cacheDir);
+		const remove = (full: string): void => {
+			fs.rmSync(full, { force: true });
+			fs.rmSync(`${full}${PEAKS_EXT}`, { force: true });
+			removed.push(full);
+		};
+		let left: { name: string; full: string; size: number; used: number }[] = [];
+		for (const name of names) {
+			if (!name.endsWith(".wav") || name.includes(".part.")) continue;
+			const full = path.join(cacheDir, name);
+			const st = fs.statSync(full, { throwIfNoEntry: false });
+			if (!st) continue;
+			if (!keep.has(name) && now - st.mtimeMs > UNUSED_MS) remove(full);
+			else left.push({ name, full, size: st.size, used: st.mtimeMs });
+		}
+		// A ceiling on top of that, least recently used first, sparing the open set.
+		let total = left.reduce((n, e) => n + e.size, 0);
+		left = left.sort((a, b) => a.used - b.used);
+		for (const e of left) {
+			if (total <= cacheCap()) break;
+			if (open.has(e.name)) continue;
+			remove(e.full);
+			total -= e.size;
+		}
+		for (const name of names) {
+			const full = path.join(cacheDir, name);
+			if (name.endsWith(PEAKS_EXT)) {
+				// A waveform whose audio is gone.
+				const st = fs.statSync(full, { throwIfNoEntry: false });
+				if (st && !fs.existsSync(full.slice(0, -PEAKS_EXT.length)) && (atLaunch || now - st.mtimeMs > UNUSED_MS)) fs.rmSync(full, { force: true });
+			} else if (atLaunch) {
+				// Left half-made by a run that was cut short.
+				if (name.startsWith("export-") || name.endsWith(".work")) fs.rmSync(full, { recursive: true, force: true });
+				else if (name.includes(".part.")) fs.rmSync(full, { force: true });
+			}
+		}
+		for (const p of Object.keys(knownHashes)) {
+			if (sources.has(p)) continue;
+			delete knownHashes[p];
+			hashesChanged = true;
+		}
+		if (hashesChanged) {
+			hashesChanged = false;
+			writeAtomic(path.join(cacheDir, "sources.json"), JSON.stringify(knownHashes));
 		}
 	} catch {
 		// clean-up is best effort
+	} finally {
+		// Whatever still counts on a file that went has to hear of it, come what may.
+		if (removed.length) {
+			for (const [key, file] of keyPaths) if (removed.includes(file)) keyPaths.delete(key);
+			send("planner:cache-removed", removed);
+		}
+	}
+}
+
+let pruneTimer: ReturnType<typeof setTimeout> | undefined;
+function pruneSoon(): void {
+	clearTimeout(pruneTimer);
+	pruneTimer = setTimeout(() => pruneCache(), 2000);
+}
+
+// ---- dropped renderings -------------------------------------------------------------
+// When the open set stops needing a rendering (a track restretched to another tempo, or
+// taken out of the set), its files go soon after, unless a set opened or edited in the last
+// week still uses them. A short wait first, so an undo plays at once instead of stretching
+// again. This runs quietly in the background: async file access only, one file at a time,
+// never while an export runs, and nothing the open set wants is ever touched.
+
+const dropGrace = (): number => Number(process.env["DJ_PLANNER_DROP_GRACE_MS"]) || 120e3;
+const dropCandidates = new Map<string, number>(); // cache file name -> when it stopped being wanted
+let dropTimer: ReturnType<typeof setTimeout> | undefined;
+let dropping = false;
+
+function noteDropped(before: Set<string> | null, keys: string[]): void {
+	if (!before) return;
+	const now = new Set(keys);
+	for (const key of keys) {
+		const file = keyPaths.get(key);
+		if (file) dropCandidates.delete(path.basename(file));
+	}
+	for (const key of before) {
+		if (now.has(key)) continue;
+		const file = keyPaths.get(key);
+		if (file && !dropCandidates.has(path.basename(file))) dropCandidates.set(path.basename(file), Date.now());
+	}
+	if (dropCandidates.size) scheduleDropPrune(dropGrace());
+}
+
+function scheduleDropPrune(ms: number): void {
+	if (dropTimer) return;
+	dropTimer = setTimeout(() => {
+		dropTimer = undefined;
+		void pruneDropped();
+	}, ms);
+	dropTimer.unref();
+}
+
+// Cache file names the open set wants, or that are being made right now.
+function inUseNames(): Set<string> {
+	const out = new Set<string>();
+	for (const key of [...(wanted ?? []), ...stretching.keys()]) {
+		const file = keyPaths.get(key);
+		if (file) out.add(path.basename(file));
+	}
+	return out;
+}
+
+const yieldNow = (): Promise<void> => new Promise((res) => setImmediate(res));
+
+async function hashOfAsync(sourcePath: string): Promise<string | undefined> {
+	try {
+		const st = await fs.promises.stat(sourcePath);
+		return createHash("sha1").update(`${sourcePath}|${st.size}|${st.mtimeMs}`).digest("hex").slice(0, 16);
+	} catch {
+		return knownHashes[sourcePath];
+	}
+}
+
+// Every cache file a set opened or edited in the last week calls for.
+async function recentSetFiles(): Promise<Set<string>> {
+	const keep = new Set<string>();
+	const now = Date.now();
+	for (const f of await fs.promises.readdir(setsDir)) {
+		if (!f.endsWith(".json")) continue;
+		await yieldNow();
+		try {
+			const s = JSON.parse(await fs.promises.readFile(path.join(setsDir, f), "utf8")) as SetFile;
+			checkDoc(s.doc);
+			if (now - Math.max(s.openedAt, s.updatedAt) > RECENT_SET_MS) continue;
+			const doc = normalizeDoc(s.doc);
+			const hashes = new Map<string, string | undefined>();
+			for (const t of doc.tracks) hashes.set(t.sourcePath, await hashOfAsync(t.sourcePath));
+			for (const name of cacheFilesOf(doc, (p) => hashes.get(p))) keep.add(name);
+		} catch {
+			// not a set, or damaged: it keeps nothing
+		}
+	}
+	return keep;
+}
+
+async function pruneDropped(): Promise<void> {
+	if (dropping || exporting) {
+		scheduleDropPrune(30e3);
+		return;
+	}
+	dropping = true;
+	const removed: string[] = [];
+	try {
+		const now = Date.now();
+		const due = [...dropCandidates].filter(([, at]) => now - at >= dropGrace()).map(([name]) => name);
+		const later = [...dropCandidates.values()].filter((at) => now - at < dropGrace());
+		if (later.length) scheduleDropPrune(Math.max(1000, dropGrace() - (now - Math.min(...later))));
+		if (!due.length) return;
+		const keep = await recentSetFiles();
+		for (const name of due) {
+			dropCandidates.delete(name);
+			await yieldNow();
+			// Checked again right before: the set may have taken it back meanwhile.
+			if (keep.has(name) || inUseNames().has(name) || exporting) continue;
+			const full = path.join(cacheDir, name);
+			try {
+				await fs.promises.rm(full, { force: true });
+				await fs.promises.rm(`${full}${PEAKS_EXT}`, { force: true });
+				removed.push(full);
+			} catch {
+				// a file that will not go now is left for the regular clean-up
+			}
+		}
+	} catch {
+		// clean-up is best effort
+	} finally {
+		dropping = false;
+		if (removed.length) {
+			for (const [key, file] of keyPaths) if (removed.includes(file)) keyPaths.delete(key);
+			send("planner:cache-removed", removed);
+		}
 	}
 }
 
@@ -566,15 +896,26 @@ let exportWorker: Worker | null = null;
 const cancelled = new WeakSet<Worker>();
 
 export function setupPlanner(): void {
-	const base = process.env["DJ_PLANNER_DATA"] || app.getPath("userData");
+	const base = dataRoot();
 	cacheDir = path.join(base, "planner-cache");
 	decodedDir = path.join(cacheDir, "decoded");
-	sessionFile = path.join(base, "planner-session.json");
-	setsDir = process.env["DJ_PLANNER_DATA"] ? path.join(base, "sets") : path.join(app.getPath("documents"), "DJ Sets");
+	setsDir = path.join(base, "sets");
 	fs.mkdirSync(decodedDir, { recursive: true });
+	fs.mkdirSync(setsDir, { recursive: true });
+	try {
+		knownHashes = JSON.parse(fs.readFileSync(path.join(cacheDir, "sources.json"), "utf8")) as Record<string, string>;
+	} catch {
+		knownHashes = {};
+	}
+	try {
+		bringInOldSets(base);
+	} catch {
+		// the app still starts
+	}
 	// Decoded intermediates are only needed while stretching; clear leftovers from earlier runs.
 	for (const f of fs.readdirSync(decodedDir)) fs.rmSync(path.join(decodedDir, f), { force: true });
-	pruneCache();
+	pruneCache(true);
+	setInterval(() => pruneCache(), 30 * 60e3).unref();
 	rekordboxRoot = findRekordboxRoot();
 	rekordboxCache = path.join(base, "rekordbox-cache.json");
 	matchesFile = path.join(base, "rekordbox-matches.json");
@@ -643,47 +984,47 @@ export function setupPlanner(): void {
 		for (const f of fs.readdirSync(cacheDir)) if (f.startsWith("export-")) fs.rmSync(path.join(cacheDir, f), { recursive: true, force: true });
 	});
 
-	ipcMain.handle("planner:open-project", async (e, file?: string) => {
-		let target = file;
-		if (!target) {
-			const win = BrowserWindow.fromWebContents(e.sender)!;
-			const r = await dialog.showOpenDialog(win, { properties: ["openFile"], filters: [{ name: "DJ set", extensions: ["djset"] }] });
-			if (r.canceled || !r.filePaths[0]) return null;
-			target = r.filePaths[0];
-		}
-		return { path: target, doc: parseDoc(await fs.promises.readFile(target, "utf8")) };
+	ipcMain.handle("planner:sets-list", (): SetInfo[] => {
+		pruneSoon();
+		return allSets()
+			.sort((a, b) => b.updatedAt - a.updatedAt)
+			.map(setInfo);
 	});
-	ipcMain.handle("planner:save-project", async (e, file: string | null, doc: PlannerDoc) => {
-		let target = file;
-		if (!target) {
-			const win = BrowserWindow.fromWebContents(e.sender)!;
-			const r = await dialog.showSaveDialog(win, { defaultPath: "Untitled set.djset", filters: [{ name: "DJ set", extensions: ["djset"] }] });
-			if (r.canceled || !r.filePath) return null;
-			target = r.filePath;
-		}
-		writeAtomic(target, JSON.stringify(doc, null, "\t") + "\n");
-		return target;
+	ipcMain.handle("planner:set-open", (_e, id: string): SetFile => {
+		const s = readSet(id);
+		s.openedAt = Date.now();
+		writeAtomic(setFilePath(id), JSON.stringify(s));
+		pruneSoon();
+		return s;
 	});
-	// Auto-save: never shows a dialog. A set without a file gets one in the sets folder.
-	ipcMain.handle("planner:autosave-project", async (_e, file: string | null, doc: PlannerDoc) => {
-		const target = file ?? newSetPath();
-		writeAtomic(target, JSON.stringify(doc, null, "\t") + "\n");
-		return target;
-	});
-	ipcMain.handle("planner:load-session", (): Session | null => {
+	ipcMain.handle("planner:set-save", (_e, id: string, name: string | null, view: SetView, doc: PlannerDoc) => storeSet(id, name, view, doc));
+	ipcMain.on("planner:set-save-sync", (e, id: string, name: string | null, view: SetView, doc: PlannerDoc) => {
 		try {
-			const s = JSON.parse(fs.readFileSync(sessionFile, "utf8")) as Session;
-			parseDoc(JSON.stringify(s.doc));
-			return s;
+			e.returnValue = storeSet(id, name, view, doc);
 		} catch {
-			return null;
+			e.returnValue = "";
 		}
 	});
-	ipcMain.handle("planner:save-session", (_e, s: Session) => {
-		writeAtomic(sessionFile, JSON.stringify(s));
+	ipcMain.handle("planner:set-rename", (_e, id: string, name: string): string => {
+		const s = readSet(id);
+		const next = name.trim();
+		if (!next || next === s.name) return s.name;
+		s.name = freeName(next, id);
+		s.updatedAt = Date.now();
+		writeAtomic(setFilePath(id), JSON.stringify(s));
+		return s.name;
 	});
+	ipcMain.handle("planner:set-duplicate", (_e, id: string): void => {
+		const s = readSet(id);
+		addSet(s.doc, `${s.name} copy`, Date.now(), s.view);
+	});
+	ipcMain.handle("planner:set-delete", (_e, id: string): void => {
+		fs.rmSync(setFilePath(id), { force: true });
+		pruneSoon();
+	});
+	ipcMain.handle("planner:set-import", (_e, file: string): string => addSet(JSON.parse(fs.readFileSync(file, "utf8")) as PlannerDoc, path.basename(file).replace(/\.[^.]+$/, ""), Date.now()));
+	ipcMain.handle("planner:prune", (): void => pruneCache());
 	ipcMain.handle("planner:reveal", (_e, file: string) => shell.showItemInFolder(file));
-	ipcMain.handle("planner:file-exists", (_e, file: string) => fs.existsSync(file));
 }
 
 export function buildMenu(): void {
@@ -694,10 +1035,7 @@ export function buildMenu(): void {
 			label: "File",
 			submenu: [
 				{ label: "New Set", accelerator: "CmdOrCtrl+N", click: act("new") },
-				{ label: "Open…", accelerator: "CmdOrCtrl+O", click: act("open") },
-				{ type: "separator" },
-				{ label: "Save", accelerator: "CmdOrCtrl+S", click: act("save") },
-				{ label: "Save As…", accelerator: "Shift+CmdOrCtrl+S", click: act("save-as") },
+				{ label: "All Sets", accelerator: "CmdOrCtrl+O", click: act("sets") },
 				{ type: "separator" },
 				{ label: "Import Audio…", accelerator: "CmdOrCtrl+I", click: act("import") },
 				{ label: "Export WAV…", accelerator: "CmdOrCtrl+E", click: act("export") },
