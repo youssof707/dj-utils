@@ -283,6 +283,42 @@ export function splitAt(beat: number, onlyIds?: string[]): void {
 	store.set({ selection });
 }
 
+// "Mute clip" (`muted`) and "Mute bass" (`lowCut`) for a group of clips: when every one of
+// them already has it, it comes off all of them; otherwise all of them get it.
+export type ClipFlag = "muted" | "lowCut";
+
+export function flagAllOn(ids: string[], key: ClipFlag): boolean {
+	const set = new Set(ids);
+	const group = store.get().doc.clips.filter((c) => set.has(c.id));
+	return group.length > 0 && group.every((c) => c[key]);
+}
+
+export function toggleClipsFlag(clipIds: string[], key: ClipFlag): void {
+	const s = store.get();
+	const ids = new Set(clipIds);
+	if (!s.doc.clips.some((c) => ids.has(c.id))) return;
+	const on = !flagAllOn(clipIds, key);
+	store.commit({
+		...s.doc,
+		clips: s.doc.clips.map((c) => {
+			if (!ids.has(c.id)) return c;
+			const next: Clip = { ...c };
+			if (on) next[key] = true;
+			else delete next[key];
+			return next;
+		}),
+	});
+}
+
+// The clips a menu or shortcut acts on: the selection when `clipId` is part of it (or when no
+// clip is given), else that one clip.
+export function flagTargets(clipId?: string): string[] {
+	const s = store.get();
+	if (clipId && !s.selection.includes(clipId)) return [clipId];
+	const ids = new Set(s.doc.clips.map((c) => c.id));
+	return s.selection.filter((id) => ids.has(id));
+}
+
 export function splitAtPlayhead(): void {
 	const s = store.get();
 	const beat = engine.positionBeat();
@@ -584,6 +620,7 @@ export function exportClips(doc: PlannerDoc): { clips: ExportClip[]; notReady: n
 	let notReady = 0;
 	let failed = 0;
 	for (const c of doc.clips) {
+		if (c.muted) continue;
 		const m = mediaFor(tracks.get(c.trackId), doc.bpm);
 		if (!m || m.state === "working") {
 			notReady++;
@@ -598,7 +635,7 @@ export function exportClips(doc: PlannerDoc): { clips: ExportClip[]; notReady: n
 		if (frames <= 0) continue;
 		const fadeInFrames = Math.min(frames, Math.round((c.fadeInBeat ?? 0) * framesPerBeat));
 		const fadeOutFrames = Math.min(frames - fadeInFrames, Math.round((c.fadeOutBeat ?? 0) * framesPerBeat));
-		clips.push({ cachePath: m.cachePath, startFrame: Math.round(c.startBeat * framesPerBeat), offsetFrame, frames, ...(fadeInFrames > 0 && { fadeInFrames }), ...(fadeOutFrames > 0 && { fadeOutFrames }) });
+		clips.push({ cachePath: m.cachePath, startFrame: Math.round(c.startBeat * framesPerBeat), offsetFrame, frames, ...(fadeInFrames > 0 && { fadeInFrames }), ...(fadeOutFrames > 0 && { fadeOutFrames }), ...(c.lowCut && { lowCut: true }) });
 	}
 	return { clips, notReady, failed };
 }
@@ -613,6 +650,10 @@ export async function runExport(keyLock: boolean, outPath?: string): Promise<voi
 	const { clips, failed } = exportClips(doc);
 	if (failed > 0) {
 		store.set({ exportUi: { phase: "error", message: `${failed} clip${failed === 1 ? "" : "s"} could not be loaded (shown in red). Fix or delete them, then export.` } });
+		return;
+	}
+	if (clips.length === 0) {
+		store.set({ exportUi: { phase: "error", message: "Every clip is muted, so there is nothing to export." } });
 		return;
 	}
 	const base = (s.setName ?? "Untitled set").replace(/[/:]/g, "-");

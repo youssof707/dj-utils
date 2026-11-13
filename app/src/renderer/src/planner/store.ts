@@ -39,6 +39,7 @@ export type State = {
 	setName: string | null; // null until the set is first stored, which names it
 	askName: boolean; // a set just made from the UI: the top bar asks for its name
 	pendingDelete: SetInfo | null;
+	pendingDuplicate: SetInfo | null;
 	setGen: number; // bumps whenever a different set is loaded
 	importQueue: ImportItem[];
 	lastPlacedEnd: number;
@@ -79,6 +80,7 @@ let state: State = {
 	setName: null,
 	askName: false,
 	pendingDelete: null,
+	pendingDuplicate: null,
 	setGen: 0,
 	importQueue: [],
 	lastPlacedEnd: 0,

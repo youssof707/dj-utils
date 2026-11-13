@@ -1069,6 +1069,8 @@ export function buildMenu(): void {
 				{ type: "separator" },
 				{ label: "Split at Playhead", accelerator: "CmdOrCtrl+S", click: act("split") },
 				{ label: "Duplicate", accelerator: "CmdOrCtrl+D", click: act("duplicate") },
+				{ label: "Mute or Unmute Clips", accelerator: "CmdOrCtrl+M", click: act("mute") },
+				{ label: "Mute or Unmute Bass", accelerator: "CmdOrCtrl+B", click: act("bass") },
 				{ label: "Delete", click: act("delete") },
 			],
 		},
@@ -1083,7 +1085,11 @@ export function buildMenu(): void {
 				{ role: "toggleDevTools" },
 			],
 		},
-		{ role: "windowMenu" },
+		// The standard Window menu without Minimize's Command-M, which mutes clips here.
+		{
+			label: "Window",
+			submenu: [{ label: "Minimize", click: (_item, win) => win?.minimize() }, { role: "zoom" }, { type: "separator" }, { role: "front" }],
+		},
 	];
 	Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }

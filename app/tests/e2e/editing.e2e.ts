@@ -212,6 +212,64 @@ describe("editing and playback", () => {
 		expect((await clips()).length).toBe(3);
 	});
 
+	it("mutes a clip, and its bass, from the context menu", async () => {
+		const id = await h.page.locator('[data-testid="clip"]').first().getAttribute("data-clip-id");
+		const el = h.page.locator(`[data-clip-id="${id}"]`);
+		const clip = async (): Promise<any> => (await clips()).find((c) => c.id === id);
+		const pick = async (item: string): Promise<void> => {
+			await el.click({ button: "right", position: { x: 50, y: 40 } });
+			await h.page.getByTestId(item).click();
+		};
+		await pick("menu-mute");
+		expect((await clip()).muted).toBe(true);
+		expect(await el.getAttribute("data-muted")).toBe("true");
+		await pick("menu-lowcut");
+		expect((await clip()).lowCut).toBe(true);
+		expect(await el.getAttribute("data-lowcut")).toBe("true");
+		// a muted clip is left out of the export; a bass-muted one is sent with the cut
+		expect(await h.page.evaluate(() => (window as any).planner.exportClips((window as any).planner.store.get().doc).clips.length)).toBe(2);
+		await shot(h.page, "11b-muted-no-bass");
+		await pick("menu-mute");
+		expect((await clip()).muted).toBeUndefined();
+		expect(await el.getAttribute("data-muted")).toBeNull();
+		const sent: any[] = await h.page.evaluate(() => (window as any).planner.exportClips((window as any).planner.store.get().doc).clips);
+		expect(sent.filter((c) => c.lowCut).length).toBe(1);
+		await pick("menu-lowcut");
+		expect((await clip()).lowCut).toBeUndefined();
+		expect(await el.getAttribute("data-lowcut")).toBeNull();
+		await h.page.keyboard.press("Meta+z");
+		expect((await clip()).lowCut).toBe(true);
+		await h.page.keyboard.press("Meta+Shift+z");
+		expect((await clip()).lowCut).toBeUndefined();
+	});
+
+	it("⌘M and ⌘B mute the selection; holding M or B and clicking toggles one clip", async () => {
+		const all = await clips();
+		const [a, b] = all;
+		const flags = async (key: string): Promise<boolean[]> => (await clips()).filter((c) => c.id === a.id || c.id === b.id).map((c) => !!c[key]);
+		await state(h.page, `s => { window.planner.store.set({ selection: [${JSON.stringify(a.id)}, ${JSON.stringify(b.id)}] }); return 0; }`);
+		for (const [key, combo] of [["muted", "Meta+m"], ["lowCut", "Meta+b"]] as const) {
+			// mixed: all get it; all on: all lose it
+			await state(h.page, `s => { window.planner.store.commit({ ...s.doc, clips: s.doc.clips.map((c) => c.id === ${JSON.stringify(a.id)} ? { ...c, ${key}: true } : c) }); return 0; }`);
+			await h.page.keyboard.press(combo);
+			expect(await flags(key)).toEqual([true, true]);
+			await h.page.keyboard.press(combo);
+			expect(await flags(key)).toEqual([false, false]);
+		}
+		// holding the key and clicking acts on the clicked clip only, even when it is selected
+		for (const [key, held] of [["muted", "m"], ["lowCut", "b"]] as const) {
+			await h.page.keyboard.down(held);
+			await h.page.locator(`[data-clip-id="${a.id}"]`).click({ position: { x: 50, y: 40 } });
+			await h.page.keyboard.up(held);
+			expect(await flags(key)).toEqual([true, false]);
+			await h.page.keyboard.down(held);
+			await h.page.locator(`[data-clip-id="${a.id}"]`).click({ position: { x: 50, y: 40 } });
+			await h.page.keyboard.up(held);
+			expect(await flags(key)).toEqual([false, false]);
+		}
+		expect((await clips()).length).toBe(all.length);
+	});
+
 	it("hold S and click cuts on the nearest visible line", async () => {
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		const sx: number = await state(h.page, "s => s.scrollX");
@@ -306,6 +364,18 @@ describe("editing and playback", () => {
 		// one undo step per drag
 		await h.page.keyboard.press("Meta+z");
 		expect((await clips())[0].fadeOutBeat).toBeUndefined();
+		// a fade-in over the whole clip: the dot at the right edge drags it back
+		await drag("fade-in", before[0].lengthBeat + 20);
+		await h.page.mouse.up();
+		expect((await clips())[0].fadeInBeat).toBeCloseTo(before[0].lengthBeat, 6);
+		await drag("fade-out", 8);
+		await h.page.mouse.up();
+		c = (await clips())[0];
+		expect(c.fadeInBeat).toBeCloseTo(before[0].lengthBeat - 8, 0);
+		expect(c.fadeOutBeat).toBeUndefined();
+		await h.page.keyboard.press("Meta+z");
+		await h.page.keyboard.press("Meta+z");
+		expect((await clips())[0].fadeInBeat).toBeCloseTo(16, 0);
 		await drag("fade-out", 16);
 		await h.page.mouse.up();
 		await h.page.keyboard.up("Alt");

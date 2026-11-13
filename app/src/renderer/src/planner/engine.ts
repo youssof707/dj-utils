@@ -6,7 +6,7 @@
 
 import { fadeGain } from "@shared/fades";
 import { clipPieces } from "@shared/pieces";
-import { JOIN_FADE_SEC, LANES, SAMPLE_RATE } from "@shared/planner";
+import { JOIN_FADE_SEC, LANES, LOW_CUT_EDGE_SEC, LOW_CUT_END_HZ, LOW_CUT_HZ, LOW_CUT_QS, SAMPLE_RATE } from "@shared/planner";
 import type { TempoMap } from "@shared/tempo";
 import { lostMedia, pieceSource, tempoMap } from "./media";
 import { store } from "./store";
@@ -29,12 +29,16 @@ type Item = {
 	// The clip's volume fades, shared by all its pieces: the clip runs from `start` to `end`,
 	// is at full volume from `inEnd` to `outStart`, and silent at both ends.
 	fades: { start: number; inEnd: number; outStart: number; end: number } | null;
+	// The clip's bass is muted: 0 for no, 1 for yes, 2 for yes on the clip's last piece, where
+	// the bass comes back over the final moment (see LOW_CUT_EDGE_SEC).
+	lowCut: 0 | 1 | 2;
 };
 
 // `fade` carries the clip's volume fade, after `gain` (joins and swaps), when the clip has one.
-type Voice = { src: AudioBufferSourceNode; gain: GainNode; fade: GainNode | null; sig: string; endAt: number };
+// `filters` take the bass out, before `gain`, when the clip's bass is muted.
+type Voice = { src: AudioBufferSourceNode; filters: BiquadFilterNode[]; gain: GainNode; fade: GainNode | null; sig: string; endAt: number };
 
-const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}|${it.fades ? `${it.fades.start}|${it.fades.inEnd}|${it.fades.outStart}|${it.fades.end}` : ""}`;
+const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}|${it.fades ? `${it.fades.start}|${it.fades.inEnd}|${it.fades.outStart}|${it.fades.end}` : ""}|${it.lowCut}`;
 
 const FADE_IN_STEPS = 24; // straight pieces the fade-in curve is drawn with in playback
 const SWAP_SEC = 0.03; // crossfade when a better rendering replaces one that is sounding
@@ -162,8 +166,9 @@ class Engine {
 		const out: Item[] = [];
 		for (const c of doc.clips) {
 			const track = tracks.get(c.trackId);
-			if (!track) continue;
+			if (!track || c.muted) continue;
 			let prev: Item | null = null;
+			let last: Item | null = null;
 			const end = c.startBeat + c.lengthBeat;
 			const fades = c.fadeInBeat || c.fadeOutBeat ? { start: map.secondsAtBeat(c.startBeat), inEnd: map.secondsAtBeat(c.startBeat + (c.fadeInBeat ?? 0)), outStart: map.secondsAtBeat(end - (c.fadeOutBeat ?? 0)), end: map.secondsAtBeat(end) } : null;
 			clipPieces(c, track, map).forEach((p, i) => {
@@ -190,10 +195,12 @@ class Engine {
 				if (dur <= 0) return;
 				const lead = before ? Math.max(0, Math.min(JOIN_FADE_SEC, room, before.dur)) : 0;
 				if (before) before.fadeOut = lead;
-				const item: Item = { id: `${c.id}:${i}`, lane: c.lane, cachePath: src.cachePath, start, dur, offset, rateA, rateB, lead, fadeOut: 0, fades };
+				const item: Item = { id: `${c.id}:${i}`, lane: c.lane, cachePath: src.cachePath, start, dur, offset, rateA, rateB, lead, fadeOut: 0, fades, lowCut: c.lowCut ? 1 : 0 };
 				out.push(item);
 				prev = item;
+				last = item;
 			});
+			if (last && c.lowCut) (last as Item).lowCut = 2;
 		}
 		return out;
 	}
@@ -356,11 +363,22 @@ class Engine {
 			}
 			gain.connect(fade);
 		}
-		src.connect(gain);
+		// A bass-muted clip goes through the low cut first. Web Audio takes a high-pass's Q in dB.
+		const filters = it.lowCut ? LOW_CUT_QS.map((q) => new BiquadFilterNode(ctx, { type: "highpass", frequency: LOW_CUT_HZ, Q: 20 * Math.log10(q) })) : [];
+		let tail: AudioNode = src;
+		for (const flt of filters) {
+			if (it.lowCut === 2) {
+				flt.frequency.setValueAtTime(LOW_CUT_HZ, Math.max(when, endAt - LOW_CUT_EDGE_SEC));
+				flt.frequency.exponentialRampToValueAtTime(LOW_CUT_END_HZ, endAt);
+			}
+			tail.connect(flt);
+			tail = flt;
+		}
+		tail.connect(gain);
 		(fade ?? gain).connect(this.laneGains[it.lane] ?? this.master!);
 		src.start(when, offset);
 		src.stop(endAt);
-		return { src, gain, fade, sig: sigOf(it), endAt };
+		return { src, filters, gain, fade, sig: sigOf(it), endAt };
 	}
 
 	private tick(token: number): void {
@@ -395,6 +413,7 @@ class Engine {
 			// not started yet
 		}
 		v.src.disconnect();
+		for (const flt of v.filters) flt.disconnect();
 		v.gain.disconnect();
 		v.fade?.disconnect();
 	}
@@ -507,6 +526,7 @@ class Engine {
 				old.src.stop(at + SWAP_SEC);
 				old.src.onended = () => {
 					old.src.disconnect();
+					for (const flt of old.filters) flt.disconnect();
 					old.gain.disconnect();
 					old.fade?.disconnect();
 				};

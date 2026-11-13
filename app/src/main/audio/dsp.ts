@@ -5,7 +5,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fadeGain } from "../../shared/fades";
-import { JOIN_FADE_SEC, PEAK_BUCKET, RAMP_PAD_FRAMES, SAMPLE_RATE, type ExportClip } from "../../shared/planner";
+import { JOIN_FADE_SEC, LOW_CUT_EDGE_SEC, LOW_CUT_END_HZ, LOW_CUT_HZ, LOW_CUT_QS, PEAK_BUCKET, RAMP_PAD_FRAMES, SAMPLE_RATE, type ExportClip } from "../../shared/planner";
 import { TempoMap, isFlat, type Pt } from "../../shared/tempo";
 import { WavReader, WavWriter } from "./wav";
 
@@ -18,25 +18,34 @@ type Progress = (pct: number) => void;
 // shows where kicks land; hats, synths and vocals are left out of it.
 const KICK_HZ = 150;
 
-// Second-order low-pass section (RBJ biquad) with running state, so a long file can be
-// filtered chunk by chunk.
-class LowPass {
-	private b0: number;
-	private b1: number;
-	private b2: number;
-	private a1: number;
-	private a2: number;
+// Second-order low-pass or high-pass section (RBJ biquad, the formulas Web Audio's
+// BiquadFilterNode uses) with running state, so a long file can be filtered chunk by chunk.
+class Biquad {
+	private b0 = 0;
+	private b1 = 0;
+	private b2 = 0;
+	private a1 = 0;
+	private a2 = 0;
 	private x1 = 0;
 	private x2 = 0;
 	private y1 = 0;
 	private y2 = 0;
-	constructor(hz: number, q: number) {
+	constructor(
+		private kind: "low" | "high",
+		hz: number,
+		private q: number,
+	) {
+		this.tune(hz);
+	}
+	// Moves the cut-off; the running state is kept, so it can slide while filtering.
+	tune(hz: number): void {
 		const w = (2 * Math.PI * hz) / SAMPLE_RATE;
-		const alpha = Math.sin(w) / (2 * q);
+		const alpha = Math.sin(w) / (2 * this.q);
 		const cos = Math.cos(w);
 		const a0 = 1 + alpha;
-		this.b0 = (1 - cos) / 2 / a0;
-		this.b1 = (1 - cos) / a0;
+		const k = this.kind === "low" ? 1 - cos : 1 + cos;
+		this.b0 = k / 2 / a0;
+		this.b1 = (this.kind === "low" ? k : -k) / a0;
 		this.b2 = this.b0;
 		this.a1 = (-2 * cos) / a0;
 		this.a2 = (1 - alpha) / a0;
@@ -51,14 +60,42 @@ class LowPass {
 	}
 }
 
+// Takes the bass out of one clip as it is mixed (see LOW_CUT_HZ): the same filter playback
+// uses, for the left and right channels, with the cut-off sliding down over the clip's last
+// moment. Frames must be fed in order from the clip's first.
+class LowCut {
+	private l = LOW_CUT_QS.map((q) => new Biquad("high", LOW_CUT_HZ, q));
+	private r = LOW_CUT_QS.map((q) => new Biquad("high", LOW_CUT_HZ, q));
+	private edge = Math.round(LOW_CUT_EDGE_SEC * SAMPLE_RATE);
+	constructor(private frames: number) {}
+	// Filters `count` interleaved stereo frames in place; the first is frame `rel` of the clip.
+	run(data: Float32Array, rel: number, count: number): void {
+		const sweepFrom = this.frames - this.edge;
+		for (let i = 0; i < count; i++) {
+			const k = rel + i;
+			if (k >= sweepFrom) {
+				const hz = LOW_CUT_HZ * (LOW_CUT_END_HZ / LOW_CUT_HZ) ** Math.min(1, (k - sweepFrom) / this.edge);
+				for (const f of this.l) f.tune(hz);
+				for (const f of this.r) f.tune(hz);
+			}
+			let a = data[i * 2];
+			let b = data[i * 2 + 1];
+			for (const f of this.l) a = f.step(a);
+			for (const f of this.r) b = f.step(b);
+			data[i * 2] = a;
+			data[i * 2 + 1] = b;
+		}
+	}
+}
+
 export function computePeaks(wavPath: string): Uint8Array {
 	const r = new WavReader(wavPath);
 	try {
 		const n = Math.ceil(r.frames / PEAK_BUCKET);
 		const peaks = new Uint8Array(n * 2);
 		// Fourth-order Butterworth: two sections with Q 0.5412 and 1.3066.
-		const lp1 = new LowPass(KICK_HZ, 0.5412);
-		const lp2 = new LowPass(KICK_HZ, 1.3066);
+		const lp1 = new Biquad("low", KICK_HZ, 0.5412);
+		const lp2 = new Biquad("low", KICK_HZ, 1.3066);
 		// The filter delays the kick band by its group delay; move it back so the kick body
 		// lines up with the full-band attack.
 		const delayFrames = (1 / 0.5412 + 1 / 1.3066) / (2 * Math.PI * KICK_HZ) * SAMPLE_RATE;
@@ -102,6 +139,7 @@ export function mixClips(clips: ExportClip[], outPath: string, onProgress: Progr
 	const chunk = SAMPLE_RATE * 2;
 	const buf = new Float32Array(chunk * 2);
 	const scratch = new Float32Array(chunk * 2);
+	const lowCuts = new Map<ExportClip, LowCut>();
 	let peak = 0;
 	try {
 		for (let pos = 0; pos < total; pos += chunk) {
@@ -118,17 +156,26 @@ export function mixClips(clips: ExportClip[], outPath: string, onProgress: Progr
 				}
 				const fadeIn = c.fadeInFrames ?? 0;
 				const fadeOut = c.fadeOutFrames ?? 0;
-				if (!fadeIn && !fadeOut) {
+				if (!fadeIn && !fadeOut && !c.lowCut) {
 					r.read(c.offsetFrame + (from - c.startFrame), to - from, buf, from - pos, true);
 					continue;
 				}
-				// A faded clip is read on its own, then added at the volume of each frame.
+				// A faded or bass-muted clip is read on its own, filtered, then added at the
+				// volume of each frame.
 				const count = to - from;
 				const rel = from - c.startFrame;
 				scratch.fill(0, 0, count * 2);
 				r.read(c.offsetFrame + rel, count, scratch);
+				if (c.lowCut) {
+					let cut = lowCuts.get(c);
+					if (!cut) {
+						cut = new LowCut(c.frames);
+						lowCuts.set(c, cut);
+					}
+					cut.run(scratch, rel, count);
+				}
 				for (let i = 0, o = (from - pos) * 2; i < count; i++, o += 2) {
-					const g = fadeGain(rel + i, c.frames, fadeIn, fadeOut);
+					const g = fadeIn || fadeOut ? fadeGain(rel + i, c.frames, fadeIn, fadeOut) : 1;
 					buf[o] += scratch[i * 2] * g;
 					buf[o + 1] += scratch[i * 2 + 1] * g;
 				}

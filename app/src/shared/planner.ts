@@ -29,7 +29,21 @@ export type Clip = {
 	// over this many at the end (see fades.ts). Left out when there is no fade.
 	fadeInBeat?: number;
 	fadeOutBeat?: number;
+	// Set from the clip's menu and saved with the set; left out when off. A muted clip makes
+	// no sound; a clip with `lowCut` plays without its bass (see LOW_CUT_HZ).
+	muted?: boolean;
+	lowCut?: boolean;
 };
+
+// "Mute bass" is a mixer's low knob turned all the way down: everything below the low
+// band's crossover is removed. 250 Hz is where DJ mixer isolators split low from mid; the
+// slope is 24 dB per octave (two second-order sections, together a fourth-order Butterworth).
+export const LOW_CUT_HZ = 250;
+export const LOW_CUT_QS = [0.5412, 1.3066];
+// Over the last moment of the clip the cut-off slides down to here, so the bass is back by
+// the time the next clip carries on and the join does not click.
+export const LOW_CUT_EDGE_SEC = 0.03;
+export const LOW_CUT_END_HZ = 20;
 
 // A tempo change sits in the tempo lane like a clip: over its length the tempo ramps from
 // whatever it was before to `bpm`, then holds there until the next change.
@@ -84,7 +98,8 @@ export const RAMP_PAD_FRAMES = SAMPLE_RATE / 2;
 export type StretchProgress = { key: string; pct: number };
 
 // `fadeInFrames` and `fadeOutFrames` are the clip's volume fades, counted inside `frames`.
-export type ExportClip = { cachePath: string; startFrame: number; offsetFrame: number; frames: number; fadeInFrames?: number; fadeOutFrames?: number };
+// `lowCut` clips are mixed without their bass. Muted clips are not sent at all.
+export type ExportClip = { cachePath: string; startFrame: number; offsetFrame: number; frames: number; fadeInFrames?: number; fadeOutFrames?: number; lowCut?: boolean };
 export type ExportRequest = {
 	outPath: string;
 	projectBpm: number;

@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties, type D
 import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type Cue, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
 import { fadeGain, fitFades } from "@shared/fades";
 import { blocksToPoints, bpmAt, TempoMap } from "@shared/tempo";
-import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleMute, toggleSolo, zoomAround } from "./actions";
+import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
 import { engine } from "./engine";
 import { clipTempoProgress, mediaFor, type Media } from "./media";
 import { store, useStore } from "./store";
@@ -121,6 +121,8 @@ function visibleGridStep(pxPerBeat: number): number {
 
 // S is held (set in App.tsx): a click on a clip cuts it instead of selecting or moving it.
 const splitToolOn = (): boolean => document.body.classList.contains("split-tool");
+// M or B is held (set in App.tsx): a click on a clip mutes or unmutes it, or its bass.
+const flagTool = (): "muted" | "lowCut" | null => (document.body.classList.contains("mute-tool") ? "muted" : document.body.classList.contains("bass-tool") ? "lowCut" : null);
 
 // Grid lines drawn at exact beat positions (same maths as the ruler and clips), so they never
 // drift from the beat. The canvas is one device pixel tall and stretched to the lane height.
@@ -345,14 +347,15 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 		}
 		// The kick band only, so each kick is a sharp spike whose left edge is the hit.
 		// Drawn smaller under a volume fade, the way it will sound.
-		g.fillStyle = "rgba(255, 255, 255, 0.85)";
+		// With the bass muted the band is not heard, so it is only hinted at.
+		g.fillStyle = clip.lowCut ? "rgba(255, 255, 255, 0.4)" : "rgba(255, 255, 255, 0.85)";
 		const faded = fadeIn > 0 || fadeOut > 0;
 		for (let x = 0; x < cols; x++) {
 			const vol = faded ? fadeGain((visL - left + x / dpr) / pxPerBeat, clip.lengthBeat, fadeIn, fadeOut) : 1;
 			const hh = Math.min(1, lo[x]) * mid * vol;
 			if (hh > 0.25) g.fillRect(x, mid - hh, 1, hh * 2);
 		}
-	}, [visible, visL, visR, left, pxPerBeat, peaks, lowMax, clip.offsetBeat, clip.lengthBeat, fadeIn, fadeOut, bpm, laneH]);
+	}, [visible, visL, visR, left, pxPerBeat, peaks, lowMax, clip.offsetBeat, clip.lengthBeat, clip.lowCut, fadeIn, fadeOut, bpm, laneH]);
 
 	const marks = useMemo(() => cueMarks(cues, track), [cues, track]);
 
@@ -360,13 +363,17 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 	const status = !track ? "error" : (media?.state ?? "working");
 	const style: CSSProperties = { left, width: w, ["--hue" as string]: hue };
 	const labelPad = Math.max(0, -left) + 8;
+	// Narrow clips leave the tags out rather than show a clipped half of one.
+	const showTags = w >= 100;
 	return (
 		<>
 			<div
-				className={`clip ${status}${selected ? " selected" : ""}`}
+				className={`clip ${status}${selected ? " selected" : ""}${clip.muted ? " muted" : ""}${clip.lowCut ? " lowcut" : ""}`}
 				style={style}
 				data-testid="clip"
 				data-clip-id={clip.id}
+				data-muted={clip.muted ? "true" : undefined}
+				data-lowcut={clip.lowCut ? "true" : undefined}
 				data-status={status}
 				onPointerDown={(e) => onDown(e, clip)}
 				onContextMenu={(e) => {
@@ -377,6 +384,8 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 			>
 				<canvas ref={ref} className="wave" style={{ left: visL - left, width: Math.ceil(visR - visL) }} />
 				<div className="clip-label" style={{ paddingLeft: labelPad }}>
+					{showTags && clip.muted && <span className="clip-tag">MUTED</span>}
+					{showTags && clip.lowCut && <span className="clip-tag lowcut">NO BASS</span>}
 					<span className="clip-name">{track?.name ?? "Missing track"}</span>
 					{track && <span className="clip-bpm">{Number(track.bpm.toFixed(2))}</span>}
 				</div>
@@ -486,6 +495,11 @@ function Lanes({ width }: { width: number }) {
 			const step = e.altKey ? 0 : visibleGridStep(s.pxPerBeat);
 			const at = beatAt(e.clientX);
 			splitAt(step ? Math.round(at / step) * step : at, s.selection.includes(item.id) ? s.selection : [item.id]);
+			return;
+		}
+		const flag = flagTool();
+		if (flag) {
+			if (item.lane !== TEMPO_ROW) toggleClipsFlag([item.id], flag);
 			return;
 		}
 		const el = e.currentTarget as HTMLElement;
@@ -605,7 +619,7 @@ function Lanes({ width }: { width: number }) {
 
 	// Dragging a clip's fade dot: the fade runs from that edge of the clip to the dot. It
 	// cannot reach into the fade at the other end.
-	const onFadeDown = (e: ReactPointerEvent, clip: Clip, side: FadeSide): void => {
+	const onFadeDown = (e: ReactPointerEvent, clip: Clip, grabbed: FadeSide): void => {
 		if (e.button !== 0) return;
 		e.stopPropagation(); // not a trim or a move of the clip underneath
 		store.set({ menu: null });
@@ -613,22 +627,44 @@ function Lanes({ width }: { width: number }) {
 		const base = store.get().doc;
 		const c0 = base.clips.find((c) => c.id === clip.id);
 		if (!c0) return;
-		const sign = side === "in" ? 1 : -1;
-		const was = (side === "in" ? c0.fadeInBeat : c0.fadeOutBeat) ?? 0;
-		const room = c0.lengthBeat - ((side === "in" ? c0.fadeOutBeat : c0.fadeInBeat) ?? 0);
+		// Several dots can sit on the same spot: the two of one clip when a fade fills it, and
+		// those of two clips that touch. Only the top one takes the mouse, so the drag goes to
+		// whichever of them can move the way the mouse first goes, the grabbed one first.
+		const ppb = store.get().pxPerBeat;
+		type Dot = { clip: Clip; side: FadeSide; sign: number; was: number; room: number };
+		const dotOf = (c: Clip, side: FadeSide): Dot => ({ clip: c, side, sign: side === "in" ? 1 : -1, was: (side === "in" ? c.fadeInBeat : c.fadeOutBeat) ?? 0, room: c.lengthBeat - ((side === "in" ? c.fadeOutBeat : c.fadeInBeat) ?? 0) });
+		const beatOf = (d: Dot): number => (d.side === "in" ? d.clip.startBeat + d.was : d.clip.startBeat + d.clip.lengthBeat - d.was);
+		const mine = dotOf(c0, grabbed);
+		const dots = [mine];
+		for (const c of base.clips) {
+			if (c.lane !== c0.lane || c.lengthBeat * ppb < FADE_DOT * 4) continue;
+			for (const s of ["in", "out"] as const) {
+				if (c.id === c0.id && s === grabbed) continue;
+				const d = dotOf(c, s);
+				if (Math.abs(beatOf(d) - beatOf(mine)) * ppb < FADE_DOT) dots.push(d);
+			}
+		}
+		let dot = mine;
 		const grabBeat = beatAt(e.clientX);
 		const sx = e.clientX;
 		const sy = e.clientY;
 		let moved = false;
 		const move = (ev: PointerEvent): void => {
-			if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
 			if (!moved) {
+				if (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
+				const dir = Math.sign(ev.clientX - sx);
+				if (dots.length > 1) {
+					if (dir === 0) return; // wait for a sideways move to tell which dot is meant
+					// moving this way makes the fade longer (needs room) or shorter (needs a fade)
+					dot = dots.find((d) => (dir * d.sign > 0 ? d.was < d.room - 1e-6 : d.was > 1e-6)) ?? mine;
+					if (!store.get().selection.includes(dot.clip.id)) store.set({ selection: [dot.clip.id] });
+				}
 				moved = true;
 				store.beginDrag();
 				document.body.classList.add("dragging-fade");
 			}
-			const len = Math.min(room, Math.max(0, snap(was + sign * (beatAt(ev.clientX) - grabBeat), ev)));
-			store.transient({ ...base, clips: base.clips.map((c) => (c.id === c0.id ? fitFades({ ...c, [side === "in" ? "fadeInBeat" : "fadeOutBeat"]: len }) : c)) });
+			const len = Math.min(dot.room, Math.max(0, snap(dot.was + dot.sign * (beatAt(ev.clientX) - grabBeat), ev)));
+			store.transient({ ...base, clips: base.clips.map((c) => (c.id === dot.clip.id ? fitFades({ ...c, [dot.side === "in" ? "fadeInBeat" : "fadeOutBeat"]: len }) : c)) });
 		};
 		const finish = (cancel: boolean): void => {
 			window.removeEventListener("pointermove", move);
@@ -655,7 +691,7 @@ function Lanes({ width }: { width: number }) {
 	const onBackgroundDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
 		store.set({ menu: null });
-		if (splitToolOn()) return; // a cut that missed every clip changes nothing
+		if (splitToolOn() || flagTool()) return; // a cut or mute that missed every clip changes nothing
 		const el = ref.current!;
 		const sx = e.clientX;
 		const sy = e.clientY;

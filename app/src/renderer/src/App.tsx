@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, watchCues, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, deleteSelection, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
 import { Home } from "./planner/Home";
@@ -16,7 +16,7 @@ function isTyping(): boolean {
 
 function modalOpen(): boolean {
 	const s = store.get();
-	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.exportUi !== null;
+	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.pendingDuplicate !== null || s.exportUi !== null;
 }
 
 function menuAction(action: string): void {
@@ -66,6 +66,12 @@ function runAction(action: string): void {
 		case "duplicate":
 			duplicateSelection();
 			break;
+		case "mute":
+			toggleClipsFlag(flagTargets(), "muted");
+			break;
+		case "bass":
+			toggleClipsFlag(flagTargets(), "lowCut");
+			break;
 		case "delete":
 			deleteSelection();
 			break;
@@ -94,6 +100,8 @@ function shortcut(e: KeyboardEvent): string | null {
 		if (k === "z") return e.shiftKey ? "redo" : "undo";
 		if (k === "a") return "select-all";
 		if (k === "d") return "duplicate";
+		if (k === "m" && !e.shiftKey) return "mute";
+		if (k === "b" && !e.shiftKey) return "bass";
 		if (k === "s" && !e.shiftKey) return "split";
 		if (k === "o") return "sets";
 		if (k === "n") return "new";
@@ -115,9 +123,10 @@ function shortcut(e: KeyboardEvent): string | null {
 	return null;
 }
 
-// While S is held, a click on a clip cuts it there (the timeline reads this class).
-const SPLIT_TOOL = "split-tool";
-const dropSplitTool = (): void => document.body.classList.remove(SPLIT_TOOL);
+// While S is held, a click on a clip cuts it there; while M or B is held, a click mutes or
+// unmutes the clip or its bass (the timeline reads these classes).
+const HOLD_TOOLS: Record<string, string> = { s: "split-tool", m: "mute-tool", b: "bass-tool" };
+const dropSplitTool = (): void => document.body.classList.remove(...Object.values(HOLD_TOOLS));
 
 function onKey(e: KeyboardEvent): void {
 	// A shortcut with Command never leaves the cut tool on: its key-up may not arrive.
@@ -137,10 +146,11 @@ function onKey(e: KeyboardEvent): void {
 		}
 	}
 	if (isTyping()) return;
-	if (e.key.toLowerCase() === "s" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+	const tool = HOLD_TOOLS[e.key.toLowerCase()];
+	if (tool && !e.metaKey && !e.ctrlKey && !e.altKey) {
 		if (store.get().screen === "home") return;
 		e.preventDefault();
-		document.body.classList.add(SPLIT_TOOL);
+		document.body.classList.add(tool);
 		return;
 	}
 	const action = shortcut(e);
@@ -214,7 +224,8 @@ function start(): void {
 		if (e.code === "Space" && document.activeElement instanceof HTMLButtonElement && !modalOpen()) e.preventDefault();
 	});
 	window.addEventListener("keyup", (e) => {
-		if (e.key.toLowerCase() === "s") dropSplitTool();
+		const tool = HOLD_TOOLS[e.key.toLowerCase()];
+		if (tool) document.body.classList.remove(tool);
 	});
 	window.addEventListener("blur", dropSplitTool);
 	window.addEventListener("click", () => {
@@ -234,6 +245,7 @@ function start(): void {
 		store,
 		engine,
 		importPaths,
+		exportClips,
 		// The tests are written around sets at 128 BPM.
 		newSet: (opts?: { askName?: boolean; bpm?: number }) => newSet({ bpm: 128, ...opts }),
 		openSet,

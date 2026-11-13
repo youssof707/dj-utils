@@ -74,6 +74,34 @@ describe("mix", () => {
 		expect(level(2.5)).toBeCloseTo(0.5 * 0.5, 2);
 		expect(level(2.97)).toBeLessThan(0.02);
 	});
+
+	it("takes the bass out of a bass-muted clip and leaves the rest", () => {
+		const low = path.join(dir, "cut-low.wav");
+		const high = path.join(dir, "cut-high.wav");
+		writeTone(low, 60, 4, 0.5);
+		writeTone(high, 2000, 4, 0.5);
+		const out = path.join(dir, "cut-mix.wav");
+		// 3 s clips, so each crosses one of the mixer's 2 s chunks
+		mixClips(
+			[
+				{ cachePath: low, startFrame: 0, offsetFrame: 0, frames: 3 * SR, lowCut: true },
+				{ cachePath: high, startFrame: 4 * SR, offsetFrame: 0, frames: 3 * SR, lowCut: true },
+				{ cachePath: low, startFrame: 8 * SR, offsetFrame: 0, frames: 3 * SR },
+			],
+			out,
+		);
+		const { left } = readAll(out);
+		// loudest sample in the 50 ms after `sec` seconds into the mix
+		const level = (sec: number): number => {
+			let m = 0;
+			const from = Math.round(sec * SR);
+			for (let i = from; i < from + SR * 0.05; i++) m = Math.max(m, Math.abs(left[i]));
+			return m;
+		};
+		for (const sec of [1, 1.98, 2.5]) expect(level(sec)).toBeLessThan(0.01);
+		for (const sec of [5, 5.98, 6.5]) expect(level(sec)).toBeCloseTo(0.5, 1);
+		expect(level(9.5)).toBeCloseTo(0.5, 2);
+	});
 });
 
 const points = [

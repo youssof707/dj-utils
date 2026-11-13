@@ -38,6 +38,12 @@ body.split-tool .clip * {
 	/* scissors beside a cut line; the hotspot is on the line */
 	cursor: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><g fill='none' stroke-linecap='round'><path d='M8 3v26' stroke='black' stroke-width='4'/><path d='M8 3v26' stroke='white' stroke-width='2'/><g stroke='black' stroke-width='4'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g><g stroke='white' stroke-width='2'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g></g></svg>") 8 16, col-resize !important;
 }
+body.mute-tool .clip,
+body.mute-tool .clip *,
+body.bass-tool .clip,
+body.bass-tool .clip * {
+	cursor: pointer !important;
+}
 body.dragging-trim,
 body.dragging-trim * {
 	cursor: ew-resize !important;
@@ -629,6 +635,22 @@ button.play.on {
 }
 .clip.error.selected {
 	box-shadow: inset 0 0 0 2px #fff;
+}
+/* A muted clip: grey and see-through. */
+.clip.muted {
+	filter: grayscale(1);
+	opacity: 0.35;
+}
+/* Bass muted: only the small tag in the label, plus the faded kick waveform (Timeline.tsx). */
+.clip-tag {
+	margin-right: 6px;
+	padding: 1px 4px;
+	border-radius: 3px;
+	background: #fff;
+	color: #111;
+	font-size: 9px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
 }
 .clip .wave {
 	position: absolute;

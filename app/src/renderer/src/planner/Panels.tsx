@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Track } from "@shared/types";
 import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat } from "@shared/tempo";
-import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, deleteSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
+import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
@@ -455,6 +455,7 @@ export function Modals() {
 	const pending = useStore((s) => s.pendingProjectBpm);
 	const exportUi = useStore((s) => s.exportUi);
 	const pendingDelete = useStore((s) => s.pendingDelete);
+	const pendingDuplicate = useStore((s) => s.pendingDuplicate);
 	const doc = useStore((s) => s.doc);
 	const item = queue[0];
 	const editTrack = doc.tracks.find((t) => t.id === trackBpmEdit);
@@ -545,6 +546,28 @@ export function Modals() {
 			</Modal>
 		);
 	}
+	if (pendingDuplicate) {
+		const close = (): void => store.set({ pendingDuplicate: null });
+		const go = (): void => {
+			close();
+			void duplicateSet(pendingDuplicate.id);
+		};
+		return (
+			<Modal onClose={close} onEnter={go} testId="duplicate-set-modal">
+				<h3>Duplicate this set?</h3>
+				<p className="file-name">{pendingDuplicate.name}</p>
+				<p className="muted">A copy named “{pendingDuplicate.name} copy” is added to your sets.</p>
+				<div className="buttons">
+					<button className="ghost" onClick={close}>
+						Cancel
+					</button>
+					<button className="primary" data-testid="duplicate-set-confirm" onClick={go}>
+						Duplicate set
+					</button>
+				</div>
+			</Modal>
+		);
+	}
 	if (exportUi) return <ExportModal />;
 	return null;
 }
@@ -572,6 +595,7 @@ export function ClipMenu() {
 	const beat = engine.positionBeat();
 	const canSplit = beat > clip.startBeat && beat < clip.startBeat + clip.lengthBeat;
 	const media = mediaFor(track, doc.bpm);
+	const targets = flagTargets(clip.id);
 	const item = (label: string, fn: () => void, opts: { disabled?: boolean; hint?: string; testId?: string } = {}): ReactNode => (
 		<button
 			disabled={opts.disabled}
@@ -587,10 +611,12 @@ export function ClipMenu() {
 		</button>
 	);
 	const x = Math.min(menu.x, window.innerWidth - 230);
-	const y = Math.min(menu.y, window.innerHeight - 250);
+	const y = Math.min(menu.y, window.innerHeight - 310);
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
 			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "⌘S", testId: "menu-split" })}
+			{item(flagAllOn(targets, "muted") ? "Unmute clip" : "Mute clip", () => toggleClipsFlag(targets, "muted"), { hint: "⌘M", testId: "menu-mute" })}
+			{item(flagAllOn(targets, "lowCut") ? "Unmute bass" : "Mute bass", () => toggleClipsFlag(targets, "lowCut"), { hint: "⌘B", testId: "menu-lowcut" })}
 			{item("Duplicate", duplicateSelection, { hint: "⌘D", testId: "menu-duplicate" })}
 			{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
 			{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}

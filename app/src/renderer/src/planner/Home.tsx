@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { SetInfo } from "@shared/planner";
-import { duplicateSet, newSet, openSet, renameSet } from "./actions";
+import { newSet, openSet, renameSet } from "./actions";
 import { fmtLength, NameEdit } from "./Panels";
 import { store, useStore } from "./store";
 
@@ -47,7 +47,7 @@ function Row({ set }: { set: SetInfo }) {
 				<button className="ghost" data-testid="set-rename" onClick={stop(() => setRenaming(true))}>
 					Rename
 				</button>
-				<button className="ghost" data-testid="set-duplicate" onClick={stop(() => void duplicateSet(set.id))}>
+				<button className="ghost" data-testid="set-duplicate" onClick={stop(() => store.set({ pendingDuplicate: set }))}>
 					Duplicate
 				</button>
 				<button className="ghost" data-testid="set-delete" onClick={stop(() => store.set({ pendingDelete: set }))}>

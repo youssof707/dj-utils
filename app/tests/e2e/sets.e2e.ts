@@ -154,7 +154,13 @@ describe("sets kept by the app", () => {
 	});
 
 	it("duplicates, renames and deletes sets from the list", async () => {
+		// cancelling the confirm leaves the list as it was
 		await row("Friday warm-up").getByTestId("set-duplicate").click();
+		await h.page.getByTestId("duplicate-set-modal").getByRole("button", { name: "Cancel" }).click();
+		expect(await h.page.getByTestId("duplicate-set-modal").count()).toBe(0);
+		expect(await rows()).toEqual(["Friday warm-up"]);
+		await row("Friday warm-up").getByTestId("set-duplicate").click();
+		await h.page.getByTestId("duplicate-set-confirm").click();
 		await expect.poll(rows).toEqual(["Friday warm-up copy", "Friday warm-up"]);
 		expect(setFiles().length).toBe(2);
 		// rename the copy; opening does not happen while typing
