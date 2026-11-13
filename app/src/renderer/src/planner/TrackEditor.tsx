@@ -10,10 +10,11 @@ import { barPhase, insertSections, leadBeat, place, slideSections, srcOf, type E
 import { cueSpot } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
 import { openFileInEditor } from "./actions";
+import { useLibraryDrop } from "./libraryDrag";
 import { mediaFor } from "./media";
 import { fmtLength } from "./Panels";
 import { store, useStore, type EditLane, type TrackEditUi } from "./store";
-import { LaneGrid, trackHue } from "./Timeline";
+import { hueVars, LaneGrid, NO_KEY, trackHue } from "./Timeline";
 import { closeTrackEdit, editAddSelected, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editInsert, editMove, editPieces, editPx, editRedo, editRemoveTrack, editResize, editScroll, editSectionsOf, editSelect, editSetCursor, editSlide, editStep, editTotal, editUndo, editZoom, exportTrackEdit, laneOffset, laneTrack } from "./trackEdit";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
@@ -46,7 +47,7 @@ function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue,
 
 	if (!visible) return null;
 	return (
-		<div className={className} style={{ left, width: w, ["--hue" as string]: hue } as CSSProperties} data-testid={testId} data-section-id={id}>
+		<div className={className} style={{ left, width: w, ...hueVars(hue) } as CSSProperties} data-testid={testId} data-section-id={id}>
 			<canvas ref={ref} className="edit-wave" style={{ left: visL - left, width: Math.ceil(visR - visL) }} />
 			{label && w >= 64 && (
 				<div className="edit-section-label" style={{ paddingLeft: Math.max(0, -left) + 6 }}>
@@ -144,11 +145,13 @@ function EditPlayhead() {
 	return <div className="edit-playhead" ref={ref} data-testid="edit-playhead" />;
 }
 
-// The colours of the two tracks: each track's own, unless they are too close to tell apart.
-function laneHues(e: TrackEditUi): [number, number] {
-	const a = trackHue(e.track.id);
+// The colours of the two tracks: each track's own (from its key), unless they are the same or
+// too close to tell apart.
+function laneHues(e: TrackEditUi, keys: Record<string, string>): [number, number] {
+	const a = trackHue(e.track, keys);
 	if (!e.second) return [a, a];
-	const b = trackHue(e.second.id);
+	const b = trackHue(e.second, keys);
+	if (a === NO_KEY || b === NO_KEY) return a === b ? [a, 210] : [a, b];
 	return [a, Math.abs(((b - a + 540) % 360) - 180) < 50 ? (a + 150) % 360 : b];
 }
 
@@ -172,6 +175,8 @@ function Editor({ e }: { e: TrackEditUi }) {
 	const [incoming, setIncoming] = useState<{ sections: EditSection[]; ids: string[] } | null>(null);
 	const [carry, setCarry] = useState<{ x: number; y: number; width: number; hue: number; label: string } | null>(null);
 	const fileDrop = useFileDrop();
+	const editorRef = useRef<HTMLDivElement>(null);
+	useLibraryDrop(editorRef, (d) => void openFileInEditor(d.path));
 
 	useLayoutEffect(() => {
 		const el = lanesRef.current!;
@@ -207,7 +212,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 	const peaks1 = media1?.state === "ready" ? media1.peaks : null;
 	const maxes0 = useMemo((): [number, number] => [peakMax(peaks0, 0), peakMax(peaks0, 1)], [peaks0]);
 	const maxes1 = useMemo((): [number, number] => [peakMax(peaks1, 0), peakMax(peaks1, 1)], [peaks1]);
-	const hues = laneHues(e);
+	const hues = laneHues(e, useStore((s) => s.trackKeys));
 	// The tracks, each with what it takes to draw a stretch of it.
 	const sources = ([0, 1] as const).flatMap((i) => {
 		const t = laneTrack(e, i);
@@ -427,9 +432,9 @@ function Editor({ e }: { e: TrackEditUi }) {
 	const grid = <LaneGrid width={view.width} pxPerBeat={view.pxPerBeat} scrollX={view.scrollX - phase * view.pxPerBeat} />;
 	// The edit opens with the first track's lead-in, unless its first section is the other track's.
 	const ownLead = lead > 0 && (shown.length === 0 || srcOf(shown[0].section) === 0);
-	const style = { ["--hue" as string]: hues[0] } as CSSProperties;
+	const style = hueVars(hues[0]);
 	return (
-		<div className={`bottom-area track-editor${multi ? " multi" : ""}${focus ? " focused" : ""}${fileDrop.dropping ? " file-over" : ""}`} data-testid="track-editor" style={style} {...fileDrop.handlers}>
+		<div className={`bottom-area track-editor${multi ? " multi" : ""}${focus ? " focused" : ""}${fileDrop.dropping ? " file-over" : ""}`} data-testid="track-editor" style={style} ref={editorRef} {...fileDrop.handlers}>
 			<div className="edit-head">
 				<button className="play" data-testid="edit-play" onClick={toggleEditPreview} disabled={media?.state !== "ready"}>
 					{e.playing ? "■" : "▶"}
@@ -514,7 +519,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 					// What each lane is: the two tracks, then the edit made of their pieces.
 					<div className="edit-gutter">
 						{sources.map((so) => (
-							<div key={so.i} className={`edit-lane-head${e.lane === so.i ? " active" : ""}`} data-testid={`edit-lane-${so.i}`} style={{ ["--hue" as string]: so.hue } as CSSProperties} onPointerDown={() => editSelect([], so.i)}>
+							<div key={so.i} className={`edit-lane-head${e.lane === so.i ? " active" : ""}`} data-testid={`edit-lane-${so.i}`} style={hueVars(so.hue)} onPointerDown={() => editSelect([], so.i)}>
 								<span className="edit-lane-key">{"AB"[so.i]}</span>
 								<div className="edit-lane-text">
 									<span className="edit-lane-name">{so.track.name}</span>
@@ -564,7 +569,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 								{placed
 									.filter((p) => srcOf(p.section) === so.i)
 									.map((p) => (
-										<div key={p.section.id} className="edit-used" style={{ left: x(so.off + p.section.startBeat), width: p.lengthBeat * view.pxPerBeat, ["--hue" as string]: so.hue } as CSSProperties} />
+										<div key={p.section.id} className="edit-used" style={{ left: x(so.off + p.section.startBeat), width: p.lengthBeat * view.pxPerBeat, ...hueVars(so.hue) } as CSSProperties} />
 									))}
 								{marksOn(so.i)}
 							</div>
@@ -600,7 +605,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 					</div>
 				</div>
 				{carry && (
-					<div className="edit-carry" style={{ left: carry.x, top: carry.y - 18, width: Math.max(24, carry.width), ["--hue" as string]: carry.hue } as CSSProperties}>
+					<div className="edit-carry" style={{ left: carry.x, top: carry.y - 18, width: Math.max(24, carry.width), ...hueVars(carry.hue) } as CSSProperties}>
 						{carry.label}
 					</div>
 				)}
@@ -611,8 +616,10 @@ function Editor({ e }: { e: TrackEditUi }) {
 
 function Empty() {
 	const drop = useFileDrop();
+	const ref = useRef<HTMLDivElement>(null);
+	useLibraryDrop(ref, (d) => void openFileInEditor(d.path));
 	return (
-		<div className={`bottom-area edit-empty${drop.dropping ? " file-over" : ""}`} data-testid="track-editor-empty" {...drop.handlers}>
+		<div className={`bottom-area edit-empty${drop.dropping ? " file-over" : ""}`} data-testid="track-editor-empty" ref={ref} {...drop.handlers}>
 			Right-click a clip and choose Edit, or drop an audio file here, to cut a track up.
 		</div>
 	);

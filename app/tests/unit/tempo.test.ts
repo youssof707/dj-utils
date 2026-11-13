@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TempoMap, bpmAt, isFlat } from "../../src/shared/tempo";
+import { TempoMap, blocksToPoints, bpmAt, isFlat } from "../../src/shared/tempo";
 
 describe("tempo curve", () => {
 	it("is the project BPM with no points", () => {
@@ -67,5 +67,14 @@ describe("tempo curve", () => {
 			120,
 		);
 		expect(a.secondsAtBeat(100)).toBe(b.secondsAtBeat(100));
+	});
+});
+
+describe("tempo blocks switched off", () => {
+	it("leave the curve as if they were not there", () => {
+		const on = { startBeat: 16, lengthBeat: 8, bpm: 140 };
+		const off = { startBeat: 32, lengthBeat: 8, bpm: 170, off: true };
+		expect(blocksToPoints([on, off], 128)).toEqual(blocksToPoints([on], 128));
+		expect(blocksToPoints([{ ...on, off: true }], 128)).toEqual([]);
 	});
 });

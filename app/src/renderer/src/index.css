@@ -141,11 +141,41 @@ input.bad {
 	background: var(--panel);
 	border-bottom: 1px solid var(--line);
 }
-.topbar-sep {
-	width: 1px;
-	height: 26px;
+/* An on/off switch in the iOS manner. */
+.switch {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	color: var(--muted);
+	font-size: 13px;
+	cursor: pointer;
+}
+button.switch-track {
+	position: relative;
+	width: 38px;
+	height: 22px;
+	padding: 0;
+	border-radius: 11px;
+	background: var(--line-strong);
+	transition: background 0.18s;
 	flex: none;
-	background: var(--line);
+}
+button.switch-track.on {
+	background: var(--accent);
+}
+.switch-knob {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+	transition: transform 0.18s;
+}
+button.switch-track.on .switch-knob {
+	transform: translateX(16px);
 }
 .topbar button.back {
 	font-size: 26px;
@@ -510,14 +540,14 @@ button.play.on {
 	height: 24px;
 	padding: 0 8px 0 6px;
 	border-radius: 5px;
-	background: hsl(var(--hue) 45% 34% / 0.35);
-	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 60% / 0.7);
+	background: hsl(var(--hue) calc(45% * var(--sat, 1)) 34% / 0.35);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) calc(55% * var(--sat, 1)) 60% / 0.7);
 	color: #e8ebf2;
 	cursor: grab;
 	user-select: none;
 }
 .edit-file:hover {
-	background: hsl(var(--hue) 48% 40% / 0.5);
+	background: hsl(var(--hue) calc(48% * var(--sat, 1)) 40% / 0.5);
 }
 .edit-file:active {
 	cursor: grabbing;
@@ -579,7 +609,7 @@ button.play.on {
 }
 /* Pieces being dropped into the edit, shown where they would land. */
 .edit-section.incoming {
-	background: hsl(var(--hue) 55% 45% / 0.35);
+	background: hsl(var(--hue) calc(55% * var(--sat, 1)) 45% / 0.35);
 	box-shadow:
 		inset 0 0 0 2px #fff,
 		0 0 0 1px rgba(0, 0, 0, 0.5);
@@ -591,7 +621,7 @@ button.play.on {
 	bottom: 2px;
 	height: 3px;
 	border-radius: 1.5px;
-	background: hsl(var(--hue) 80% 68%);
+	background: hsl(var(--hue) calc(80% * var(--sat, 1)) 68%);
 	pointer-events: none;
 	z-index: 2;
 }
@@ -605,8 +635,8 @@ button.play.on {
 	white-space: nowrap;
 	overflow: hidden;
 	border-radius: 3px;
-	background: hsl(var(--hue) 50% 40% / 0.55);
-	box-shadow: inset 0 0 0 1px hsl(var(--hue) 60% 68%);
+	background: hsl(var(--hue) calc(50% * var(--sat, 1)) 40% / 0.55);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) calc(60% * var(--sat, 1)) 68%);
 	pointer-events: none;
 	z-index: 50;
 }
@@ -645,7 +675,7 @@ button.play.on {
 	width: 18px;
 	height: 18px;
 	border-radius: 4px;
-	background: hsl(var(--hue) 50% 42%);
+	background: hsl(var(--hue) calc(50% * var(--sat, 1)) 42%);
 	color: #fff;
 	font-size: 11px;
 	font-weight: 700;
@@ -681,13 +711,13 @@ button.play.on {
 	position: absolute;
 	top: 8px;
 	bottom: 22px;
-	background: hsl(var(--hue) 42% 30% / 0.1);
-	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 55% / 0.8);
+	background: hsl(var(--hue) calc(42% * var(--sat, 1)) 30% / 0.1);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) calc(55% * var(--sat, 1)) 55% / 0.8);
 	overflow: hidden;
 	cursor: grab;
 }
 .edit-section.selected {
-	background: hsl(var(--hue) 48% 38% / 0.2);
+	background: hsl(var(--hue) calc(48% * var(--sat, 1)) 38% / 0.2);
 	box-shadow: inset 0 0 0 2px #fff;
 	z-index: 2;
 }
@@ -702,7 +732,7 @@ button.play.on {
 	bottom: 0;
 	left: 0;
 	width: 3px;
-	background: linear-gradient(to right, var(--bg) 0 2px, hsl(var(--hue) 55% 55% / 0.8) 2px 3px);
+	background: linear-gradient(to right, var(--bg) 0 2px, hsl(var(--hue) calc(55% * var(--sat, 1)) 55% / 0.8) 2px 3px);
 	pointer-events: none;
 	z-index: 4;
 }
@@ -733,7 +763,7 @@ button.play.on {
 	font-size: 11px;
 	white-space: nowrap;
 	overflow: hidden;
-	background: hsl(var(--hue) 45% 34% / 0.75);
+	background: hsl(var(--hue) calc(45% * var(--sat, 1)) 34% / 0.75);
 	pointer-events: none;
 	font-variant-numeric: tabular-nums;
 }
@@ -929,6 +959,13 @@ button.play.on {
 .library-row:hover {
 	background: var(--panel-2);
 }
+.library-ghost {
+	position: fixed;
+	left: 0;
+	top: 0;
+	z-index: 1000;
+	pointer-events: none;
+}
 .library-names {
 	flex: 1;
 	min-width: 0;
@@ -957,6 +994,8 @@ button.play.on {
 }
 .library-key {
 	width: 36px;
+	font-weight: 700;
+	color: hsl(var(--hue) calc(75% * var(--sat, 1)) 65%);
 }
 
 .timeline {
@@ -1070,6 +1109,40 @@ button.play.on {
 	background: rgba(242, 184, 75, 0.26);
 	box-shadow: inset 0 0 0 2px #fff;
 	z-index: 2;
+}
+.tempo-block.off {
+	background: rgba(255, 255, 255, 0.04);
+	box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+.tempo-block.off.selected {
+	box-shadow: inset 0 0 0 2px #fff;
+}
+.tempo-block.off .tempo-block-label {
+	color: var(--muted);
+	text-decoration: line-through;
+}
+.tempo-switch {
+	position: absolute;
+	top: 4px;
+	right: 12px; /* clear of the right trim handle */
+	z-index: 1;
+	width: 9px;
+	height: 9px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: #f2b84b;
+	cursor: pointer;
+}
+.tempo-switch::before {
+	/* a bigger target than the dot itself */
+	content: "";
+	position: absolute;
+	inset: -4px;
+}
+.tempo-block.off .tempo-switch {
+	background: transparent;
+	box-shadow: inset 0 0 0 1.5px var(--muted);
 }
 .tempo-block:hover .trim {
 	background: rgba(255, 255, 255, 0.14);
@@ -1192,13 +1265,13 @@ button.play.on {
 	top: 0;
 	bottom: 0;
 	border-radius: 0;
-	background: hsl(var(--hue) 42% 30% / 0.06);
-	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 55% / 0.8);
+	background: hsl(var(--hue) calc(42% * var(--sat, 1)) 30% / 0.06);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) calc(55% * var(--sat, 1)) 55% / 0.8);
 	overflow: hidden;
 	cursor: grab;
 }
 .clip.selected {
-	background: hsl(var(--hue) 48% 38% / 0.12);
+	background: hsl(var(--hue) calc(48% * var(--sat, 1)) 38% / 0.12);
 	box-shadow: inset 0 0 0 2px #fff;
 	z-index: 2;
 }
@@ -1253,7 +1326,7 @@ button.play.on {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	background: hsl(var(--hue) 50% 30% / 0.55);
+	background: hsl(var(--hue) calc(50% * var(--sat, 1)) 30% / 0.55);
 	pointer-events: none;
 	z-index: 1;
 }
@@ -1366,7 +1439,7 @@ button.play.on {
 	box-sizing: border-box;
 	border-radius: 50%;
 	background: #fff;
-	border: 2px solid hsl(var(--hue) 50% 22%);
+	border: 2px solid hsl(var(--hue) calc(50% * var(--sat, 1)) 22%);
 	cursor: crosshair;
 	opacity: 0;
 	transition: opacity 0.12s, transform 0.12s;

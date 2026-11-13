@@ -96,6 +96,7 @@ export type State = {
 	libraryOpen: boolean;
 	libraryPlaylist: string | null; // the Rekordbox playlist the library shows; null for all tracks
 	librarySort: LibrarySort;
+	trackKeys: Record<string, string>; // Rekordbox's key for each file in its library, by path
 	loaded: boolean;
 };
 
@@ -148,6 +149,7 @@ let state: State = {
 	libraryOpen: false,
 	libraryPlaylist: null,
 	librarySort: { by: "number", down: false },
+	trackKeys: {},
 	loaded: false,
 };
 

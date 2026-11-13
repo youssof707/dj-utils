@@ -183,4 +183,22 @@ describe("the Rekordbox library panel", () => {
 		await h.page.getByTestId("import-modal").waitFor({ state: "detached" });
 		expect(await state(h.page, "s => s.doc.tracks.map((t) => t.sourcePath)")).toEqual([song]);
 	});
+
+	it("adds a track to the set when it is dragged onto a lane", async () => {
+		const row = (await h.page.getByTestId("library-row").nth(0).boundingBox())!;
+		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
+		await h.page.mouse.move(row.x + 40, row.y + row.height / 2);
+		await h.page.mouse.down();
+		await h.page.mouse.move(row.x + 80, row.y + row.height / 2, { steps: 4 });
+		await h.page.getByTestId("library-ghost").waitFor();
+		await h.page.mouse.move(lanes.x + lanes.width / 2, lanes.y + lanes.height * 0.8, { steps: 8 });
+		await h.page.mouse.up();
+		await h.page.getByTestId("library-ghost").waitFor({ state: "detached" });
+		await expect.poll(() => state(h.page, "s => s.doc.clips.length")).toBe(2);
+		// clips show Rekordbox's key before the name
+		expect(await h.page.locator(".clip-name").first().textContent()).toMatch(/^8A - Belfast/);
+		// and are coloured by it: 8 is C / Am, pink on the key wheel
+		expect(await h.page.locator(".clip").first().evaluate((el) => (el as HTMLElement).style.getPropertyValue("--hue"))).toBe("310");
+		await shot(h.page, "library-drag");
+	});
 });

@@ -2,6 +2,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RekordboxLibrary, RekordboxPlaylist, RekordboxTrack } from "@shared/planner";
 import { importPaths } from "./actions";
+import { startLibraryDrag } from "./libraryDrag";
+import { hueVars, keyHue } from "./Timeline";
+import { setTrackKeys } from "./trackKeys";
 import { store, useStore, type LibrarySort } from "./store";
 
 const ROW = 44; // px; every row is the same height, so only the rows in view are drawn
@@ -34,6 +37,33 @@ function sorted(rows: Row[], sort: LibrarySort): Row[] {
 		if (x === null || y === null) return x === y ? a.no - b.no : x === null ? 1 : -1;
 		return x === y ? a.no - b.no : (x - y) * way;
 	});
+}
+
+// What is under the pointer while a track is dragged: a small tag with its title.
+function dragPicture(t: RekordboxTrack): { png: string; scale: number } {
+	const scale = Math.max(1, Math.round(window.devicePixelRatio || 1));
+	const font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+	const cv = document.createElement("canvas");
+	const g = cv.getContext("2d")!;
+	g.font = font;
+	const text = t.artist ? `${t.title} · ${t.artist}` : t.title;
+	let shown = text;
+	while (shown.length > 1 && g.measureText(shown).width > 260) shown = shown.slice(0, -2);
+	if (shown !== text) shown = `${shown.trimEnd()}…`;
+	const w = Math.ceil(g.measureText(shown).width) + 24;
+	const h = 26;
+	cv.width = w * scale;
+	cv.height = h * scale;
+	g.scale(scale, scale);
+	g.fillStyle = "rgba(91, 140, 255, 0.92)";
+	g.beginPath();
+	g.roundRect(0, 0, w, h, 6);
+	g.fill();
+	g.font = font;
+	g.fillStyle = "#fff";
+	g.textBaseline = "middle";
+	g.fillText(shown, 12, h / 2 + 0.5);
+	return { png: cv.toDataURL("image/png"), scale };
 }
 
 const ALL = "All tracks";
@@ -156,7 +186,10 @@ export function Library() {
 	useEffect(() => {
 		let open = true;
 		window.api.rekordboxLibrary().then(
-			(read) => open && setLibrary(read),
+			(read) => {
+				setTrackKeys(read);
+				if (open) setLibrary(read);
+			},
 			() => open && setFailed(true),
 		);
 		return () => {
@@ -280,11 +313,7 @@ export function Library() {
 										data-testid="library-row"
 										style={{ top: (first + i) * ROW, height: ROW }}
 										title={t.path}
-										draggable
-										onDragStart={(e) => {
-											e.dataTransfer.setData("application/x-dj-path", t.path);
-											e.dataTransfer.effectAllowed = "copy";
-										}}
+										onPointerDown={(e) => startLibraryDrag(e, t.path, () => dragPicture(t))}
 										onDoubleClick={() => add(t)}
 									>
 										<div className="library-no">{no}</div>
@@ -293,7 +322,9 @@ export function Library() {
 											<div className="library-artist">{t.artist}</div>
 										</div>
 										<div className="library-bpm">{fmtBpm(t.bpm)}</div>
-										<div className="library-key">{t.key}</div>
+										<div className="library-key" style={hueVars(keyHue(t.key))}>
+												{t.key}
+											</div>
 									</div>
 								))}
 							</div>

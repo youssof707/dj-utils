@@ -1,6 +1,6 @@
 // Main-process side of the set planner: import, stretch cache, export, and the stored sets.
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, type MenuItemConstructorOptions } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -1078,8 +1078,11 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:cue-delete", (_e, p: string, remove: string[]) => deleteCues(p, remove));
 	ipcMain.handle("planner:cue-apply", (_e, p: string, remove: string[], insert: CueRow[]) => applyCues(p, remove, insert));
 	ipcMain.handle("planner:rekordbox-library", () => rekordboxLibrary());
-	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => ensureStretch(req));
-	ipcMain.handle("planner:ramp", (_e, req: RampRequest) => ensureRamp(req));
+	// A rendering dropped because the set moved on is not an error: it comes back as null
+	// (the preload turns that into a "cancelled" rejection), so Electron does not log it.
+	const quietCancel = <T>(p: Promise<T>): Promise<T | null> => p.catch((e) => (e instanceof Error && e.message === "cancelled" ? null : Promise.reject(e)));
+	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => quietCancel(ensureStretch(req)));
+	ipcMain.handle("planner:ramp", (_e, req: RampRequest) => quietCancel(ensureRamp(req)));
 	ipcMain.handle("planner:keep", (_e, keys: string[]) => keepOnly(keys));
 	ipcMain.handle("planner:read-audio", async (_e, file: string) => {
 		if (!inCache(file)) throw new Error("Not a cache file");
@@ -1177,6 +1180,15 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:set-import", (_e, file: string): string => addSet(JSON.parse(fs.readFileSync(file, "utf8")) as PlannerDoc, path.basename(file).replace(/\.[^.]+$/, ""), Date.now()));
 	ipcMain.handle("planner:prune", (): void => pruneCache());
 	ipcMain.handle("planner:reveal", (_e, file: string) => shell.showItemInFolder(file));
+	// A track picked up in the library panel, dragged out as the file itself: Finder, Chrome
+	// and the like get the file where it is. Outside the app the drag offers only a copy, so
+	// Finder copies it and never moves it away from Rekordbox. Only the library's own files.
+	ipcMain.on("planner:drag-file", (e, file: string, icon: { png: string; scale: number }) => {
+		if (!library?.tracks.some((t) => t.available && t.path === file) || !fs.existsSync(file)) return;
+		const image = nativeImage.createFromBuffer(Buffer.from(icon.png.replace(/^data:image\/png;base64,/, ""), "base64"), { scaleFactor: icon.scale });
+		if (image.isEmpty()) return;
+		e.sender.startDrag({ file, icon: image });
+	});
 }
 
 export function buildMenu(): void {

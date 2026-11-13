@@ -3,8 +3,10 @@ import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, t
 import { cueMarks } from "@shared/cues";
 import { fadeGain, fitFades } from "@shared/fades";
 import { blocksToPoints, bpmAt } from "@shared/tempo";
-import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
+import { addTempo, toggleTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
 import { cueSpot } from "./cues";
+import { useLibraryDrop } from "./libraryDrag";
+import { refreshTrackKeys } from "./trackKeys";
 import { engine } from "./engine";
 import { clipTempoProgress, mediaFor, type Media } from "./media";
 import { newId, store, useStore } from "./store";
@@ -30,10 +32,22 @@ export function gridStep(pxPerBeat: number, minPx: number): number {
 	return 8192;
 }
 
-export function trackHue(id: string): number {
-	let h = 0;
-	for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-	return h % 360;
+// A track's colour comes from its key, placed round the Camelot wheel the way the usual key
+// wheel colours it (E cyan, B teal, F# green ... D blue, A sky); a minor key takes the colour of
+// the major key it sits with. NO_KEY when Rekordbox has no key for the file: shown grey.
+export const NO_KEY = -1;
+const WHEEL_HUES = [165, 135, 95, 55, 25, 355, 335, 310, 285, 235, 205, 185]; // 1 to 12
+export function keyHue(key: string): number {
+	const m = /^(\d{1,2})[AB]$/i.exec(key);
+	const n = m ? Number(m[1]) : 0;
+	return n >= 1 && n <= 12 ? WHEEL_HUES[n - 1] : NO_KEY;
+}
+export function trackHue(track: PlannerTrack | null | undefined, keys: Record<string, string>): number {
+	return track ? keyHue(keys[track.sourcePath] ?? "") : NO_KEY;
+}
+// The CSS variables that colour an element in a track's colour.
+export function hueVars(hue: number): CSSProperties {
+	return (hue === NO_KEY ? { "--hue": 0, "--sat": 0 } : { "--hue": hue }) as unknown as CSSProperties;
 }
 
 // ---- ruler --------------------------------------------------------------------------
@@ -168,10 +182,13 @@ function tempoRange(doc: PlannerDoc): [number, number] {
 }
 
 // The tempo each block ramps from, worked out from the blocks before it.
+// One that is switched off shows the tempo already playing where it starts.
 function rampStarts(doc: PlannerDoc): Map<string, number> {
-	const sorted = [...doc.tempos].sort((a, b) => a.startBeat - b.startBeat);
-	const pts = blocksToPoints(sorted, doc.bpm);
-	return new Map(sorted.map((t, i) => [t.id, pts[2 * i].bpm]));
+	const on = doc.tempos.filter((t) => !t.off).sort((a, b) => a.startBeat - b.startBeat);
+	const pts = blocksToPoints(on, doc.bpm);
+	const out = new Map(on.map((t, i) => [t.id, pts[2 * i].bpm]));
+	for (const t of doc.tempos) if (t.off) out.set(t.id, bpmAt(pts, doc.bpm, Math.max(0, t.startBeat)));
+	return out;
 }
 
 // The whole tempo curve, drawn over the tempo lane so ramps and holds read at a glance.
@@ -201,7 +218,7 @@ function TempoView({ block, from, pxPerBeat, scrollX, width, selected, onDown }:
 	const labelPad = Math.max(0, -left) + 6;
 	return (
 		<div
-			className={`tempo-block${selected ? " selected" : ""}`}
+			className={`tempo-block${selected ? " selected" : ""}${block.off ? " off" : ""}`}
 			style={{ left, width: w }}
 			data-testid="tempo-block"
 			data-tempo-id={block.id}
@@ -217,6 +234,18 @@ function TempoView({ block, from, pxPerBeat, scrollX, width, selected, onDown }:
 			</div>
 			<div className="trim left" />
 			<div className="trim right" />
+			<button
+				className="tempo-switch"
+				data-testid="tempo-switch"
+				title={block.off ? "Turn this tempo change on" : "Turn this tempo change off"}
+				aria-pressed={!block.off}
+				onPointerDown={(e) => e.stopPropagation()}
+				onDoubleClick={(e) => e.stopPropagation()}
+				onClick={(e) => {
+					e.stopPropagation();
+					toggleTempo(block.id);
+				}}
+			/>
 		</div>
 	);
 }
@@ -283,7 +312,7 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 	const visR = Math.min(width, left + w);
 	const visible = visR > visL;
 	const peaks = media?.state === "ready" ? media.peaks : null;
-	const hue = trackHue(track?.id ?? clip.trackId);
+	const hue = trackHue(track, useStore((s) => s.trackKeys));
 	// Scaled so the loudest point in the whole track fills the clip's height.
 	const lowMax = useMemo(() => peakMax(peaks, 1), [peaks]);
 
@@ -311,10 +340,11 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 
 	const marks = useMemo(() => cueMarks(cues, track), [cues, track]);
 	const showCues = useStore((s) => s.showCues);
+	const key = useStore((s) => (track ? s.trackKeys[track.sourcePath] : undefined));
 
 	if (!visible) return null;
 	const status = !track ? "error" : (media?.state ?? "working");
-	const style: CSSProperties = { left, width: w, ["--hue" as string]: hue };
+	const style: CSSProperties = { left, width: w, ...hueVars(hue) };
 	const labelPad = Math.max(0, -left) + 8;
 	// Narrow clips leave the tags out rather than show a clipped half of one.
 	const showTags = w >= 100;
@@ -342,7 +372,7 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 				<div className="clip-label" style={{ paddingLeft: labelPad }}>
 					{showTags && clip.muted && <span className="clip-tag">MUTED</span>}
 					{showTags && clip.lowCut && <span className="clip-tag lowcut">NO BASS</span>}
-					<span className="clip-name">{track?.name ?? "Missing track"}</span>
+					<span className="clip-name">{track ? (key ? `${key} - ${track.name}` : track.name) : "Missing track"}</span>
 					{track && <span className="clip-bpm">{Number(track.bpm.toFixed(2))}</span>}
 				</div>
 				{status === "working" && media?.state === "working" && (
@@ -737,6 +767,8 @@ function Lanes({ width }: { width: number }) {
 		if (paths.length) void importPaths(paths, laneAt(e.clientY), Math.max(0, snap(beatAt(e.clientX), e)));
 	};
 
+	useLibraryDrop(ref, (d) => void importPaths([d.path], laneAt(d.clientY), Math.max(0, snap(beatAt(d.clientX), d))));
+
 	const selTempo = selection.length === 1 ? doc.tempos.find((t) => t.id === selection[0]) : undefined;
 
 	return (
@@ -852,6 +884,12 @@ function Scrollbar({ width }: { width: number }) {
 
 export function Timeline() {
 	const mainRef = useRef<HTMLDivElement>(null);
+	// Keys for the clip names, read again whenever the window comes back to the front.
+	useEffect(() => {
+		refreshTrackKeys();
+		window.addEventListener("focus", refreshTrackKeys);
+		return () => window.removeEventListener("focus", refreshTrackKeys);
+	}, []);
 	const width = useStore((s) => s.viewportW);
 	const laneMuted = useStore((s) => s.laneMuted);
 	const soloLane = useStore((s) => s.soloLane);

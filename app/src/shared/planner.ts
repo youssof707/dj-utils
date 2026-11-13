@@ -47,7 +47,8 @@ export const LOW_CUT_END_HZ = 20;
 
 // A tempo change sits in the tempo lane like a clip: over its length the tempo ramps from
 // whatever it was before to `bpm`, then holds there until the next change.
-export type TempoBlock = { id: string; startBeat: number; lengthBeat: number; bpm: number };
+// `off`: switched off from its dot; it stays on the lane but changes nothing.
+export type TempoBlock = { id: string; startBeat: number; lengthBeat: number; bpm: number; off?: boolean };
 
 // Older files stored the tempo as a list of curve points.
 export type TempoPoint = { id: string; beat: number; bpm: number };

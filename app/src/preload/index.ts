@@ -8,6 +8,12 @@ function on<T>(channel: string, cb: (payload: T) => void): () => void {
 	return () => ipcRenderer.removeListener(channel, fn);
 }
 
+// The main process answers null for a rendering it dropped because the set moved on.
+function orCancelled(r: StretchResult | null): StretchResult {
+	if (r === null) throw new Error("cancelled");
+	return r;
+}
+
 const api = {
 	getAppInfo: (): Promise<{ env: "dev" | "prod" }> => ipcRenderer.invoke("appInfo:get"),
 	toggleDevTools: (): Promise<void> => ipcRenderer.invoke("devtools:toggle"),
@@ -24,8 +30,8 @@ const api = {
 	cueDelete: (path: string, ids: string[]): Promise<CueChange> => ipcRenderer.invoke("planner:cue-delete", path, ids),
 	// Takes the cues with these ids out and puts these rows back in: undo and redo.
 	cueApply: (path: string, remove: string[], insert: CueRow[]): Promise<CueChange> => ipcRenderer.invoke("planner:cue-apply", path, remove, insert),
-	stretch: (req: StretchRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:stretch", req),
-	ramp: (req: RampRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:ramp", req),
+	stretch: (req: StretchRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:stretch", req).then(orCancelled),
+	ramp: (req: RampRequest): Promise<StretchResult> => ipcRenderer.invoke("planner:ramp", req).then(orCancelled),
 	// Says which renderings (stretchKey, rampKey) the set still needs; other work is dropped.
 	keepRenderings: (keys: string[]): Promise<void> => ipcRenderer.invoke("planner:keep", keys),
 	readAudio: (cachePath: string): Promise<Uint8Array> => ipcRenderer.invoke("planner:read-audio", cachePath),
@@ -53,6 +59,9 @@ const api = {
 	importSetFile: (path: string): Promise<string> => ipcRenderer.invoke("planner:set-import", path),
 	pruneCache: (): Promise<void> => ipcRenderer.invoke("planner:prune"),
 	reveal: (path: string): Promise<void> => ipcRenderer.invoke("planner:reveal", path),
+	// Starts a drag of a library track's file, out of the app or onto the timeline. `png` is
+	// the picture under the pointer, as a data URL drawn at `scale` pixels per point.
+	dragFile: (path: string, icon: { png: string; scale: number }): void => ipcRenderer.send("planner:drag-file", path, icon),
 
 	onStretchProgress: (cb: (p: StretchProgress) => void): (() => void) => on("planner:stretch-progress", cb),
 	// Cached audio that was cleaned away: whatever still counts on it has to ask again.

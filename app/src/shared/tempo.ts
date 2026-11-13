@@ -113,12 +113,13 @@ export function secondsToBeats(sec: number, bpm: number): number {
 	return (sec * bpm) / 60;
 }
 
-type Block = { startBeat: number; lengthBeat: number; bpm: number };
+type Block = { startBeat: number; lengthBeat: number; bpm: number; off?: boolean };
 
 // The tempo curve made by a set of tempo blocks. Before the first block the tempo is the
 // project BPM. Where a block starts inside the previous one, the earlier ramp is cut there.
+// Blocks that are switched off are left out, as if they were not there.
 export function blocksToPoints(blocks: Block[], projectBpm: number): Pt[] {
-	const sorted = [...blocks].sort((a, b) => a.startBeat - b.startBeat);
+	const sorted = blocks.filter((b) => !b.off).sort((a, b) => a.startBeat - b.startBeat);
 	const pts: Pt[] = [];
 	let cur = projectBpm;
 	for (const b of sorted) {

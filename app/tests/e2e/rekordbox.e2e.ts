@@ -699,9 +699,9 @@ describe("cue points", () => {
 
 		// the top bar's toggle hides the cues on the clips, and shows them again
 		const toggle = h.page.getByTestId("cues-toggle");
-		expect(await toggle.textContent()).toBe("Hide cues");
+		expect(await toggle.getAttribute("aria-checked")).toBe("true");
 		await toggle.click();
-		expect(await toggle.textContent()).toBe("Show cues");
+		expect(await toggle.getAttribute("aria-checked")).toBe("false");
 		expect(await marks("cue")).toEqual([]);
 		await toggle.click();
 		await expect.poll(() => marks("cue")).toEqual(["M", "C", "MA"]);

@@ -428,6 +428,12 @@ export function addTempo(startBeat: number, lengthBeat: number, bpm: number): st
 	return block.id;
 }
 
+// Switches a tempo change off (it stays on the lane but changes nothing) or back on.
+export function toggleTempo(id: string): void {
+	const s = store.get();
+	store.commit({ ...s.doc, tempos: s.doc.tempos.map((t) => (t.id !== id ? t : t.off ? { id: t.id, startBeat: t.startBeat, lengthBeat: t.lengthBeat, bpm: t.bpm } : { ...t, off: true })) });
+}
+
 export function setTempoBpm(id: string, raw: number): void {
 	const s = store.get();
 	const bpm = Math.round(raw);

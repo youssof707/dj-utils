@@ -181,12 +181,8 @@ export function TopBar() {
 			<button className="ghost back" data-testid="all-sets" title="All sets" aria-label="All sets" onClick={() => void goHome()}>
 				‹
 			</button>
-			<div className="topbar-sep" />
 			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })}>
 				Library
-			</button>
-			<button className={`ghost${showCues ? " on" : ""}`} data-testid="cues-toggle" title={showCues ? "Hide the cue points on the clips" : "Show the cue points on the clips"} onClick={() => store.set({ showCues: !showCues })}>
-				{showCues ? "Hide cues" : "Show cues"}
 			</button>
 			{/* The set's name is in the window's title; it is only typed here when a new set asks for it. */}
 			{renaming && (
@@ -201,9 +197,7 @@ export function TopBar() {
 					}}
 				/>
 			)}
-			<div className="topbar-sep" />
 			<BpmField />
-			<div className="topbar-sep" />
 			<div className="transport">
 				<button className={`play${playing ? " on" : ""}`} data-testid="play" onClick={() => engine.toggle()}>
 					{playing ? (
@@ -257,6 +251,12 @@ export function TopBar() {
 			<button className="primary" data-testid="export" onClick={openExport}>
 				Export
 			</button>
+			<label className="switch" title="Show the cue points on the clips">
+				<span>Cues</span>
+				<button role="switch" aria-checked={showCues} className={`switch-track${showCues ? " on" : ""}`} data-testid="cues-toggle" onClick={() => store.set({ showCues: !showCues })}>
+					<span className="switch-knob" />
+				</button>
+			</label>
 		</header>
 	);
 }
