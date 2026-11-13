@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { Track } from "../shared/types";
-import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, Session, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
+import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, SetFile, SetInfo, SetView, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
 
 function on<T>(channel: string, cb: (payload: T) => void): () => void {
 	const fn = (_e: unknown, payload: T): void => cb(payload);
@@ -25,15 +25,24 @@ const api = {
 	chooseExport: (defaultName: string): Promise<string | null> => ipcRenderer.invoke("planner:choose-export", defaultName),
 	exportSet: (req: ExportRequest): Promise<ExportResult> => ipcRenderer.invoke("planner:export", req),
 	cancelExport: (): Promise<void> => ipcRenderer.invoke("planner:export-cancel"),
-	openProject: (path?: string): Promise<{ path: string; doc: PlannerDoc } | null> => ipcRenderer.invoke("planner:open-project", path),
-	saveProject: (path: string | null, doc: PlannerDoc): Promise<string | null> => ipcRenderer.invoke("planner:save-project", path, doc),
-	loadSession: (): Promise<Session | null> => ipcRenderer.invoke("planner:load-session"),
-	autoSaveProject: (path: string | null, doc: PlannerDoc): Promise<string> => ipcRenderer.invoke("planner:autosave-project", path, doc),
-	saveSession: (s: Session): Promise<void> => ipcRenderer.invoke("planner:save-session", s),
+	// Sets live in the app's own storage; nothing here ever asks where to put a file.
+	listSets: (): Promise<SetInfo[]> => ipcRenderer.invoke("planner:sets-list"),
+	openSet: (id: string): Promise<SetFile> => ipcRenderer.invoke("planner:set-open", id),
+	// Stores the set and returns its name (a new set is named when first stored).
+	saveSet: (id: string, name: string | null, view: SetView, doc: PlannerDoc): Promise<string> => ipcRenderer.invoke("planner:set-save", id, name, view, doc),
+	// The same, finished before it returns: for the moment the window closes.
+	saveSetNow: (id: string, name: string | null, view: SetView, doc: PlannerDoc): string => ipcRenderer.sendSync("planner:set-save-sync", id, name, view, doc),
+	renameSet: (id: string, name: string): Promise<string> => ipcRenderer.invoke("planner:set-rename", id, name),
+	duplicateSet: (id: string): Promise<void> => ipcRenderer.invoke("planner:set-duplicate", id),
+	deleteSet: (id: string): Promise<void> => ipcRenderer.invoke("planner:set-delete", id),
+	// For tests: brings a set file from outside into the app's sets, and cleans the cache now.
+	importSetFile: (path: string): Promise<string> => ipcRenderer.invoke("planner:set-import", path),
+	pruneCache: (): Promise<void> => ipcRenderer.invoke("planner:prune"),
 	reveal: (path: string): Promise<void> => ipcRenderer.invoke("planner:reveal", path),
-	fileExists: (path: string): Promise<boolean> => ipcRenderer.invoke("planner:file-exists", path),
 
 	onStretchProgress: (cb: (p: StretchProgress) => void): (() => void) => on("planner:stretch-progress", cb),
+	// Cached audio that was cleaned away: whatever still counts on it has to ask again.
+	onCacheRemoved: (cb: (paths: string[]) => void): (() => void) => on("planner:cache-removed", cb),
 	onExportProgress: (cb: (p: ExportProgress) => void): (() => void) => on("planner:export-progress", cb),
 	onMenu: (cb: (action: string) => void): (() => void) => on("planner:menu", cb),
 };

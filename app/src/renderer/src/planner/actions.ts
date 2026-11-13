@@ -1,10 +1,10 @@
 // Everything the user can do to a set, as plain functions over the store.
 
-import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
+import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type SetView, type TempoBlock } from "@shared/planner";
 import { blocksToPoints } from "@shared/tempo";
 import { engine } from "./engine";
-import { mediaFor, workingCount } from "./media";
-import { errorText, newId, store, toast, type ImportItem } from "./store";
+import { forgetMedia, mediaFor, workingCount } from "./media";
+import { errorText, newId, store, toast, type ImportItem, type State } from "./store";
 
 export const MIN_CLIP_BEATS = 0.05;
 export const MIN_PX_PER_BEAT = 0.05;
@@ -407,51 +407,30 @@ export function zoomToFit(): void {
 	store.set({ pxPerBeat: next, scrollX: 0 });
 }
 
-// ---- files --------------------------------------------------------------------------
+// ---- sets ---------------------------------------------------------------------------
+// The app keeps every set itself. A set is written shortly after every change, and there
+// is nothing to save, name a file for, or pick a folder for.
 
-// New and Open replace the current set. With unsaved changes they ask first.
-export function requestNew(): void {
-	void flushAutoSave().then(newSet);
+function viewOf(s: State): SetView {
+	return { pxPerBeat: s.pxPerBeat, scrollX: s.scrollX, playheadBeat: s.playing ? engine.positionBeat() : s.playheadBeat };
 }
 
-export function requestOpen(): void {
-	void flushAutoSave().then(() => openSet());
+// What is stored for the open set, to tell when there is something new to write.
+let stored = { gen: -1, text: "" };
+
+// What to write for the open set now, or null when what is stored is already up to date. A
+// new set is first stored once there is something in it.
+function unsaved(s: State): { id: string; name: string | null; view: SetView; doc: PlannerDoc; text: string } | null {
+	if (!s.loaded || s.screen !== "editor" || !s.setId) return null;
+	const doc = compactDoc(s.doc);
+	if (stored.gen !== s.setGen && s.setName === null && doc.clips.length === 0 && doc.tempos.length === 0) return null;
+	const view = viewOf(s);
+	const text = JSON.stringify([s.setName, view, doc]);
+	if (stored.gen === s.setGen && stored.text === text) return null;
+	return { id: s.setId, name: s.setName, view, doc, text };
 }
 
-export function newSet(): void {
-	engine.stop(0);
-	store.load(emptyDoc(), null, false);
-}
-
-export async function openSet(path?: string): Promise<void> {
-	try {
-		const r = await window.api.openProject(path);
-		if (!r) return;
-		engine.stop(0);
-		store.load(r.doc, r.path, false);
-		requestAnimationFrame(zoomToFit);
-	} catch (e) {
-		toast(`Could not open the set: ${errorText(e)}`);
-	}
-}
-
-export async function saveSet(saveAs = false): Promise<boolean> {
-	const s = store.get();
-	try {
-		const path = await window.api.saveProject(saveAs ? null : s.filePath, compactDoc(s.doc));
-		if (!path) return false;
-		// Only clear the unsaved mark if nothing changed while the dialog was open.
-		store.set({ filePath: path, dirty: store.get().doc !== s.doc });
-		return true;
-	} catch (e) {
-		toast(`Could not save: ${errorText(e)}`);
-		return false;
-	}
-}
-
-// Every change is written to the set's file shortly after it happens. A set that has no file
-// yet gets one in the sets folder as soon as it has a clip. Saves never overlap; a change
-// made during a save is picked up by another pass.
+// Saves never overlap; a change made during a save is picked up by another pass.
 let autoSaving: Promise<void> | null = null;
 let autoSaveAgain = false;
 let autoSaveFailed = false;
@@ -465,15 +444,18 @@ export function autoSave(): Promise<void> {
 		do {
 			autoSaveAgain = false;
 			const s = store.get();
-			if (!s.dirty || (!s.filePath && s.doc.clips.length === 0)) continue;
+			const u = unsaved(s);
+			if (!u) continue;
 			try {
-				const path = await window.api.autoSaveProject(s.filePath, compactDoc(s.doc));
+				const name = await window.api.saveSet(u.id, u.name, u.view, u.doc);
 				autoSaveFailed = false;
 				const cur = store.get();
-				if (cur.setGen !== s.setGen) continue; // a different set was loaded meanwhile
-				store.set({ filePath: path, dirty: cur.doc !== s.doc });
+				if (cur.setGen !== s.setGen) continue; // a different set was opened meanwhile
+				stored = { gen: s.setGen, text: JSON.stringify([name, u.view, u.doc]) };
+				// The name as stored: a new set is named then, and a name already taken is told apart.
+				if (cur.setName === s.setName && name !== cur.setName) store.set({ setName: name });
 			} catch (e) {
-				if (!autoSaveFailed) toast(`Could not auto-save: ${errorText(e)}`);
+				if (!autoSaveFailed) toast(`Could not save the set: ${errorText(e)}`);
 				autoSaveFailed = true;
 			}
 		} while (autoSaveAgain);
@@ -485,6 +467,100 @@ export function autoSave(): Promise<void> {
 
 export async function flushAutoSave(): Promise<void> {
 	await autoSave();
+	if (unsaved(store.get())) await autoSave();
+}
+
+// As the window closes: whatever has not been written yet is, before it goes.
+export function saveBeforeClose(): void {
+	const u = unsaved(store.get());
+	if (!u) return;
+	try {
+		window.api.saveSetNow(u.id, u.name, u.view, u.doc);
+	} catch {
+		// nothing more can be done as the window goes
+	}
+}
+
+export async function refreshSets(): Promise<void> {
+	try {
+		store.set({ sets: await window.api.listSets() });
+	} catch (e) {
+		toast(`Could not read your sets: ${errorText(e)}`);
+	}
+}
+
+// Lets go of the set that is open: its sound, its audio in memory, its waveforms.
+function closeSet(): void {
+	engine.stop(0);
+	engine.forget();
+	forgetMedia();
+}
+
+// `askName`: the top bar opens on the name, ready to type (the New set button and Cmd+N).
+// `bpm`: the tempo to start at instead of the default.
+export async function newSet(opts?: { askName?: boolean; bpm?: number }): Promise<void> {
+	await flushAutoSave();
+	closeSet();
+	store.load(emptyDoc(opts?.bpm), newId("s"), null);
+	store.set({ screen: "editor", pxPerBeat: 12, askName: !!opts?.askName });
+}
+
+export async function openSet(id: string): Promise<void> {
+	try {
+		await flushAutoSave();
+		const f = await window.api.openSet(id);
+		closeSet();
+		store.load(f.doc, f.id, f.name);
+		stored = { gen: store.get().setGen, text: "" };
+		store.set({ screen: "editor", pxPerBeat: f.view.pxPerBeat, scrollX: f.view.scrollX, playheadBeat: f.view.playheadBeat, cueBeat: f.view.playheadBeat });
+	} catch (e) {
+		toast(`Could not open the set: ${errorText(e)}`);
+		void refreshSets();
+	}
+}
+
+// Back to the list of sets.
+export async function goHome(): Promise<void> {
+	if (store.get().screen === "home") return;
+	engine.stop();
+	await flushAutoSave();
+	closeSet();
+	store.load(emptyDoc(), null, null);
+	store.set({ screen: "home", libraryOpen: false });
+	await refreshSets();
+}
+
+export async function renameSet(id: string, name: string): Promise<void> {
+	const next = name.trim();
+	if (!next) return;
+	if (id === store.get().setId) {
+		store.set({ setName: next }); // stored with the next save
+		return;
+	}
+	try {
+		await window.api.renameSet(id, next);
+	} catch (e) {
+		toast(`Could not rename the set: ${errorText(e)}`);
+	}
+	await refreshSets();
+}
+
+export async function duplicateSet(id: string): Promise<void> {
+	try {
+		await window.api.duplicateSet(id);
+	} catch (e) {
+		toast(`Could not duplicate the set: ${errorText(e)}`);
+	}
+	await refreshSets();
+}
+
+export async function deleteSet(id: string): Promise<void> {
+	try {
+		await window.api.deleteSet(id);
+	} catch (e) {
+		toast(`Could not delete the set: ${errorText(e)}`);
+	}
+	await refreshSets();
 }
 
 // ---- export -------------------------------------------------------------------------
@@ -535,7 +611,7 @@ export async function runExport(keyLock: boolean, outPath?: string): Promise<voi
 		store.set({ exportUi: { phase: "error", message: `${failed} clip${failed === 1 ? "" : "s"} could not be loaded (shown in red). Fix or delete them, then export.` } });
 		return;
 	}
-	const base = (s.filePath?.split("/").pop() ?? "Untitled set").replace(/\.djset$/, "");
+	const base = (s.setName ?? "Untitled set").replace(/[/:]/g, "-");
 	const target = outPath ?? (await window.api.chooseExport(`${base}.wav`));
 	if (!target) return;
 	store.set({ exportUi: { phase: "running", stage: "Mixing", pct: 0 } });

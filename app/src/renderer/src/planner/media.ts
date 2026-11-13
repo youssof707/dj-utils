@@ -4,9 +4,10 @@
 // the track stretched to each tempo the set settles on, and one rendering for each stretch
 // of a clip that plays while the tempo is moving.
 
-import { JOIN_FADE_SEC, rampKey, rampRequest, stretchKey, type Clip, type PlannerDoc, type PlannerTrack, type RampRequest, type StretchRequest, type StretchResult } from "@shared/planner";
+import { JOIN_FADE_SEC, stretchKey, type Clip, type PlannerDoc, type PlannerTrack, type StretchRequest, type StretchResult } from "@shared/planner";
 import { clipPieces, isRamp, type Piece } from "@shared/pieces";
-import { blocksToPoints, TempoMap } from "@shared/tempo";
+import { pieceKey, renderingsFor, stretchRequestFor, tempoMapOf } from "@shared/renderings";
+import type { TempoMap } from "@shared/tempo";
 import { errorText, store } from "./store";
 
 export type Media = { state: "working"; pct: number } | { state: "ready"; cachePath: string; frames: number; peaks: Uint8Array | null } | { state: "error"; message: string };
@@ -17,9 +18,7 @@ const versions = new Map<string, Map<number, string>>();
 
 const audioKey = (t: { sourcePath: string; bpm: number }): string => `${t.sourcePath}|${t.bpm}`;
 
-export function requestFor(track: PlannerTrack, bpm: number): StretchRequest {
-	return { sourcePath: track.sourcePath, bpm: track.bpm, projectBpm: bpm };
-}
+export const requestFor = stretchRequestFor;
 
 export function mediaFor(track: PlannerTrack | undefined, bpm: number): Media | undefined {
 	return track ? media.get(stretchKey(requestFor(track, bpm))) : undefined;
@@ -78,18 +77,9 @@ let map: TempoMap | null = null;
 export function tempoMap(doc: PlannerDoc): TempoMap {
 	if (doc !== mapDoc || !map) {
 		mapDoc = doc;
-		map = new TempoMap(blocksToPoints(doc.tempos, doc.bpm), doc.bpm);
+		map = tempoMapOf(doc);
 	}
 	return map;
-}
-
-function rampOf(track: PlannerTrack, p: Piece): RampRequest {
-	return rampRequest(track, p.trackBeat, p.toBeat - p.fromBeat, p.bpmA, p.bpmB);
-}
-
-// The rendering made for one piece of a clip.
-function pieceKey(track: PlannerTrack, p: Piece): string {
-	return isRamp(p) ? rampKey(rampOf(track, p)) : stretchKey(requestFor(track, p.bpmA));
 }
 
 // What plays a piece: its own rendering once that is ready (`exact`: the file is already at
@@ -123,30 +113,12 @@ type Need = { key: string; beat: number; start: () => void };
 // The renderings the tempo changes call for, beyond the one at the project tempo.
 function needs(doc: PlannerDoc): Need[] {
 	if (doc.tempos.length === 0) return [];
-	const tracks = new Map(doc.tracks.map((t) => [t.id, t]));
-	const tm = tempoMap(doc);
-	const out = new Map<string, Need>();
-	for (const c of doc.clips) {
-		const track = tracks.get(c.trackId);
-		if (!track) continue;
-		for (const p of clipPieces(c, track, tm)) {
-			if (!isRamp(p) && p.bpmA === doc.bpm) continue;
-			const key = pieceKey(track, p);
-			const had = out.get(key);
-			if (had) {
-				had.beat = Math.min(had.beat, p.fromBeat);
-				continue;
-			}
-			const begin = isRamp(p)
-				? (): void => {
-						const req = rampOf(track, p);
-						run(rampKey(req), window.api.ramp(req), false);
-					}
-				: (): void => start(requestFor(track, p.bpmA));
-			out.set(key, { key, beat: p.fromBeat, start: begin });
-		}
+	const out: Need[] = [];
+	for (const r of renderingsFor(doc, tempoMap(doc))) {
+		if (r.base) continue;
+		out.push({ key: r.key, beat: r.beat, start: r.ramp ? (): void => run(r.key, window.api.ramp(r.req), false) : (): void => start(r.req) });
 	}
-	return [...out.values()];
+	return out;
 }
 
 // Makes sure every track has (or is getting) its audio at the project tempo, and every clip
@@ -155,7 +127,10 @@ function needs(doc: PlannerDoc): Need[] {
 export function reconcileMedia(doc: PlannerDoc): void {
 	current = doc;
 	const extra = needs(doc);
-	const base = doc.tracks.map((t) => requestFor(t, doc.bpm));
+	// Only tracks with a clip in the set: a track whose last clip was deleted stays in the
+	// document for undo, but its audio is let go (and cleaned up a little later).
+	const used = new Set(doc.clips.map((c) => c.trackId));
+	const base = doc.tracks.filter((t) => used.has(t.id)).map((t) => requestFor(t, doc.bpm));
 	void window.api.keepRenderings([...base.map(stretchKey), ...extra.map((n) => n.key)]);
 	let started = false;
 	for (const req of base) {
@@ -234,7 +209,30 @@ export function clipTempoProgress(doc: PlannerDoc, clip: Clip, track: PlannerTra
 	return waiting ? done / total : null;
 }
 
+// Cached files that are gone (cleaned away, or found missing when playback went to read
+// one): forget them, so whatever the set still needs of them is made again.
+export function lostMedia(paths: string[]): void {
+	const gone = new Set(paths);
+	let any = false;
+	for (const [key, m] of media) {
+		if (m.state !== "ready" || !gone.has(m.cachePath)) continue;
+		media.delete(key);
+		any = true;
+	}
+	if (!any) return;
+	if (current) reconcileMedia(current);
+	bump();
+}
+
+// Lets go of everything known about the set that was open (its waveforms above all).
+export function forgetMedia(): void {
+	media.clear();
+	versions.clear();
+	clearTimeout(settle);
+}
+
 export function initMedia(): void {
+	window.api.onCacheRemoved(lostMedia);
 	window.api.onStretchProgress(({ key, pct }) => {
 		const m = media.get(key);
 		if (m?.state !== "working") return;

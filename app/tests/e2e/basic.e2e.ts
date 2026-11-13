@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
 import { TempoMap, blocksToPoints } from "../../src/shared/tempo";
 import { frequency, onsets, readAll, writeClickTrack, writeTone } from "../signals";
-import { exportTo, importTrack, launch, shot, state, waitReady, type Harness } from "./harness";
+import { exportTo, importTrack, launch, setFile, shot, state, stored, waitReady, type Harness } from "./harness";
 
 let h: Harness;
 let a: string;
@@ -257,36 +257,32 @@ describe("planner", () => {
 		}
 	});
 
-	it("saves, reopens and restores the session", async () => {
-		const file = path.join(h.workDir, "test.djset");
-		await h.page.evaluate((f) => (window as any).api.saveProject(f, (window as any).planner.store.get().doc), file);
-		const saved = JSON.parse(fs.readFileSync(file, "utf8"));
-		const before = await state(h.page, "s => s.doc");
-		expect(saved).toEqual(before);
-		await h.page.waitForTimeout(700);
+	it("keeps the set by itself: through a restart, and back from another set", async () => {
+		const id = await stored(h.page);
+		const file = setFile(h, id);
+		const before = JSON.parse(fs.readFileSync(file, "utf8")).doc;
+		const now = await state<any>(h.page, "s => s.doc");
+		expect(before.clips).toEqual(now.clips);
+		expect(before.tempos).toEqual(now.tempos);
+		expect(before.clips.length).toBeGreaterThan(0);
 		h = await h.relaunch();
 		expect(await state(h.page, "s => s.doc")).toEqual(before);
 		await waitReady(h.page);
 		await h.page.evaluate(() => (window as any).planner.newSet());
 		expect((await clips()).length).toBe(0);
-		await h.page.evaluate((f) => (window as any).planner.openSet(f), file);
+		await h.page.evaluate((i) => (window as any).planner.openSet(i), id);
 		expect(await state(h.page, "s => s.doc")).toEqual(before);
 		await waitReady(h.page);
 		await shot(h.page, "08-reopened");
-		// an edit marks the set unsaved; Cmd+S writes it back to the same file
-		expect(await state(h.page, "s => s.dirty")).toBe(false);
+		// an edit is written by itself, with nothing to press; the window is titled after the set
+		const onDisk = (): any => JSON.parse(fs.readFileSync(file, "utf8"));
+		expect(await h.page.title()).toBe(onDisk().name);
 		await h.page.locator('[data-testid="clip"]').first().click({ position: { x: 40, y: 30 } });
 		await h.page.keyboard.press("Meta+d");
-		expect(await state(h.page, "s => s.dirty")).toBe(true);
-		expect(await h.page.title()).toContain("(edited)");
-		await h.page.keyboard.press("Meta+s");
-		await h.page.waitForFunction(() => (window as any).planner.store.get().dirty === false, undefined, { polling: 100 });
-		expect(JSON.parse(fs.readFileSync(file, "utf8")).clips.length).toBe(before.clips.length + 1);
-		expect(await h.page.title()).toBe("test");
+		await expect.poll(() => onDisk().doc.clips.length, { timeout: 5000 }).toBe(before.clips.length + 1);
 		await h.page.keyboard.press("Meta+z");
-		await h.page.keyboard.press("Meta+s");
-		await h.page.waitForFunction(() => (window as any).planner.store.get().dirty === false, undefined, { polling: 100 });
-		expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual(before);
+		await expect.poll(() => onDisk().doc.clips.length, { timeout: 5000 }).toBe(before.clips.length);
+		expect(onDisk().doc).toEqual(before);
 	});
 
 	it("shows the downloads library and adds a song from it", async () => {

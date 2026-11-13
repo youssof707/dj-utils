@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
+import { testDir } from "../testdata";
 import { computePeaks, finalize, keylock, mixClips, renderRamp, stretchFile, varispeed } from "../../src/main/audio/dsp";
 import { JOIN_FADE_SEC, SAMPLE_RATE as SR } from "../../src/shared/planner";
 import { TempoMap } from "../../src/shared/tempo";
@@ -9,7 +9,7 @@ import { frequency, onsets, readAll, writeClickTrack, writeTone } from "../signa
 
 let dir: string;
 beforeAll(() => {
-	dir = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-"));
+	dir = testDir("dsp-");
 });
 
 describe("stretch on import", () => {
@@ -58,7 +58,7 @@ const points = [
 ];
 
 describe("tempo stage", () => {
-	const src = path.join(os.tmpdir(), "dsp-tempo-src.wav");
+	const src = path.join(testDir("dsp-tempo-"), "src.wav");
 	beforeAll(() => {
 		writeClickTrack(src, 120, 60, { kind: "float32", toneHz: 440 });
 	});

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import type { Session } from "@shared/planner";
-import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, nudgeSelection, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, watchCues, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
+import { Home } from "./planner/Home";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
 import { store, useStore } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
@@ -14,7 +14,7 @@ function isTyping(): boolean {
 
 function modalOpen(): boolean {
 	const s = store.get();
-	return s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDiscard !== null || s.exportUi !== null;
+	return s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.exportUi !== null;
 }
 
 function menuAction(action: string): void {
@@ -29,6 +29,8 @@ function menuAction(action: string): void {
 		return;
 	}
 	if (modalOpen()) return;
+	// The list of sets has no timeline to act on.
+	if (store.get().screen === "home" && action !== "new") return;
 	if (action === lastKeyAction && performance.now() - lastKeyAt < 250) return;
 	runAction(action);
 }
@@ -36,16 +38,10 @@ function menuAction(action: string): void {
 function runAction(action: string): void {
 	switch (action) {
 		case "new":
-			requestNew();
+			void newSet({ askName: true });
 			break;
-		case "open":
-			requestOpen();
-			break;
-		case "save":
-			void saveSet();
-			break;
-		case "save-as":
-			void saveSet(true);
+		case "sets":
+			void goHome();
 			break;
 		case "import":
 			void importViaDialog();
@@ -96,8 +92,7 @@ function shortcut(e: KeyboardEvent): string | null {
 		if (k === "z") return e.shiftKey ? "redo" : "undo";
 		if (k === "a") return "select-all";
 		if (k === "d") return "duplicate";
-		if (k === "s") return e.shiftKey ? "save-as" : "save";
-		if (k === "o") return "open";
+		if (k === "o") return "sets";
 		if (k === "n") return "new";
 		if (k === "i") return "import";
 		if (k === "e") return "export";
@@ -120,8 +115,10 @@ function shortcut(e: KeyboardEvent): string | null {
 
 function onKey(e: KeyboardEvent): void {
 	if (modalOpen()) return;
-	// Space is always the transport key outside dialogs. The only fields outside dialogs are
-	// BPM boxes, where a space means nothing, so let go of whatever holds focus (a BPM box
+	// A set name being typed takes every key, Space included.
+	if (document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains("name-edit")) return;
+	// Space is otherwise the transport key outside dialogs. The other fields outside dialogs
+	// are BPM boxes, where a space means nothing, so let go of whatever holds focus (a BPM box
 	// commits on blur) and play.
 	if (e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey) {
 		const el = document.activeElement;
@@ -134,6 +131,7 @@ function onKey(e: KeyboardEvent): void {
 	if (isTyping()) return;
 	const action = shortcut(e);
 	if (!action) return;
+	if (store.get().screen === "home" && action !== "new") return;
 	e.preventDefault();
 	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right") return;
 	if (action === "toggle") engine.toggle();
@@ -168,7 +166,6 @@ function start(): void {
 	let lastRev = store.get().rev;
 	let lastMediaRev = store.get().mediaRev;
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
-	let lastSaved = "";
 	store.subscribe(() => {
 		const s = store.get();
 		if (!s.loaded) return;
@@ -186,17 +183,12 @@ function start(): void {
 				engine.refresh();
 			}
 		}
+		// The set is written a moment after anything about it changes.
 		clearTimeout(saveTimer);
-		saveTimer = setTimeout(() => {
-			const cur = store.get();
-			const session: Session = { doc: cur.doc, filePath: cur.filePath, dirty: cur.dirty, pxPerBeat: cur.pxPerBeat, scrollX: cur.scrollX, playheadBeat: cur.playing ? engine.positionBeat() : cur.playheadBeat };
-			const text = JSON.stringify(session);
-			void autoSave();
-			if (text === lastSaved) return;
-			lastSaved = text;
-			void window.api.saveSession(session);
-		}, 400);
+		saveTimer = setTimeout(() => void autoSave(), 400);
 	});
+	// Closing the window never loses the last change.
+	window.addEventListener("beforeunload", saveBeforeClose);
 	window.api.onMenu(menuAction);
 	window.api.onExportProgress((p) => {
 		if (store.get().exportUi?.phase === "running") store.set({ exportUi: { phase: "running", stage: p.stage, pct: p.pct } });
@@ -214,18 +206,26 @@ function start(): void {
 	window.addEventListener("dragover", (e) => e.preventDefault());
 	window.addEventListener("drop", (e) => e.preventDefault());
 	watchCues();
-	void window.api.loadSession().then((session) => {
-		if (session) {
-			store.load(session.doc, session.filePath, session.dirty);
-			store.set({ pxPerBeat: session.pxPerBeat, scrollX: session.scrollX, playheadBeat: session.playheadBeat });
-		}
+	// The app opens on the list of sets.
+	void refreshSets().then(() => {
 		store.set({ loaded: true });
-		void autoSave(); // anything left unsaved last time
-		reconcileMedia(store.get().doc);
 		engine.warm();
 	});
 	// Handles for the end-to-end tests.
-	(window as unknown as { planner: unknown }).planner = { store, engine, importPaths, saveSet, openSet, newSet, runExport, tempoProgress };
+	(window as unknown as { planner: unknown }).planner = {
+		store,
+		engine,
+		importPaths,
+		// The tests are written around sets at 128 BPM.
+		newSet: (opts?: { askName?: boolean; bpm?: number }) => newSet({ bpm: 128, ...opts }),
+		openSet,
+		openSetFile: async (path: string) => openSet(await window.api.importSetFile(path)),
+		goHome,
+		refreshSets,
+		flush: flushAutoSave,
+		runExport,
+		tempoProgress,
+	};
 }
 
 // The divider between the timeline and the bottom area; its position is a share of the height and survives restarts.
@@ -279,7 +279,18 @@ function Split({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
 
 export default function App() {
 	const libraryOpen = useStore((s) => s.libraryOpen);
+	const screen = useStore((s) => s.screen);
+	const loaded = useStore((s) => s.loaded);
 	useEffect(start, []);
+	if (screen === "home") {
+		return (
+			<div className="app">
+				{loaded && <Home />}
+				<Modals />
+				<Toast />
+			</div>
+		);
+	}
 	return (
 		<div className="app">
 			<TopBar />

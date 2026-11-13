@@ -2,7 +2,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
 import { onsets, writeClickTrack } from "../signals";
-import { importTrack, launch, shot, state, waitReady, type Harness } from "./harness";
+import { importTrack, launch, setFile, shot, state, stored, waitReady, type Harness } from "./harness";
 
 let h: Harness;
 const BEAT = (60 / 128) * SR;
@@ -364,14 +364,15 @@ describe("editing and playback", () => {
 		expect((await clips()).length).toBe(3);
 	});
 
-	it("a new set starts empty; the old one is already saved to its file", async () => {
-		await expect.poll(() => state(h.page, "s => s.filePath !== null && !s.dirty"), { timeout: 10000 }).toBe(true);
-		const file: string = await state(h.page, "s => s.filePath");
+	it("a new set starts empty; the old one is already kept", async () => {
+		const id = await stored(h.page);
 		await h.page.keyboard.press("Meta+n");
 		await expect.poll(async () => (await clips()).length).toBe(0);
-		expect(await state(h.page, "s => s.filePath")).toBeNull();
+		await h.page.getByTestId("set-name-input").waitFor();
+		await h.page.keyboard.press("Escape");
+		expect(await state(h.page, "s => s.setId")).not.toBe(id);
 		const fs = await import("node:fs");
-		expect(JSON.parse(fs.readFileSync(file, "utf8")).clips.length).toBe(3);
+		expect(JSON.parse(fs.readFileSync(setFile(h, id), "utf8")).doc.clips.length).toBe(3);
 	});
 });
 

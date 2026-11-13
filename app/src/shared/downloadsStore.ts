@@ -4,6 +4,7 @@
 //
 // One pretty-printed JSON file, written atomically (temp file + rename), created on first write:
 //   ~/Library/Application Support/gate-dl/data/downloads.json
+// except in the app's dev and test runs, which set DJ_DATA_DIR: there it is <DJ_DATA_DIR>/downloads.json.
 // Shape: { "tracks": { "<normalized track url>": { id, title, files, gate, gateUrl, at } } }
 
 import fs from 'node:fs';
@@ -14,8 +15,14 @@ import type { DownloadsDb, Track } from './types';
 
 export type { DownloadsDb, Track };
 
-export const DATA_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'gate-dl', 'data');
-export const STORE_FILE = path.join(DATA_DIR, 'downloads.json');
+// Read on every call: the app sets DJ_DATA_DIR at startup, after this module may have loaded.
+function dataDir(): string {
+  return process.env['DJ_DATA_DIR'] || path.join(os.homedir(), 'Library', 'Application Support', 'gate-dl', 'data');
+}
+
+function storeFile(): string {
+  return path.join(dataDir(), 'downloads.json');
+}
 
 // soundcloud.com/a/b, www./m. variants, trailing slash, ?query and #hash all map to one key.
 // Private tracks keep their secret_token so they stay distinct.
@@ -27,15 +34,16 @@ export function trackKey(url: string): string {
 }
 
 function writeAtomic(db: DownloadsDb): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${STORE_FILE}.${process.pid}.${Date.now()}`;
+  fs.mkdirSync(dataDir(), { recursive: true });
+  const file = storeFile();
+  const tmp = `${file}.${process.pid}.${Date.now()}`;
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2) + '\n');
-  fs.renameSync(tmp, STORE_FILE);
+  fs.renameSync(tmp, file);
 }
 
 export function load(): DownloadsDb {
   try {
-    return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
+    return JSON.parse(fs.readFileSync(storeFile(), 'utf8'));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { tracks: {} };
     throw e;

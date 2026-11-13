@@ -4,3 +4,4 @@ store/
 app/node_modules/
 app/out/
 app/dist/
+dev-data/
