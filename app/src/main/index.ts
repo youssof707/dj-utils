@@ -4,6 +4,7 @@ import { join } from "path";
 import { electronApp, is } from "@electron-toolkit/utils";
 import { listDownloads } from "../shared/downloadsStore";
 import { buildMenu, setupPlanner } from "./planner";
+import { setupSettings } from "./settings";
 import { cleanupDuplicateInstalls, registerUpdaterHandlers } from "./updater";
 
 // Packaged: copied to Resources by extraResources. Dev: app/build/icon.png.
@@ -60,6 +61,7 @@ app.whenReady().then(() => {
 		if (e.sender.isDevToolsOpened()) e.sender.closeDevTools();
 		else e.sender.openDevTools({ mode: "detach" });
 	});
+	setupSettings();
 	setupPlanner();
 	registerUpdaterHandlers();
 	buildMenu();

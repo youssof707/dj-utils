@@ -34,7 +34,9 @@ body.dragging-move * {
 	cursor: grabbing !important;
 }
 body.split-tool .clip,
-body.split-tool .clip * {
+body.split-tool .clip *,
+body.split-tool .edit-row,
+body.split-tool .edit-row * {
 	/* scissors beside a cut line; the hotspot is on the line */
 	cursor: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><g fill='none' stroke-linecap='round'><path d='M8 3v26' stroke='black' stroke-width='4'/><path d='M8 3v26' stroke='white' stroke-width='2'/><g stroke='black' stroke-width='4'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g><g stroke='white' stroke-width='2'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g></g></svg>") 8 16, col-resize !important;
 }
@@ -181,6 +183,40 @@ input.name-edit {
 .home-head button.primary {
 	padding: 9px 18px;
 	font-size: 14px;
+}
+.home-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.home-actions button.ghost {
+	padding: 9px 14px;
+	font-size: 14px;
+}
+.setting {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 14px;
+	border-radius: 10px;
+	background: var(--panel);
+}
+.setting-main {
+	flex: 1;
+	min-width: 0;
+	line-height: 1.5;
+}
+.setting-name {
+	font-weight: 600;
+	font-size: 14px;
+}
+.setting-path {
+	margin-top: 6px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 12px;
+	overflow-wrap: anywhere;
+	user-select: text;
+	-webkit-user-select: text;
 }
 .home-empty {
 	margin-top: 60px;
@@ -343,6 +379,210 @@ button.play.on {
 .bottom-area {
 	flex: 1 1 0;
 	min-height: 0;
+}
+
+/* ---- track editor (the bottom area) ---- */
+.edit-empty {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: #4a4f5d;
+	font-size: 14px;
+	overflow: hidden;
+}
+.track-editor {
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+.edit-head {
+	flex: none;
+	height: 42px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0 10px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+/* The keys act on the editor while it shows this line. */
+.track-editor.focused .edit-head {
+	box-shadow: inset 0 2px 0 var(--accent);
+}
+.edit-title {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	min-width: 0;
+	margin: 0 10px 0 8px;
+	font-variant-numeric: tabular-nums;
+}
+.edit-name {
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 320px;
+}
+.edit-status {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px;
+	overflow: hidden;
+}
+.edit-status span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+/* The exported file, ready to be dragged onto a lane. */
+/* An audio file held over the editor, to be opened there. */
+.track-editor.file-over,
+.edit-empty.file-over {
+	box-shadow: inset 0 0 0 2px #6d8cff;
+	background-color: rgba(109, 140, 255, 0.08);
+}
+.edit-file {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	height: 24px;
+	padding: 0 8px 0 6px;
+	border-radius: 5px;
+	background: hsl(var(--hue) 45% 34% / 0.35);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 60% / 0.7);
+	color: #e8ebf2;
+	cursor: grab;
+	user-select: none;
+}
+.edit-file:hover {
+	background: hsl(var(--hue) 48% 40% / 0.5);
+}
+.edit-file:active {
+	cursor: grabbing;
+}
+.edit-file-grip {
+	color: #9aa1b2;
+	flex: none;
+}
+.edit-file-name {
+	min-width: 0;
+	white-space: nowrap;
+}
+.edit-file-hint {
+	flex: none;
+	color: #9aa1b2;
+	font-size: 11px;
+}
+.edit-body {
+	flex: 1;
+	min-height: 0;
+	position: relative;
+	overflow: hidden;
+}
+.edit-ruler-row {
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	cursor: pointer;
+	touch-action: none;
+}
+.edit-ruler {
+	display: block;
+}
+.edit-row {
+	position: absolute;
+	top: 23px;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	overflow: hidden;
+	touch-action: none;
+}
+/* Bar and beat lines run over the sections, so they show through the waveform. */
+.edit-row .lane-grid {
+	z-index: 3;
+}
+.edit-section {
+	position: absolute;
+	top: 8px;
+	bottom: 22px;
+	background: hsl(var(--hue) 42% 30% / 0.1);
+	box-shadow: inset 0 0 0 1px hsl(var(--hue) 55% 55% / 0.8);
+	overflow: hidden;
+	cursor: grab;
+}
+.edit-section.selected {
+	background: hsl(var(--hue) 48% 38% / 0.2);
+	box-shadow: inset 0 0 0 2px #fff;
+	z-index: 2;
+}
+/* Picked up and on its way to another place. */
+.edit-section.lifted {
+	opacity: 0.45;
+}
+/* The audio before the first beat: always kept at the start, never cut or moved. */
+.edit-section.lead {
+	background: transparent;
+	box-shadow: none;
+	opacity: 0.45;
+	cursor: default;
+}
+.edit-wave {
+	position: absolute;
+	top: 17px;
+	height: calc(100% - 17px);
+	pointer-events: none;
+}
+.edit-section-label {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 17px;
+	line-height: 17px;
+	font-size: 11px;
+	white-space: nowrap;
+	overflow: hidden;
+	background: hsl(var(--hue) 45% 34% / 0.75);
+	pointer-events: none;
+	font-variant-numeric: tabular-nums;
+}
+.edit-cursor,
+.edit-playhead,
+.edit-drop {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 1px;
+	margin-left: -0.5px;
+	pointer-events: none;
+	z-index: 5;
+}
+.edit-cursor {
+	background: var(--accent);
+}
+.edit-playhead {
+	background: var(--danger);
+	visibility: hidden;
+}
+.edit-drop {
+	width: 3px;
+	margin-left: -1.5px;
+	background: #fff;
+	z-index: 6;
+}
+.edit-hint {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: #4a4f5d;
+	pointer-events: none;
 }
 .library {
 	width: 250px;

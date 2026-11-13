@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { autoSave, deleteSelection, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
+import { stopEditPreview, toggleEditPreview } from "./planner/editPlayer";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
 import { Home } from "./planner/Home";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
-import { store, useStore } from "./planner/store";
+import { closeSettings, Settings } from "./planner/Settings";
+import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
+import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
+import { leadBeat, place } from "@shared/trackEdit";
+import { TrackEditor } from "./planner/TrackEditor";
 import { Updater, updateModalOpen } from "./Updater";
 import { VersionChip } from "./VersionChip";
 
@@ -32,12 +37,47 @@ function menuAction(action: string): void {
 	}
 	if (modalOpen()) return;
 	// The list of sets has no timeline to act on.
-	if (store.get().screen === "home" && action !== "new") return;
+	if (store.get().screen !== "editor" && action !== "new") return;
 	if (action === lastKeyAction && performance.now() - lastKeyAt < 250) return;
 	runAction(action);
 }
 
+// The track editor was clicked last: editing keys and menu items act on its sections.
+function editorHasKeys(): boolean {
+	const s = store.get();
+	return s.screen === "editor" && s.editFocus && s.trackEdit !== null;
+}
+
+// Whether the track editor took the action.
+function editorAction(action: string): boolean {
+	switch (action) {
+		case "undo":
+			editUndo();
+			return true;
+		case "redo":
+			editRedo();
+			return true;
+		case "select-all":
+			editSelectAll();
+			return true;
+		case "split":
+			editCut();
+			return true;
+		case "duplicate":
+			editDuplicate();
+			return true;
+		case "delete":
+			editDelete();
+			return true;
+		case "mute":
+		case "bass":
+			return true; // nothing to mute in the editor, and the timeline's selection is not meant
+	}
+	return false;
+}
+
 function runAction(action: string): void {
+	if (editorHasKeys() && editorAction(action)) return;
 	switch (action) {
 		case "new":
 			void newSet({ askName: true });
@@ -49,7 +89,8 @@ function runAction(action: string): void {
 			void importViaDialog();
 			break;
 		case "export":
-			openExport();
+			// With clips selected on the timeline, ⌘E sends them to the track editor instead.
+			if (editorHasKeys() || !editSelectedClips()) openExport();
 			break;
 		case "undo":
 			store.undo();
@@ -112,7 +153,12 @@ function shortcut(e: KeyboardEvent): string | null {
 		if (k === "0") return "zoom-fit";
 		return null;
 	}
-	if (mod || e.altKey) return null;
+	if (mod) return null;
+	if (e.altKey) {
+		if (k === "arrowleft") return "slide-left";
+		if (k === "arrowright") return "slide-right";
+		return null;
+	}
 	if (e.code === "Space") return "toggle";
 	if (k === "backspace" || k === "delete") return "delete";
 	if (k === "c") return "cue";
@@ -146,18 +192,41 @@ function onKey(e: KeyboardEvent): void {
 		}
 	}
 	if (isTyping()) return;
+	const inEditor = editorHasKeys();
 	const tool = HOLD_TOOLS[e.key.toLowerCase()];
 	if (tool && !e.metaKey && !e.ctrlKey && !e.altKey) {
-		if (store.get().screen === "home") return;
+		if (store.get().screen !== "editor") return;
 		e.preventDefault();
 		document.body.classList.add(tool);
 		return;
 	}
 	const action = shortcut(e);
 	if (!action) return;
-	if (store.get().screen === "home" && action !== "new") return;
+	if (store.get().screen === "settings" && action === "escape") {
+		e.preventDefault();
+		closeSettings();
+		return;
+	}
+	if (store.get().screen !== "editor" && action !== "new") return;
 	e.preventDefault();
-	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right") return;
+	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right" && action !== "slide-left" && action !== "slide-right") return;
+	// ⌥← ⌥→ move the editor's selected sections in time; the timeline has no use for them.
+	if (action === "slide-left" || action === "slide-right") {
+		if (inEditor) editNudge(action === "slide-left" ? -1 : 1);
+		return;
+	}
+	if (inEditor && (action === "toggle" || action === "cue" || action === "nudge-left" || action === "nudge-right" || action === "home" || action === "escape")) {
+		if (action === "toggle") toggleEditPreview();
+		else if (action === "cue") {
+			stopEditPreview();
+			toggleEditPreview();
+		} else if (action === "nudge-left") editStepCursor(-1);
+		else if (action === "nudge-right") editStepCursor(1);
+		else if (action === "home") editSetCursor(0);
+		else if (store.get().menu) store.set({ menu: null });
+		else editSelect([]);
+		return;
+	}
 	if (action === "toggle") engine.toggle();
 	else if (action === "cue") engine.cue();
 	else if (action === "nudge-left") nudgeSelection(-1);
@@ -228,6 +297,16 @@ function start(): void {
 		if (tool) document.body.classList.remove(tool);
 	});
 	window.addEventListener("blur", dropSplitTool);
+	// The keys go to the track editor once it is clicked, and back to the timeline on a click
+	// anywhere else.
+	window.addEventListener(
+		"pointerdown",
+		(e) => {
+			const inEditor = e.target instanceof Element && e.target.closest(".track-editor") !== null;
+			if (store.get().editFocus !== inEditor) store.set({ editFocus: inEditor });
+		},
+		true,
+	);
 	window.addEventListener("click", () => {
 		if (document.activeElement instanceof HTMLButtonElement && !modalOpen()) document.activeElement.blur();
 	});
@@ -255,6 +334,11 @@ function start(): void {
 		flush: flushAutoSave,
 		runExport,
 		tempoProgress,
+		openTrackEdit,
+		editSelectedClips,
+		exportTrackEdit,
+		editPx,
+		placeEdit: (e: TrackEditUi) => place(leadBeat(e.track), e.sections),
 	};
 }
 
@@ -271,6 +355,16 @@ function savedSplit(): number {
 function Split({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [frac, setFrac] = useState(savedSplit);
+	// A track opened in the editor brings the bottom area back if it was dragged shut.
+	const editing = useStore((s) => s.trackEdit !== null);
+	useEffect(() => {
+		if (!editing) return;
+		setFrac((f) => {
+			if (f <= 0.9) return f;
+			localStorage.setItem(SPLIT_KEY, String(SPLIT_DEFAULT));
+			return SPLIT_DEFAULT;
+		});
+	}, [editing]);
 
 	const onDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
@@ -322,10 +416,15 @@ export default function App() {
 					<Modals />
 					<Toast />
 				</>
+			) : screen === "settings" ? (
+				<>
+					<Settings />
+					<Toast />
+				</>
 			) : (
 				<>
 					<TopBar />
-					<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<div className="bottom-area" />} />
+					<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<TrackEditor />} />
 					<Modals />
 					<ClipMenu />
 					<Toast />

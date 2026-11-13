@@ -110,6 +110,14 @@ export type ExportRequest = {
 export type ExportResult = { path: string; seconds: number; gainDb: number };
 export type ExportProgress = { stage: string; pct: number };
 
+// An edited track to write out: the lead-in (the first `leadBeat` beats of the file), then
+// these stretches of the track one after the other. Beats are the track's own, at `bpm`.
+// The file is named after `name` and goes in the export folder from the settings.
+export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: { startBeat: number; lengthBeat: number; gapBeat?: number }[] };
+export type EditExportResult = { path: string; seconds: number; sampleRate: number; bits: number; channels: number };
+
+export type Settings = { exportDir: string };
+
 // A set as the app stores it. The app keeps every set itself; there are no set files to
 // save or open. `view` is where the timeline was left.
 export type SetView = { pxPerBeat: number; scrollX: number; playheadBeat: number };

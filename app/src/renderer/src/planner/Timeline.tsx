@@ -6,6 +6,7 @@ import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, d
 import { engine } from "./engine";
 import { clipTempoProgress, mediaFor, type Media } from "./media";
 import { store, useStore } from "./store";
+import { drawBand, peakMax, sizeCanvas } from "./wave";
 
 export const GUTTER = 52;
 
@@ -21,19 +22,19 @@ function snap(beat: number, e: { altKey: boolean }): number {
 }
 const EDGE = 8;
 
-function fmtTime(sec: number): string {
+export function fmtTime(sec: number): string {
 	const m = Math.floor(sec / 60);
 	const s = Math.floor(sec % 60);
 	return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 // Grid spacing in beats so lines never crowd: beats, then bars, then groups of bars.
-function gridStep(pxPerBeat: number, minPx: number): number {
+export function gridStep(pxPerBeat: number, minPx: number): number {
 	for (const beats of [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]) if (beats * pxPerBeat >= minPx) return beats;
 	return 8192;
 }
 
-function trackHue(id: string): number {
+export function trackHue(id: string): number {
 	let h = 0;
 	for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
 	return h % 360;
@@ -126,7 +127,7 @@ const flagTool = (): "muted" | "lowCut" | null => (document.body.classList.conta
 
 // Grid lines drawn at exact beat positions (same maths as the ruler and clips), so they never
 // drift from the beat. The canvas is one device pixel tall and stretched to the lane height.
-function LaneGrid({ width, pxPerBeat, scrollX }: { width: number; pxPerBeat: number; scrollX: number }) {
+export function LaneGrid({ width, pxPerBeat, scrollX }: { width: number; pxPerBeat: number; scrollX: number }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 
 	useLayoutEffect(() => {
@@ -271,10 +272,10 @@ function TempoEditor({ block }: { block: TempoBlock }) {
 // ---- clips --------------------------------------------------------------------------
 
 // Cue points that share a moment share one line.
-type CueMark = { beat: number; memory: boolean; letters: string[] };
+export type CueMark = { beat: number; memory: boolean; letters: string[] };
 const SAME_CUE_SEC = 0.003;
 
-function cueMarks(cues: Cue[] | undefined, track: PlannerTrack | undefined): CueMark[] {
+export function cueMarks(cues: Cue[] | undefined, track: PlannerTrack | undefined): CueMark[] {
 	if (!cues || !track) return [];
 	const out: CueMark[] = [];
 	let lastSec = -Infinity;
@@ -313,48 +314,28 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 	const peaks = media?.state === "ready" ? media.peaks : null;
 	const hue = trackHue(track?.id ?? clip.trackId);
 	// Scaled so the loudest point in the whole track fills the clip's height.
-	const lowMax = useMemo(() => {
-		if (!peaks) return 255;
-		let l = 1;
-		for (let i = 1; i < peaks.length; i += 2) if (peaks[i] > l) l = peaks[i];
-		return l;
-	}, [peaks]);
+	const lowMax = useMemo(() => peakMax(peaks, 1), [peaks]);
 
 	useLayoutEffect(() => {
 		const cv = ref.current;
 		if (!cv || !visible) return;
 		const cssW = Math.max(1, Math.ceil(visR - visL));
 		const cssH = cv.clientHeight || 60;
-		const dpr = window.devicePixelRatio || 1;
-		cv.width = Math.round(cssW * dpr);
-		cv.height = Math.round(cssH * dpr);
-		const g = cv.getContext("2d")!;
-		g.clearRect(0, 0, cv.width, cv.height);
+		sizeCanvas(cv, cssW, cssH);
 		if (!peaks) return;
 		const framesPerBeat = (60 / bpm) * SAMPLE_RATE;
-		const bucketsPerPx = framesPerBeat / pxPerBeat / PEAK_BUCKET / dpr;
-		const startBucket = ((clip.offsetBeat + (visL - left) / pxPerBeat) * framesPerBeat) / PEAK_BUCKET;
-		const mid = cv.height / 2;
-		const buckets = peaks.length >> 1;
-		const cols = cv.width;
-		const lo = new Float32Array(cols);
-		for (let x = 0; x < cols; x++) {
-			const b0 = Math.floor(startBucket + x * bucketsPerPx);
-			const b1 = Math.max(b0 + 1, Math.floor(startBucket + (x + 1) * bucketsPerPx));
-			let l = 0;
-			for (let b = Math.max(0, b0); b < b1 && b < buckets; b++) if (peaks[b * 2 + 1] > l) l = peaks[b * 2 + 1];
-			lo[x] = l / lowMax;
-		}
+		const faded = fadeIn > 0 || fadeOut > 0;
 		// The kick band only, so each kick is a sharp spike whose left edge is the hit.
 		// Drawn smaller under a volume fade, the way it will sound.
 		// With the bass muted the band is not heard, so it is only hinted at.
-		g.fillStyle = clip.lowCut ? "rgba(255, 255, 255, 0.4)" : "rgba(255, 255, 255, 0.85)";
-		const faded = fadeIn > 0 || fadeOut > 0;
-		for (let x = 0; x < cols; x++) {
-			const vol = faded ? fadeGain((visL - left + x / dpr) / pxPerBeat, clip.lengthBeat, fadeIn, fadeOut) : 1;
-			const hh = Math.min(1, lo[x]) * mid * vol;
-			if (hh > 0.25) g.fillRect(x, mid - hh, 1, hh * 2);
-		}
+		drawBand(cv, peaks, {
+			band: 1,
+			max: lowMax,
+			startBucket: ((clip.offsetBeat + (visL - left) / pxPerBeat) * framesPerBeat) / PEAK_BUCKET,
+			bucketsPerPx: framesPerBeat / pxPerBeat / PEAK_BUCKET,
+			fill: clip.lowCut ? "rgba(255, 255, 255, 0.4)" : "rgba(255, 255, 255, 0.85)",
+			vol: faded ? (px) => fadeGain((visL - left + px) / pxPerBeat, clip.lengthBeat, fadeIn, fadeOut) : undefined,
+		});
 	}, [visible, visL, visR, left, pxPerBeat, peaks, lowMax, clip.offsetBeat, clip.lengthBeat, clip.lowCut, fadeIn, fadeOut, bpm, laneH]);
 
 	const marks = useMemo(() => cueMarks(cues, track), [cues, track]);
@@ -440,8 +421,8 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 		    clip's outline, half outside the clip, so they live next to it rather than in it. */}
 			{track && w >= FADE_DOT * 4 && (
 				<div className={`clip-fades${selected ? " selected" : ""}`} style={style}>
-					<div className={`fade-dot${fadeIn > 0 ? " set" : ""}`} style={{ left: fadeDotInset(fadeIn * pxPerBeat, w, selected) }} data-testid="fade-in" title="Drag to fade in" onPointerDown={(e) => onFade(e, clip, "in")} />
-					<div className={`fade-dot${fadeOut > 0 ? " set" : ""}`} style={{ right: fadeDotInset(fadeOut * pxPerBeat, w, selected) }} data-testid="fade-out" title="Drag to fade out" onPointerDown={(e) => onFade(e, clip, "out")} />
+					<div className={`fade-dot${fadeIn > 0 ? " set" : ""}`} style={{ left: fadeDotInset(fadeIn * pxPerBeat, w, selected) }} data-testid="fade-in" onPointerDown={(e) => onFade(e, clip, "in")} />
+					<div className={`fade-dot${fadeOut > 0 ? " set" : ""}`} style={{ right: fadeDotInset(fadeOut * pxPerBeat, w, selected) }} data-testid="fade-out" onPointerDown={(e) => onFade(e, clip, "out")} />
 				</div>
 			)}
 		</>
@@ -903,7 +884,6 @@ export function Timeline() {
 							<button
 								className={`mute-btn${laneMuted[i] ? " muted" : ""}${soloLane === i ? " solo" : ""}`}
 								data-testid={`mute-${i}`}
-								title={soloLane === i ? "Soloed: ⌘-click to unsolo" : laneMuted[i] ? "Unmute (⌘-click to solo)" : "Mute (⌘-click to solo)"}
 								aria-label={laneMuted[i] ? `Unmute lane ${i + 1}` : `Mute lane ${i + 1}`}
 								onClick={(e) => (e.metaKey ? toggleSolo(i) : toggleMute(i))}
 							/>

@@ -3,13 +3,14 @@ import { parentPort, workerData } from "node:worker_threads";
 import fs from "node:fs";
 import { matchTrack, readCues, scanLibrary, type LibraryEntry } from "../rekordbox";
 import { computePeaks, exportSet, killChildren, renderRamp, stretchFile, type ExportJob, type RampJob } from "./dsp";
+import { exportEdit, type EditExportJob } from "./splice";
 import { WavReader } from "./wav";
 
 export type PrepareJob = { decodedPath: string; outPath: string; peaksPath: string; fromBpm: number; toBpm: number };
 export type PeaksJob = { wavPath: string; peaksPath: string };
 export type ScanJob = { root: string; cachePath: string };
 export type MatchJob = { decodedPath: string; candidates: LibraryEntry[] };
-export type Task = { type: "prepare"; job: PrepareJob } | { type: "ramp"; job: RampJob } | { type: "peaks"; job: PeaksJob } | { type: "export"; job: ExportJob } | { type: "rekordbox-scan"; job: ScanJob } | { type: "rekordbox-match"; job: MatchJob } | { type: "rekordbox-cues"; job: { dbPath: string } };
+export type Task = { type: "edit-export"; job: EditExportJob } | { type: "prepare"; job: PrepareJob } |{ type: "ramp"; job: RampJob } | { type: "peaks"; job: PeaksJob } | { type: "export"; job: ExportJob } | { type: "rekordbox-scan"; job: ScanJob } | { type: "rekordbox-match"; job: MatchJob } | { type: "rekordbox-cues"; job: { dbPath: string } };
 
 const post = (m: unknown): void => parentPort!.postMessage(m);
 
@@ -54,6 +55,7 @@ async function main(): Promise<unknown> {
 		await fs.promises.rename(tmp, task.job.peaksPath);
 		return {};
 	}
+	if (task.type === "edit-export") return exportEdit(task.job);
 	if (task.type === "rekordbox-scan") return scanLibrary(task.job.root, task.job.cachePath);
 	if (task.type === "rekordbox-cues") return readCues(task.job.dbPath);
 	if (task.type === "rekordbox-match") return matchTrack(task.job.decodedPath, task.job.candidates);

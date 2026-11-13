@@ -6,12 +6,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type PlannerDoc, type ProbeResult, type RekordboxGrid, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
 import { normalizeDoc, renderingsFor, tempoMapOf } from "../shared/renderings";
 import { afconvertToWav } from "./audio/dsp";
+import { readGridTag, type SpliceResult } from "./audio/splice";
 import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
 import { dataRoot } from "./paths";
+import { exportDir } from "./settings";
 import { databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, type LibraryCue, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
 
 const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "caf", "mp4", "alac"];
@@ -321,14 +323,55 @@ async function rekordboxCues(sourcePath: string): Promise<Cue[]> {
 	return (cueIndex[datKey(m.dat)] ?? []).map((c) => ({ sec: c.ms / 1000 - m.shiftSec, kind: c.kind }));
 }
 
+// The file's beat grid: Rekordbox's when it has analysed the file, otherwise the one an
+// edit exported from here carries with it (its parent track's).
+async function trackGrid(sourcePath: string): Promise<RekordboxGrid | null> {
+	const grid = await rekordboxGrid(sourcePath);
+	if (grid) return grid;
+	const tag = readGridTag(sourcePath);
+	return tag && tag.downbeatSec !== undefined ? { bpm: tag.bpm, downbeatSec: tag.downbeatSec } : null;
+}
+
+// Where an edit of the track called `name` goes: "<name> (edit).wav" in the export folder,
+// numbered when that is taken.
+function editPath(dir: string, name: string): string {
+	const base =
+		name
+			.replace(/[/\\:\0]/g, "-")
+			.replace(/ \(edit( \d+)?\)$/, "")
+			.trim() || "Track";
+	for (let n = 1; ; n++) {
+		const file = path.join(dir, `${base} (edit${n === 1 ? "" : ` ${n}`}).wav`);
+		if (!fs.existsSync(file)) return file;
+	}
+}
+
+let editExporting = false;
+
+async function exportEdit(req: EditExportRequest): Promise<EditExportResult> {
+	if (editExporting) throw new Error("An export is already running");
+	if (!AUDIO_EXT.includes(path.extname(req.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.sourcePath)) throw new Error("The source file is missing");
+	editExporting = true;
+	try {
+		const dir = exportDir();
+		fs.mkdirSync(dir, { recursive: true });
+		const outPath = editPath(dir, req.name);
+		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, leadBeat: req.leadBeat, sections: req.sections };
+		const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
+		return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };
+	} finally {
+		editExporting = false;
+	}
+}
+
 async function probe(sourcePath: string): Promise<ProbeResult> {
 	const decoded = await decode(sourcePath);
 	const durationSec = wavFrames(decoded) / SAMPLE_RATE;
-	const rekordbox = await rekordboxGrid(sourcePath);
+	const rekordbox = await trackGrid(sourcePath);
 	// Same file name in Rekordbox but not this audio: offer the newest analysis' BPM.
 	const sameName = rekordbox ? undefined : rekordboxIndex.get(nameKey(path.basename(sourcePath)));
 	const rekordboxBpm = sameName ? sameName.reduce((a, b) => (b.mtimeMs > a.mtimeMs ? b : a)).bpm : null;
-	return { path: sourcePath, name: path.basename(sourcePath).replace(/\.[^.]+$/, ""), durationSec, tagBpm: readTagBpm(sourcePath), rekordbox, rekordboxBpm };
+	return { path: sourcePath, name: path.basename(sourcePath).replace(/\.[^.]+$/, ""), durationSec, tagBpm: readGridTag(sourcePath)?.bpm ?? readTagBpm(sourcePath), rekordbox, rekordboxBpm };
 }
 
 // Stretch queue: a few at a time, one job per rendering (see stretchKey and rampKey). The
@@ -925,7 +968,7 @@ export function setupPlanner(): void {
 	void loadCues();
 
 	ipcMain.handle("planner:probe", (_e, p: string) => probe(p));
-	ipcMain.handle("planner:rekordbox", (_e, p: string) => rekordboxGrid(p));
+	ipcMain.handle("planner:rekordbox", (_e, p: string) => trackGrid(p));
 	ipcMain.handle("planner:cues", (_e, p: string) => rekordboxCues(p));
 	ipcMain.handle("planner:stretch", (_e, req: StretchRequest) => ensureStretch(req));
 	ipcMain.handle("planner:ramp", (_e, req: RampRequest) => ensureRamp(req));
@@ -967,6 +1010,7 @@ export function setupPlanner(): void {
 			exportWorker = null;
 		}
 	});
+	ipcMain.handle("planner:export-edit", (_e, req: EditExportRequest) => exportEdit(req));
 	ipcMain.handle("planner:export-cancel", async () => {
 		const w = exportWorker;
 		if (!w) return;

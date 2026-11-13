@@ -6,6 +6,7 @@ import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentB
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
+import { openTrackEdit } from "./trackEdit";
 
 function fmtClock(sec: number): string {
 	const m = Math.floor(sec / 60);
@@ -13,10 +14,11 @@ function fmtClock(sec: number): string {
 	return `${m}:${s.toFixed(1).padStart(4, "0")}`;
 }
 
-export function fmtLength(sec: number): string {
+export function fmtLength(seconds: number): string {
+	const sec = Math.round(seconds); // whole seconds first, so 59.9 s reads 1:00 and not 0:60
 	const h = Math.floor(sec / 3600);
 	const m = Math.floor((sec % 3600) / 60);
-	const s = Math.round(sec % 60);
+	const s = sec % 60;
 	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -81,7 +83,7 @@ function Position() {
 		raf = requestAnimationFrame(frame);
 		return () => cancelAnimationFrame(raf);
 	}, []);
-	return <div className="position" ref={ref} data-testid="position" title="Bar.beat, and time into the set (tempo changes included)" />;
+	return <div className="position" ref={ref} data-testid="position" />;
 }
 
 function BpmField() {
@@ -103,7 +105,7 @@ function BpmField() {
 		setText(String(store.get().doc.bpm));
 	};
 	return (
-		<label className="bpm-field" title="Project BPM: the tempo the set starts at. Tempo changes take it from there.">
+		<label className="bpm-field">
 			<span>BPM</span>
 			<input
 				data-testid="project-bpm"
@@ -164,10 +166,10 @@ export function TopBar() {
 	const length = beats > 0 ? new TempoMap(tempoPoints(doc), doc.bpm).secondsAtBeat(beats) : 0;
 	return (
 		<header className="topbar">
-			<button className="ghost" data-testid="all-sets" onClick={() => void goHome()} title="Back to your sets (Cmd+O)">
+			<button className="ghost" data-testid="all-sets" onClick={() => void goHome()}>
 				‹ Sets
 			</button>
-			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })} title="Downloaded songs">
+			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })}>
 				Library
 			</button>
 			{renaming ? (
@@ -182,19 +184,19 @@ export function TopBar() {
 					}}
 				/>
 			) : (
-				<div className="set-name" data-testid="set-name" title="Click to rename. Every change is kept as you go." onClick={() => setRenaming(true)}>
+				<div className="set-name" data-testid="set-name" onClick={() => setRenaming(true)}>
 					{name}
 				</div>
 			)}
 			<BpmField />
 			<div className="transport">
-				<button className="ghost icon" data-testid="to-start" onClick={() => engine.seek(0)} title="Back to start (Home)">
+				<button className="ghost icon" data-testid="to-start" onClick={() => engine.seek(0)}>
 					<svg viewBox="0 0 16 16" width="14" height="14">
 						<rect x="2" y="3" width="2" height="10" fill="currentColor" />
 						<path d="M14 3v10L5 8z" fill="currentColor" />
 					</svg>
 				</button>
-				<button className={`play${playing ? " on" : ""}`} data-testid="play" onClick={() => engine.toggle()} title="Play / stop (Space)">
+				<button className={`play${playing ? " on" : ""}`} data-testid="play" onClick={() => engine.toggle()}>
 					{playing ? (
 						<svg viewBox="0 0 16 16" width="14" height="14">
 							<rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor" />
@@ -205,7 +207,7 @@ export function TopBar() {
 						</svg>
 					)}
 				</button>
-				<button className={`ghost icon metro${metronome ? " active" : ""}`} data-testid="metronome" onClick={() => toggleMetronome()} title={`Metronome ${metronome ? "on" : "off"}: a click on every beat, higher on each bar`}>
+				<button className={`ghost icon metro${metronome ? " active" : ""}`} data-testid="metronome" onClick={() => toggleMetronome()}>
 					<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round">
 						<path d="M6 1.75h4l3.25 12.5H2.75z" />
 						<path d="M4.5 10.5h7" />
@@ -222,24 +224,24 @@ export function TopBar() {
 				</div>
 			)}
 			{tempo !== null && tempo.left > 0 && (
-				<div className="working" data-testid="tempo-working" title="Tracks under a tempo change are being stretched to the tempo they play at there. Until one is done it plays at the right speed, with its pitch off.">
+				<div className="working" data-testid="tempo-working">
 					<span className="spinner" />
 					Stretching to tempo changes {Math.round(tempo.pct * 100)}%
 				</div>
 			)}
 			{length > 0 && (
-				<div className="set-length" data-testid="set-length" title="Length of the set, tempo changes included">
+				<div className="set-length" data-testid="set-length">
 					{fmtLength(length)}
 				</div>
 			)}
 			<div className="zoom">
-				<button className="ghost icon" onClick={() => zoomAround(1 / 1.5)} title="Zoom out (⌘−)">
+				<button className="ghost icon" onClick={() => zoomAround(1 / 1.5)}>
 					−
 				</button>
-				<button className="ghost" onClick={zoomToFit} title="Fit the whole set (⌘0)">
+				<button className="ghost" onClick={zoomToFit}>
 					Fit
 				</button>
-				<button className="ghost icon" onClick={() => zoomAround(1.5)} title="Zoom in (⌘=)">
+				<button className="ghost icon" onClick={() => zoomAround(1.5)}>
 					+
 				</button>
 			</div>
@@ -274,7 +276,6 @@ export function Library() {
 							<li
 								key={t.at + label(t)}
 								draggable={!!file}
-								title={file ? "Drag onto a lane, or double-click to add at the playhead" : "No file"}
 								onDragStart={(e) => {
 									if (!file) return;
 									e.dataTransfer.setData("application/x-dj-path", file);
@@ -468,9 +469,9 @@ export function Modals() {
 					title="What is this track's BPM?"
 					detail={item.probe.name}
 					initial={item.probe.rekordboxBpm ? String(item.probe.rekordboxBpm) : item.probe.tagBpm ? String(item.probe.tagBpm) : ""}
-					note={`It will be stretched to ${doc.bpm} BPM. ${item.probe.rekordboxBpm ? "Suggested from Rekordbox, which analysed a different version of this file, so the track is not lined up by its grid." : item.probe.tagBpm ? "Suggested from the file's tag." : "Decimals are fine."}${more > 0 ? ` ${more} more to go.` : ""}`}
-					confirmLabel="Add track"
-					cancelLabel="Skip"
+					note={`${item.edit ? `It opens in the track editor, previewed at ${doc.bpm} BPM; an export uses the original file.` : `It will be stretched to ${doc.bpm} BPM.`} ${item.probe.rekordboxBpm ? "Suggested from Rekordbox, which analysed a different version of this file, so the track is not lined up by its grid." : item.probe.tagBpm ? "Suggested from the file's tag." : "Decimals are fine."}${more > 0 ? ` ${more} more to go.` : ""}`}
+					confirmLabel={item.edit ? "Open in editor" : "Add track"}
+					cancelLabel={item.edit ? "Cancel" : "Skip"}
 					onConfirm={confirmImport}
 					onCancel={skipImport}
 				/>
@@ -611,7 +612,7 @@ export function ClipMenu() {
 		</button>
 	);
 	const x = Math.min(menu.x, window.innerWidth - 230);
-	const y = Math.min(menu.y, window.innerHeight - 310);
+	const y = Math.min(menu.y, window.innerHeight - 340);
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
 			{item("Split at playhead", () => splitAt(beat, [clip.id]), { disabled: !canSplit, hint: "⌘S", testId: "menu-split" })}
@@ -621,6 +622,7 @@ export function ClipMenu() {
 			{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
 			{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
 			<hr />
+			{track && item("Edit", () => openTrackEdit(track.id), { testId: "menu-edit" })}
 			{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}
 			{track && media?.state === "error" && item("Try again", () => retryMedia(track, doc.bpm))}
 			{track && media?.state === "error" && item("Locate file…", () => void relocateTrack(track.id))}

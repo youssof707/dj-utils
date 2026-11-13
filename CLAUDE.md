@@ -16,6 +16,7 @@
   - `editing.e2e.ts`: timeline editing, trimming, marquee, menus, export cancel (Timeline.tsx, Panels.tsx, actions.ts)
   - `tempo.e2e.ts`: tempo changes, ramps (shared/tempo.ts, engine.ts, ramp code in main/planner.ts)
   - `sets.e2e.ts`: stored sets, Home screen, cache clean-up (Home.tsx, set code in main/planner.ts)
+  - `trackedit.e2e.ts`: the track editor in the bottom area, edit export, Settings page (TrackEditor.tsx, trackEdit.ts, main/audio/splice.ts, main/settings.ts); unit: `splice.test.ts`, `trackEdit.test.ts`
   - `rekordbox.e2e.ts` / `rekordbox-library.e2e.ts`: Rekordbox grids and cues (main/rekordbox.ts)
   - `real.e2e.ts`, `stress.e2e.ts`: real-audio and load checks; only when the change is about those
 - E2E screenshots go to `dev-data/shots/` (kept after the run, cleared when the next run starts).

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { Track } from "../shared/types";
 import type { UpdateCheckResult, UpdatePhase, UpdateProgress } from "../shared/updater";
-import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, SetFile, SetInfo, SetView, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
+import type { EditExportRequest, EditExportResult, Settings, ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, SetFile, SetInfo, SetView, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
 
 function on<T>(channel: string, cb: (payload: T) => void): () => void {
 	const fn = (_e: unknown, payload: T): void => cb(payload);
@@ -28,6 +28,11 @@ const api = {
 	chooseExport: (defaultName: string): Promise<string | null> => ipcRenderer.invoke("planner:choose-export", defaultName),
 	exportSet: (req: ExportRequest): Promise<ExportResult> => ipcRenderer.invoke("planner:export", req),
 	cancelExport: (): Promise<void> => ipcRenderer.invoke("planner:export-cancel"),
+	// Writes an edited track into the export folder, as the source's own samples rearranged.
+	exportEdit: (req: EditExportRequest): Promise<EditExportResult> => ipcRenderer.invoke("planner:export-edit", req),
+	getSettings: (): Promise<Settings> => ipcRenderer.invoke("settings:get"),
+	setSettings: (patch: Partial<Settings>): Promise<Settings> => ipcRenderer.invoke("settings:set", patch),
+	chooseFolder: (): Promise<string | null> => ipcRenderer.invoke("settings:choose-folder"),
 	// Sets live in the app's own storage; nothing here ever asks where to put a file.
 	listSets: (): Promise<SetInfo[]> => ipcRenderer.invoke("planner:sets-list"),
 	openSet: (id: string): Promise<SetFile> => ipcRenderer.invoke("planner:set-open", id),

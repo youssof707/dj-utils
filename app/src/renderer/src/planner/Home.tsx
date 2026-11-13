@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { SetInfo } from "@shared/planner";
 import { newSet, openSet, renameSet } from "./actions";
 import { fmtLength, NameEdit } from "./Panels";
+import { openSettings } from "./Settings";
 import { store, useStore } from "./store";
 
 function fmtWhen(at: number): string {
@@ -65,9 +66,14 @@ export function Home() {
 			<div className="home-inner">
 				<div className="home-head">
 					<h1>Your sets</h1>
-					<button className="primary" data-testid="new-set" onClick={() => void newSet({ askName: true })}>
-						New set
-					</button>
+					<div className="home-actions">
+						<button className="ghost" data-testid="open-settings" onClick={openSettings}>
+							Settings
+						</button>
+						<button className="primary" data-testid="new-set" onClick={() => void newSet({ askName: true })}>
+							New set
+						</button>
+					</div>
 				</div>
 				{sets.length === 0 ? (
 					<p className="muted home-empty" data-testid="home-empty">

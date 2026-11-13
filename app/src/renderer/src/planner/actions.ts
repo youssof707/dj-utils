@@ -3,6 +3,8 @@
 import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type SetView, type TempoBlock } from "@shared/planner";
 import { fitFades } from "@shared/fades";
 import { blocksToPoints } from "@shared/tempo";
+import { stopEditPreview } from "./editPlayer";
+import { openTrackEditWith } from "./trackEdit";
 import { engine } from "./engine";
 import { forgetMedia, mediaFor, workingCount } from "./media";
 import { errorText, newId, store, toast, type ImportItem, type State } from "./store";
@@ -67,6 +69,25 @@ export async function importPaths(paths: string[], lane: number, beat: number | 
 	}
 }
 
+// Opens an audio file in the track editor without adding it to the set. Its grid comes from
+// the set if it is in it already, then from Rekordbox or an exported edit's own tag; only a
+// file with none of those asks for its BPM.
+export async function openFileInEditor(p: string): Promise<void> {
+	try {
+		const known = store.get().doc.tracks.filter((t) => t.sourcePath === p);
+		if (known.length > 0) {
+			openTrackEditWith(known.find((t) => t.downbeatSec !== undefined) ?? known[0]);
+			return;
+		}
+		const probe = await window.api.probe(p);
+		const grid = probe.rekordbox;
+		if (grid) openTrackEditWith({ id: newId("t"), sourcePath: probe.path, name: probe.name, bpm: grid.bpm, durationSec: probe.durationSec, downbeatSec: grid.downbeatSec });
+		else enqueue({ probe, lane: 0, beat: null, edit: true });
+	} catch (e) {
+		toast(`${p.split("/").pop()}: ${errorText(e)}`);
+	}
+}
+
 // Files land in the order they were dropped: one that is waiting for its BPM holds back
 // the ones behind it, which then follow on from where it ends up.
 function enqueue(item: ImportItem): void {
@@ -79,7 +100,8 @@ function placeReady(): void {
 		const [head, ...rest] = store.get().importQueue;
 		if (!head || !("track" in head)) return;
 		store.set({ importQueue: rest });
-		placeTrack(head.track, head.lane, head.beat);
+		if (head.edit) openTrackEditWith(head.track);
+		else placeTrack(head.track, head.lane, head.beat);
 	}
 }
 
@@ -108,7 +130,8 @@ export function confirmImport(bpm: number): void {
 	if (!item || !("probe" in item)) return;
 	store.set({ importQueue: rest });
 	const track: PlannerTrack = { id: newId("t"), sourcePath: item.probe.path, name: item.probe.name, bpm, durationSec: item.probe.durationSec };
-	placeTrack(track, item.lane, item.beat);
+	if (item.edit) openTrackEditWith(track);
+	else placeTrack(track, item.lane, item.beat);
 	placeReady();
 }
 
@@ -125,14 +148,22 @@ export function skipImport(): void {
 const cuesAsked = new Set<string>();
 let cueWork: Promise<void> = Promise.resolve();
 
+// The files whose cue points are shown: the set's tracks and the one open in the track editor.
+function cuePaths(): Set<string> {
+	const s = store.get();
+	const paths = new Set(s.doc.tracks.map((t) => t.sourcePath));
+	if (s.trackEdit) paths.add(s.trackEdit.track.sourcePath);
+	return paths;
+}
+
 // Looks up the cue points of the set's tracks, one file at a time: files not asked about
 // yet, or every file when `again` (Rekordbox may have been used since).
 export function refreshCues(again: boolean): void {
-	const paths = [...new Set(store.get().doc.tracks.map((t) => t.sourcePath))].filter((p) => again || !cuesAsked.has(p));
+	const paths = [...cuePaths()].filter((p) => again || !cuesAsked.has(p));
 	for (const p of paths) {
 		cuesAsked.add(p);
 		cueWork = cueWork.then(async () => {
-			if (!store.get().doc.tracks.some((t) => t.sourcePath === p)) {
+			if (!cuePaths().has(p)) {
 				cuesAsked.delete(p); // no longer in the set
 				return;
 			}
@@ -151,10 +182,13 @@ export function refreshCues(again: boolean): void {
 // whenever the window comes back to the front.
 export function watchCues(): void {
 	let tracks = store.get().doc.tracks;
+	let edited = store.get().trackEdit?.track;
 	store.subscribe(() => {
 		const now = store.get().doc.tracks;
-		if (now === tracks) return;
+		const open = store.get().trackEdit?.track;
+		if (now === tracks && open === edited) return;
 		tracks = now;
+		edited = open;
 		refreshCues(false);
 	});
 	window.addEventListener("focus", () => refreshCues(true));
@@ -529,6 +563,7 @@ export async function refreshSets(): Promise<void> {
 
 // Lets go of the set that is open: its sound, its audio in memory, its waveforms.
 function closeSet(): void {
+	stopEditPreview();
 	engine.stop(0);
 	engine.forget();
 	forgetMedia();
@@ -559,7 +594,10 @@ export async function openSet(id: string): Promise<void> {
 
 // Back to the list of sets.
 export async function goHome(): Promise<void> {
-	if (store.get().screen === "home") return;
+	if (store.get().screen !== "editor") {
+		store.set({ screen: "home" });
+		return;
+	}
 	engine.stop();
 	await flushAutoSave();
 	closeSet();

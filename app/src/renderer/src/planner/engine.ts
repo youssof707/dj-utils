@@ -292,7 +292,18 @@ class Engine {
 		return store.get().playing;
 	}
 
+	// The audio context and a cached file's audio, for the track editor's preview, and a hook
+	// it sets so that its preview stops when the set starts playing.
+	onPlay: (() => void) | null = null;
+	audio(): AudioContext {
+		return this.context();
+	}
+	buffer(cachePath: string): Promise<AudioBuffer | null> {
+		return this.load(cachePath);
+	}
+
 	async play(): Promise<void> {
+		this.onPlay?.();
 		const token = ++this.token;
 		this.silence();
 		const ctx = this.context();
