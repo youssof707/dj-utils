@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { Track } from "../shared/types";
+import type { UpdateCheckResult, UpdatePhase, UpdateProgress } from "../shared/updater";
 import type { ExportProgress, ExportRequest, ExportResult, PlannerDoc, Cue, ProbeResult, RampRequest, RekordboxGrid, Session, StretchProgress, StretchRequest, StretchResult } from "../shared/planner";
 
 function on<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -36,6 +37,12 @@ const api = {
 	onStretchProgress: (cb: (p: StretchProgress) => void): (() => void) => on("planner:stretch-progress", cb),
 	onExportProgress: (cb: (p: ExportProgress) => void): (() => void) => on("planner:export-progress", cb),
 	onMenu: (cb: (action: string) => void): (() => void) => on("planner:menu", cb),
+
+	checkForUpdate: (): Promise<UpdateCheckResult> => ipcRenderer.invoke("updater:check"),
+	installUpdate: (downloadUrl: string): Promise<void> => ipcRenderer.invoke("updater:install", downloadUrl),
+	onUpdateMenu: (cb: () => void): (() => void) => on("updater:menu-triggered", cb),
+	onUpdateProgress: (cb: (p: UpdateProgress) => void): (() => void) => on("updater:progress", cb),
+	onUpdateStatus: (cb: (p: { phase: UpdatePhase }) => void): (() => void) => on("updater:status", cb),
 };
 
 contextBridge.exposeInMainWorld("api", api);

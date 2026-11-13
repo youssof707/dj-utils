@@ -3,6 +3,7 @@ import { join } from "path";
 import { electronApp, is } from "@electron-toolkit/utils";
 import { listDownloads } from "../shared/downloadsStore";
 import { buildMenu, setupPlanner } from "./planner";
+import { cleanupDuplicateInstalls, registerUpdaterHandlers } from "./updater";
 
 function createWindow(): void {
 	const win = new BrowserWindow({
@@ -47,7 +48,12 @@ app.whenReady().then(() => {
 	electronApp.setAppUserModelId("com.youssof.dj-utilities");
 	ipcMain.handle("downloads:list", () => listDownloads());
 	setupPlanner();
+	registerUpdaterHandlers();
 	buildMenu();
+	// Remove stray "DJ Utilities 2.app" copies left by Finder or a failed update.
+	if (!is.dev) {
+		void cleanupDuplicateInstalls().catch((err) => console.warn("[updater] startup cleanup failed:", err));
+	}
 	createWindow();
 	app.on("activate", () => {
 		if (BrowserWindow.getAllWindows().length === 0) createWindow();

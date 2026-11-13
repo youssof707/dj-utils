@@ -6,6 +6,7 @@ import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
 import { store, useStore } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
+import { Updater, updateModalOpen } from "./Updater";
 
 function isTyping(): boolean {
 	const el = document.activeElement;
@@ -14,7 +15,7 @@ function isTyping(): boolean {
 
 function modalOpen(): boolean {
 	const s = store.get();
-	return s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDiscard !== null || s.exportUi !== null;
+	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDiscard !== null || s.exportUi !== null;
 }
 
 function menuAction(action: string): void {
@@ -287,6 +288,7 @@ export default function App() {
 			<Modals />
 			<ClipMenu />
 			<Toast />
+			<Updater />
 		</div>
 	);
 }

@@ -1,0 +1,22 @@
+appId: com.youssof.dj-utilities
+productName: DJ Utilities
+# The audio worker is started with `new Worker(<path>/worker.js)`; keep the app
+# unpacked so that path is a real file rather than one inside an asar archive.
+asar: false
+directories:
+  buildResources: build
+  output: dist
+files:
+  - "out/**"
+  - "package.json"
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  category: public.app-category.music
+  # Unsigned build. The in-app updater (src/main/updater.ts) swaps the bundle
+  # itself, so it doesn't need Squirrel.Mac or a signature.
+  identity: null
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}

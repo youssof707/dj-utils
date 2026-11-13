@@ -1,0 +1,82 @@
+name: Release
+
+# Same flow as ground-control: every push to main bumps the minor version,
+# builds the arm64 dmg and publishes it as a GitHub Release. The app's
+# updater (app/src/main/updater.ts) checks releases/latest for that dmg.
+
+on:
+  push:
+    branches: [main]
+
+# Prevent overlapping runs from racing on tag/version pushes.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  release:
+    # macos-latest is Apple Silicon, needed for the arm64 dmg.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Default GITHUB_TOKEN; its pushes won't retrigger workflows.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # package.json lives in app/, not the repo root, so `npm version` won't
+      # commit or tag by itself. Do both by hand.
+      - name: Bump minor version, commit, and tag
+        id: bump
+        run: |
+          npm version minor --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          git add package.json package-lock.json
+          git commit -m "chore(release): v$VERSION [skip ci]"
+          git tag "v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Push commit and tag to main
+        run: git push --follow-tags origin HEAD:main
+
+      - name: Build (electron-vite + electron-builder)
+        # `--publish never`: otherwise electron-builder sees CI and tries to
+        # publish itself. The next step publishes the release.
+        run: |
+          npm run clean
+          npx electron-vite build
+          npx electron-builder --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Create GitHub Release with dmg attached
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: v${{ steps.bump.outputs.version }}
+          generate_release_notes: true
+          files: app/dist/dj-utilities-${{ steps.bump.outputs.version }}-arm64.dmg
