@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PlannerTrack } from "../../src/shared/planner";
-import { barPhase, cutAt, duplicateSections, editSlices, gapOf, initialSections, leadBeat, moveSections, place, removeSections, sectionsFromClips, slideSections, snapBeat, totalBeats, type EditSection } from "../../src/shared/trackEdit";
+import { addCut, barPhase, cutAt, duplicateSections, editSlices, gapOf, initialSections, insertSections, leadBeat, moveSections, piecesOf, place, removeSections, secondOffset, sectionsFromClips, slideSections, snapBeat, totalBeats, type EditSection } from "../../src/shared/trackEdit";
 
 // 120 BPM, so a beat is half a second. The first bar line is 0.6 s in: beat 1.2.
 const track: PlannerTrack = { id: "t", sourcePath: "/x.wav", name: "x", bpm: 120, durationSec: 60.2, downbeatSec: 0.6 };
@@ -244,5 +244,100 @@ describe("track editor sections", () => {
 		]);
 		expect(starts(0.2, s)).toEqual([0.2, 9.2, 13.2, 32.2, 56.2]);
 		expect(sectionsFromClips(track, [], id)).toEqual([]);
+	});
+});
+
+describe("two tracks in the editor", () => {
+	// The edit: 8 beats, 4 beats of silence, 8 beats. A piece of the second track comes in.
+	const edit: EditSection[] = [
+		{ id: "a", startBeat: 0.2, lengthBeat: 8 },
+		{ id: "b", startBeat: 16.2, lengthBeat: 8, gapBeat: 4 },
+	];
+	const piece = (lengthBeat: number): EditSection[] => [{ id: "x", startBeat: 32.2, lengthBeat, src: 1 }];
+
+	it("puts a dropped piece at the nearer end of the section it is dropped on", () => {
+		const before = insertSections(0.2, edit, piece(4), 2, 0.2);
+		expect(ids(before)).toBe("x a b");
+		expect(starts(0.2, before)).toEqual([0.2, 4.2, 16.2]);
+		const after = insertSections(0.2, edit, piece(4), 6, 4.2);
+		expect(ids(after)).toBe("a x b");
+		expect(starts(0.2, after)).toEqual([0.2, 8.2, 16.2]);
+		expect(after[1].src).toBe(1);
+	});
+
+	it("puts a piece dropped on empty space where it is dropped, and only moves what it needs the room of", () => {
+		// It fits the silence: what follows stays.
+		const fits = insertSections(0.2, edit, piece(2), 10, 9.2);
+		expect(ids(fits)).toBe("a x b");
+		expect(starts(0.2, fits)).toEqual([0.2, 9.2, 12.2]);
+		// Too long for it: what follows moves along.
+		expect(starts(0.2, insertSections(0.2, edit, piece(4), 10, 9.2))).toEqual([0.2, 9.2, 13.2]);
+		// It cannot start before the section ahead of it ends.
+		expect(starts(0.2, insertSections(0.2, edit, piece(2), 10, 6.2))).toEqual([0.2, 8.2, 12.2]);
+		// Past the end, with silence before it.
+		const end = insertSections(0.2, edit, piece(4), 30, 24.2);
+		expect(ids(end)).toBe("a b x");
+		expect(starts(0.2, end)).toEqual([0.2, 12.2, 24.2]);
+		// Into an empty edit.
+		expect(starts(0.2, insertSections(0.2, [], piece(4), 3, 2.2))).toEqual([2.2]);
+		expect(insertSections(0.2, edit, [], 3, 2.2)).toBe(edit);
+	});
+
+	it("cuts a track's own lane into pieces on its beat lines without losing any of it", () => {
+		const cuts = addCut(track, addCut(track, [], 48.4), 16.3);
+		expect(cuts.map((c) => Math.round(c * 1e6) / 1e6)).toEqual([16.2, 48.2]);
+		expect(addCut(track, cuts, 16.2)).toBe(cuts);
+		expect(addCut(track, cuts, 0.2)).toBe(cuts);
+		expect(addCut(track, cuts, 500)).toBe(cuts);
+		const pieces = piecesOf(track, cuts);
+		expect(pieces.map((p) => [p.startBeat, p.lengthBeat].map((v) => Math.round(v * 1e6) / 1e6))).toEqual([
+			[0.2, 16],
+			[16.2, 32],
+			[48.2, 72.2],
+		]);
+		expect(piecesOf(plain, [])).toEqual([{ startBeat: 0, lengthBeat: 120 }]);
+	});
+
+	it("lines the second track's bar lines up with the first one's", () => {
+		expect(secondOffset(track, plain)).toBeCloseTo(1.2, 9);
+		expect(secondOffset(plain, track)).toBeCloseTo(2.8, 9);
+		expect(secondOffset(track, track)).toBe(0);
+	});
+
+	it("takes each section's frames from its own track, on the first track's clock", () => {
+		const sr = 48000;
+		const f = (beats: number): number => Math.round(beats * 24000); // 120 BPM
+		const sections = [
+			{ startBeat: 0, lengthBeat: 8 },
+			{ startBeat: 4, lengthBeat: 4, src: 1 },
+			{ startBeat: 8, lengthBeat: 4, src: 1 },
+			{ startBeat: 8, lengthBeat: 8 },
+		];
+		expect(editSlices(0, sections, 120, sr, [f(16), f(12)])).toEqual([
+			{ start: 0, frames: f(8) },
+			{ start: f(4), frames: f(8), src: 1 },
+			{ start: f(8), frames: f(8) },
+		]);
+		// The same place in the two tracks is not the same audio: no joining across them.
+		expect(
+			editSlices(
+				0,
+				[
+					{ startBeat: 0, lengthBeat: 8 },
+					{ startBeat: 8, lengthBeat: 4, src: 1 },
+				],
+				120,
+				sr,
+				[f(16), f(12)],
+			),
+		).toEqual([
+			{ start: 0, frames: f(8) },
+			{ start: f(8), frames: f(4), src: 1 },
+		]);
+		// An edit that opens with the second track has silence where the first one's lead-in was.
+		expect(editSlices(0.5, [{ startBeat: 4.5, lengthBeat: 4, src: 1 }], 120, sr, [f(16), f(12)])).toEqual([
+			{ start: 0, frames: f(0.5), silent: true },
+			{ start: f(4.5), frames: f(4), src: 1 },
+		]);
 	});
 });

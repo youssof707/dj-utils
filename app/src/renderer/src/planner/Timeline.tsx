@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type Cue, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
 import { fadeGain, fitFades } from "@shared/fades";
-import { blocksToPoints, bpmAt, TempoMap } from "@shared/tempo";
+import { blocksToPoints, bpmAt } from "@shared/tempo";
 import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
 import { engine } from "./engine";
 import { clipTempoProgress, mediaFor, type Media } from "./media";
@@ -22,12 +22,6 @@ function snap(beat: number, e: { altKey: boolean }): number {
 }
 const EDGE = 8;
 
-export function fmtTime(sec: number): string {
-	const m = Math.floor(sec / 60);
-	const s = Math.floor(sec % 60);
-	return `${m}:${String(s).padStart(2, "0")}`;
-}
-
 // Grid spacing in beats so lines never crowd: beats, then bars, then groups of bars.
 export function gridStep(pxPerBeat: number, minPx: number): number {
 	for (const beats of [1, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]) if (beats * pxPerBeat >= minPx) return beats;
@@ -46,9 +40,6 @@ function Ruler({ width }: { width: number }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const pxPerBeat = useStore((s) => s.pxPerBeat);
 	const scrollX = useStore((s) => s.scrollX);
-	const doc = useStore((s) => s.doc);
-	// Times are where each bar is heard, tempo changes included.
-	const map = useMemo(() => new TempoMap(tempoPoints(doc), doc.bpm), [doc]);
 
 	useLayoutEffect(() => {
 		const cv = ref.current;
@@ -77,11 +68,9 @@ function Ruler({ width }: { width: number }) {
 			if (major) {
 				g.fillStyle = "#c9cedb";
 				g.fillText(String(Math.floor(b / 4) + 1), x + 4, 3);
-				g.fillStyle = "#7d8496";
-				g.fillText(fmtTime(map.secondsAtBeat(b)), x + 4, 15);
 			}
 		}
-	}, [width, pxPerBeat, scrollX, map]);
+	}, [width, pxPerBeat, scrollX]);
 
 	const onDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;

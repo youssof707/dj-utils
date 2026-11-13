@@ -30,7 +30,7 @@ const SR = 44100;
 const DOWNBEAT = 0.1; // seconds: the track's first beat
 const LEAD = (DOWNBEAT * BPM) / 60; // the same in beats
 const frameAt = (beat: number): number => Math.round(((beat * 60) / BPM) * SR);
-const sections = (): Promise<{ id: string; startBeat: number; lengthBeat: number; gapBeat?: number }[]> => state(h.page, "s => s.trackEdit.sections");
+const sections = (): Promise<{ id: string; startBeat: number; lengthBeat: number; gapBeat?: number; src?: number }[]> => state(h.page, "s => s.trackEdit.sections");
 const setCursor = (beat: number): Promise<unknown> => state(h.page, `s => { window.planner.store.set({ trackEdit: { ...s.trackEdit, cursorBeat: ${beat} } }); return 0; }`);
 
 function audioOf(file: string): { sampleRate: number; bits: number; channels: number; frames: number; data: Buffer } {
@@ -105,8 +105,8 @@ describe("track editor", () => {
 		expect(onBeat(s[1].startBeat)).toBeLessThan(1e-6);
 		await h.page.keyboard.press("Meta+z");
 		expect(await sections()).toHaveLength(3);
-		// A click on the ruler moves the cursor; Cmd+S cuts there.
-		await h.page.getByTestId("edit-ruler").click({ position: { x: 200, y: 10 } });
+		// A click on the edit moves the cursor; Cmd+S cuts there.
+		await h.page.getByTestId("edit-row").click({ position: { x: 200, y: 40 } });
 		const cursor = Number(await h.page.getByTestId("edit-cursor").getAttribute("data-beat"));
 		expect(cursor).toBeGreaterThan(LEAD + 1);
 		expect(onBeat(cursor)).toBeLessThan(1e-3);
@@ -153,14 +153,14 @@ describe("track editor", () => {
 		expect(s.map((x) => x.id)).toEqual(before.map((x) => x.id));
 		expect(s.map((x) => x.gapBeat ?? 0)).toEqual([0, 8, 0]);
 		let now = await out();
-		expect(now[1] - at[1]).toBe(8);
-		expect(now[2] - at[2]).toBe(8);
+		expect(now[1] - at[1]).toBeCloseTo(8, 6);
+		expect(now[2] - at[2]).toBeCloseTo(8, 6);
 		// Option+Left moves it back a beat; the silence before the third section stays put.
 		await h.page.keyboard.press("Alt+ArrowLeft");
 		s = await sections();
 		expect(s.map((x) => x.gapBeat ?? 0)).toEqual([0, 7, 1]);
 		now = await out();
-		expect(now[2] - at[2]).toBe(8);
+		expect(now[2] - at[2]).toBeCloseTo(8, 6);
 		await shot(h.page, "trackedit-02b-silence");
 		// Never earlier than the section before it ends.
 		for (let i = 0; i < 12; i++) await h.page.keyboard.press("Alt+ArrowLeft");
@@ -173,7 +173,7 @@ describe("track editor", () => {
 	it("previews the edit with Space, on its own, and stops when the set plays", async () => {
 		const beat = async (): Promise<number> => Number(await h.page.getByTestId("edit-playhead").getAttribute("data-beat"));
 		const playing = (): Promise<boolean> => state(h.page, "s => s.trackEdit.playing");
-		await h.page.getByTestId("edit-ruler").click({ position: { x: 300, y: 10 } });
+		await h.page.getByTestId("edit-row").click({ position: { x: 300, y: 40 } });
 		await h.page.keyboard.press("Space");
 		await expect.poll(playing).toBe(true);
 		expect(await state(h.page, "s => s.playing")).toBe(false);
@@ -240,13 +240,15 @@ describe("track editor", () => {
 		await shot(h.page, "trackedit-03-back-in-the-set");
 	});
 
-	it("opens an audio file dropped on the editor, with its grid, without adding it to the set", async () => {
+	it("opens an audio file dropped on the empty editor, with its grid, without adding it to the set", async () => {
 		const file = path.join(exportDir, "parent (edit).wav");
 		const tracks = await state<number>(h.page, "s => s.doc.tracks.length");
+		await h.page.getByTestId("edit-close").click();
+		await h.page.getByTestId("track-editor-empty").waitFor();
 		await h.page.evaluate((p) => {
 			const dt = new DataTransfer();
 			dt.setData("application/x-dj-path", p);
-			const el = document.querySelector('[data-testid="track-editor"]')!;
+			const el = document.querySelector('[data-testid="track-editor-empty"]')!;
 			for (const type of ["dragenter", "dragover", "drop"]) el.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true }));
 		}, file);
 		await expect.poll(() => h.page.getByTestId("edit-name").textContent()).toBe("parent (edit)");
@@ -259,6 +261,61 @@ describe("track editor", () => {
 		// Its waveform is made even though no clip uses it.
 		await expect.poll(() => h.page.evaluate(() => document.querySelectorAll(".edit-section .edit-wave").length), { timeout: 60000 }).toBeGreaterThan(0);
 		await expect.poll(() => h.page.getByTestId("edit-play").isEnabled(), { timeout: 60000 }).toBe(true);
+	});
+
+	it("puts a second track on a lane of its own, and its pieces go into the edit", async () => {
+		// The exported edit is open; the parent comes in next to it.
+		const id = await state<string>(h.page, "s => s.doc.tracks.find((t) => t.name === 'parent').id");
+		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
+		await h.page.getByTestId("edit-source-1").waitFor();
+		expect(await h.page.getByTestId("edit-name").textContent()).toBe("parent (edit)");
+		expect(await state<string>(h.page, "s => s.trackEdit.second.name")).toBe("parent");
+		expect(await state(h.page, "s => s.trackEdit.lane")).toBe(1);
+		const before = await sections();
+		// Cuts on the parent's lane, 16 and 32 beats in: three pieces, and the edit as it was.
+		for (const beat of [16, 32]) {
+			await state(h.page, `s => { window.planner.store.set({ trackEdit: { ...s.trackEdit, lane: 1, cursorBeat: ${LEAD + beat} } }); return 0; }`);
+			await h.page.getByTestId("edit-cut").click();
+		}
+		const pieces = h.page.locator('[data-testid="edit-source-1"] [data-testid="edit-piece"]');
+		expect(await pieces.count()).toBe(3);
+		expect(await sections()).toEqual(before);
+		const added = async (): Promise<void> => {
+			const now = await sections();
+			expect(now).toHaveLength(before.length + 1);
+			expect(now[now.length - 1].src).toBe(1);
+			expect(now[now.length - 1].lengthBeat).toBeCloseTo(16, 6);
+			expect(now[now.length - 1].startBeat).toBeCloseTo(LEAD + 16, 6);
+			// The parent's lane shows which stretch of it is in the edit.
+			expect(await h.page.locator('[data-testid="edit-source-1"] .edit-used').count()).toBe(1);
+		};
+		// The middle piece goes on the end of the edit with the button.
+		await pieces.nth(1).click();
+		await h.page.getByTestId("edit-add").click();
+		await added();
+		await h.page.keyboard.press("Meta+z");
+		expect(await sections()).toEqual(before);
+		// And by dragging it down to the end of the edit's lane, which shows where it would land.
+		const from = (await pieces.nth(1).boundingBox())!;
+		const row = (await h.page.getByTestId("edit-row").boundingBox())!;
+		await h.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+		await h.page.mouse.down();
+		await h.page.mouse.move(row.x + row.width - 6, row.y + row.height / 2, { steps: 8 });
+		expect(await h.page.locator(".edit-section.incoming").count()).toBe(1);
+		await h.page.mouse.up();
+		await added();
+		await shot(h.page, "trackedit-07-two-tracks");
+		const out: string = await h.page.evaluate(() => (window as any).planner.exportTrackEdit());
+		expect(fs.existsSync(out)).toBe(true);
+		// Taking the parent out of the editor takes its piece out of the edit.
+		await h.page.getByTestId("edit-remove-1").click();
+		expect(await state(h.page, "s => s.trackEdit.second")).toBeNull();
+		expect(await sections()).toEqual(before);
+		expect(await h.page.getByTestId("edit-source-0").count()).toBe(0);
+		// The parent on its own again, for the tests that follow.
+		await h.page.getByTestId("edit-close").click();
+		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
+		await h.page.getByTestId("edit-section").first().waitFor();
 	});
 
 	it("sends the selected clips of one file to the editor with Cmd+E, cut up and spaced as on the timeline", async () => {
@@ -304,6 +361,8 @@ describe("track editor", () => {
 		await importTrack(h.page, file, 140, 2, 0);
 		await waitReady(h.page);
 		const id = await state<string>(h.page, `s => s.doc.tracks.find((t) => t.sourcePath === ${JSON.stringify(file)}).id`);
+		// On its own: opened next to the track that is open it would only get a lane to take pieces from.
+		await h.page.getByTestId("edit-close").click();
 		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
 		await h.page.getByTestId("edit-section").first().waitFor();
 		await shot(h.page, "trackedit-05-real-track");

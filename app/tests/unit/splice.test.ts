@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { testDir } from "../testdata";
-import { afconvertToWav } from "../../src/main/audio/dsp";
+import { afconvertToWav, RUBBERBAND } from "../../src/main/audio/dsp";
 import { blendWeight, EDGE_SEC, exportEdit, JOIN_SEC, readGridTag, spliceWav } from "../../src/main/audio/splice";
 import { parseWavHeader, WavReader } from "../../src/main/audio/wav";
 import { editSlices, type Slice } from "../../src/shared/trackEdit";
@@ -325,6 +325,74 @@ describe("exporting through the decoder", () => {
 		for (let i = 0; i < x.length; i++) worst = Math.max(worst, Math.abs(x[i] - y[i]));
 		expect(worst).toBeLessThan(2 / 8388608);
 	});
+});
+
+describe("an edit of two tracks", () => {
+	it("cuts pieces of both together in the first track's format, the first track's audio untouched", async () => {
+		const fmt: Fmt = { sampleRate: 48000, bits: 24, channels: 2 };
+		const first = path.join(dir, "two-first.wav");
+		const second = path.join(dir, "two-second.wav");
+		const out = path.join(dir, "two-out.wav");
+		const bpm = 120; // 24000 frames per beat at 48 kHz
+		writePcm(first, fmt, 48000 * 8, noise(31));
+		// Another rate, depth and channel count: a steady tone, so its place in time can be told.
+		writePcm(second, { sampleRate: 44100, bits: 16, channels: 1 }, 44100 * 8, (i) => 0.5 * Math.sin((2 * Math.PI * 440 * i) / 44100));
+		const sections = [
+			{ startBeat: 0, lengthBeat: 4 },
+			{ startBeat: 4, lengthBeat: 4, src: 1 },
+			{ startBeat: 8, lengthBeat: 8 },
+		];
+		const r = await exportEdit({ sourcePath: first, outPath: out, tmpDir: dir, bpm, downbeatSec: 0, leadBeat: 0, sections, second: { sourcePath: second, bpm } });
+		expect(r).toMatchObject({ sampleRate: 48000, bits: 24, channels: 2, frames: 48000 * 8 });
+		const a = pcmOf(first);
+		const b = pcmOf(out);
+		const n = Math.round(JOIN_SEC * 48000);
+		expect(bytes(b, 0, 96000 - n).equals(bytes(a, 0, 96000 - n))).toBe(true);
+		expect(bytes(b, 192000, 384000).equals(bytes(a, 192000, 384000))).toBe(true);
+		// Between them the second track from its beat 4 (2 s in), in both channels, on time.
+		let worst = 0;
+		for (let i = 96000; i < 192000 - n; i += 7) {
+			const want = 0.5 * Math.sin(2 * Math.PI * 440 * (2 + (i - 96000) / 48000));
+			for (const ch of [0, 1]) worst = Math.max(worst, Math.abs(b.frame(i, ch) / 8388607 - want));
+		}
+		expect(worst).toBeLessThan(0.02);
+		expect(readGridTag(out)).toEqual({ bpm, downbeatSec: 0 });
+	});
+
+	it("needs the second track for a section of it", async () => {
+		const first = path.join(dir, "two-first.wav");
+		await expect(exportEdit({ sourcePath: first, outPath: path.join(dir, "two-none.wav"), tmpDir: dir, bpm: 120, leadBeat: 0, sections: [{ startBeat: 0, lengthBeat: 4, src: 1 }] })).rejects.toThrow(/missing/);
+	});
+
+	it.skipIf(!fs.existsSync(RUBBERBAND))(
+		"stretches the second track to the first one's tempo, so its beats land on the grid",
+		async () => {
+			const first = path.join(dir, "tempo-first.wav");
+			const second = path.join(dir, "tempo-second.wav");
+			const out = path.join(dir, "tempo-out.wav");
+			writePcm(first, { sampleRate: 44100, bits: 16, channels: 2 }, 44100 * 4, () => 0);
+			writeClickTrack(second, 100, 12); // a click on every beat, at 100 BPM
+			const sections = [
+				{ startBeat: 0, lengthBeat: 4 },
+				{ startBeat: 4, lengthBeat: 4, src: 1 },
+			];
+			const r = await exportEdit({ sourcePath: first, outPath: out, tmpDir: dir, bpm: 120, leadBeat: 0, sections, second: { sourcePath: second, bpm: 100 } });
+			expect(r).toMatchObject({ sampleRate: 44100, bits: 16, channels: 2, frames: 44100 * 4 });
+			const b = pcmOf(out);
+			const peak = (fromSec: number, toSec: number): number => {
+				let m = 0;
+				for (let i = Math.round(fromSec * 44100); i < Math.min(b.frames, Math.round(toSec * 44100)); i++) m = Math.max(m, Math.abs(b.frame(i)) / 32767);
+				return m;
+			};
+			// At 120 BPM the second track's beats 4 to 7 are heard at 2, 2.5, 3 and 3.5 s.
+			for (const t of [2.5, 3, 3.5]) {
+				expect(peak(t - 0.02, t + 0.03)).toBeGreaterThan(0.2);
+				expect(peak(t - 0.3, t - 0.1)).toBeLessThan(peak(t - 0.02, t + 0.03) / 4);
+			}
+			expect(peak(2, 2.03)).toBeGreaterThan(0.2);
+		},
+		60000,
+	);
 });
 
 // Real tracks from <repo>/store, when there are any: every export is checked sample by

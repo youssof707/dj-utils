@@ -351,12 +351,13 @@ let editExporting = false;
 async function exportEdit(req: EditExportRequest): Promise<EditExportResult> {
 	if (editExporting) throw new Error("An export is already running");
 	if (!AUDIO_EXT.includes(path.extname(req.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.sourcePath)) throw new Error("The source file is missing");
+	if (req.second && (!AUDIO_EXT.includes(path.extname(req.second.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.second.sourcePath))) throw new Error("The second track's file is missing");
 	editExporting = true;
 	try {
 		const dir = exportDir();
 		fs.mkdirSync(dir, { recursive: true });
 		const outPath = editPath(dir, req.name);
-		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, leadBeat: req.leadBeat, sections: req.sections };
+		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, leadBeat: req.leadBeat, sections: req.sections, second: req.second };
 		const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
 		return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };
 	} finally {

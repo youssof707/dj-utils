@@ -365,6 +365,11 @@ function Split({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
 			return SPLIT_DEFAULT;
 		});
 	}, [editing]);
+	// Two tracks side by side need three lanes: the bottom area is given half the height.
+	const lanes = useStore((s) => (s.trackEdit?.second ? 3 : 1));
+	useEffect(() => {
+		if (lanes === 3) setFrac((f) => Math.min(f, 0.5));
+	}, [lanes]);
 
 	const onDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;

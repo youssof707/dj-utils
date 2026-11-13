@@ -153,6 +153,7 @@ function cuePaths(): Set<string> {
 	const s = store.get();
 	const paths = new Set(s.doc.tracks.map((t) => t.sourcePath));
 	if (s.trackEdit) paths.add(s.trackEdit.track.sourcePath);
+	if (s.trackEdit?.second) paths.add(s.trackEdit.second.sourcePath);
 	return paths;
 }
 
@@ -183,12 +184,15 @@ export function refreshCues(again: boolean): void {
 export function watchCues(): void {
 	let tracks = store.get().doc.tracks;
 	let edited = store.get().trackEdit?.track;
+	let second = store.get().trackEdit?.second;
 	store.subscribe(() => {
 		const now = store.get().doc.tracks;
 		const open = store.get().trackEdit?.track;
-		if (now === tracks && open === edited) return;
+		const other = store.get().trackEdit?.second;
+		if (now === tracks && open === edited && other === second) return;
 		tracks = now;
 		edited = open;
+		second = other;
 		refreshCues(false);
 	});
 	window.addEventListener("focus", () => refreshCues(true));

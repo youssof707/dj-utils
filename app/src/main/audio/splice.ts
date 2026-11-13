@@ -5,7 +5,8 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { editSlices, type Slice, type Span } from "../../shared/trackEdit";
+import { editSlices, srcOf, type Slice, type Span } from "../../shared/trackEdit";
+import { stretchFile } from "./dsp";
 import { parseWavHeader, type WavInfo } from "./wav";
 
 // At a join the audio blends, over this long and ending exactly on the join, from the end of
@@ -69,20 +70,25 @@ function isPcm(info: WavInfo): boolean {
 }
 
 // Writes `slices` of the integer PCM WAV at `srcPath`, one after the other, to `outPath` in
-// the same sample rate, bit depth and channel count.
-export function spliceWav(srcPath: string, outPath: string, slices: Slice[], tag: GridTag | null): SpliceResult {
-	const src = fs.openSync(srcPath, "r");
+// the same sample rate, bit depth and channel count. With several source files (a slice's
+// `src` says which) they must all be in the same format.
+export function spliceWav(srcPath: string | string[], outPath: string, slices: Slice[], tag: GridTag | null): SpliceResult {
+	const fds: number[] = [];
 	let out: number | null = null;
 	try {
-		const info = parseWavHeader(src);
+		for (const p of Array.isArray(srcPath) ? srcPath : [srcPath]) fds.push(fs.openSync(p, "r"));
+		const infos = fds.map((fd) => parseWavHeader(fd));
+		const info = infos[0];
 		if (!isPcm(info)) throw new Error(`Unsupported WAV encoding (format ${info.format}, ${info.bits} bit)`);
+		if (infos.some((i) => i.format !== info.format || i.bits !== info.bits || i.channels !== info.channels || i.sampleRate !== info.sampleRate)) throw new Error("The tracks are not in the same audio format");
 		const bps = info.bits / 8;
 		const frameBytes = bps * info.channels;
 		for (const s of slices) {
 			if (!Number.isInteger(s.frames) || s.frames <= 0) throw new Error("A section lies outside the track");
-			if (!s.silent && (!Number.isInteger(s.start) || s.start < 0 || s.start + s.frames > info.frames)) throw new Error("A section lies outside the track");
+			if (!s.silent && (!infos[srcOf(s)] || !Number.isInteger(s.start) || s.start < 0 || s.start + s.frames > infos[srcOf(s)].frames)) throw new Error("A section lies outside the track");
 		}
-		const at = (frame: number): number => info.dataOffset + frame * frameBytes;
+		// Reads `frames` frames of a slice's source file into `buf`.
+		const read = (of: Slice, buf: Buffer, frames: number, frame: number): void => readFully(fds[srcOf(of)], buf, frames * frameBytes, infos[srcOf(of)].dataOffset + frame * frameBytes);
 		const joinFrames = Math.max(1, Math.round(JOIN_SEC * info.sampleRate));
 		const edgeFrames = Math.max(1, Math.round(EDGE_SEC * info.sampleRate));
 		out = fs.openSync(outPath, "w");
@@ -109,7 +115,7 @@ export function spliceWav(srcPath: string, outPath: string, slices: Slice[], tag
 					b.fill(0);
 					const from = Math.max(0, next.start - tail);
 					const have = next.start - from;
-					if (have > 0) readFully(src, b.subarray((tail - have) * frameBytes), have * frameBytes, at(from));
+					if (have > 0) read(next, b.subarray((tail - have) * frameBytes), have, from);
 					for (let k = 0; k < tail; k++) {
 						const w = blendWeight(k, tail);
 						for (let c = 0; c < info.channels; c++) {
@@ -125,12 +131,12 @@ export function spliceWav(srcPath: string, outPath: string, slices: Slice[], tag
 			const end = s.start + s.frames;
 			// The last frames of the slice are blended: towards the next slice's lead-up at a
 			// join, towards silence where the file ends before the track does.
-			const joined = next ? next.silent || next.start !== end : end < info.frames;
+			const joined = next ? next.silent || srcOf(next) !== srcOf(s) || next.start !== end : end < infos[srcOf(s)].frames;
 			const tail = joined ? Math.min(joinFrames, s.frames) : 0;
 			const head = i === 0 && s.start > 0 ? Math.min(edgeFrames, s.frames - tail) : 0;
 
 			if (head > 0) {
-				readFully(src, a, head * frameBytes, at(s.start));
+				read(s, a, head, s.start);
 				for (let k = 0; k < head; k++) {
 					const w = blendWeight(k, head);
 					for (let c = 0; c < info.channels; c++) {
@@ -147,21 +153,21 @@ export function spliceWav(srcPath: string, outPath: string, slices: Slice[], tag
 			const bodyEnd = end - tail;
 			while (frame < bodyEnd) {
 				const n = Math.min(chunkFrames, bodyEnd - frame);
-				readFully(src, copy, n * frameBytes, at(frame));
+				read(s, copy, n, frame);
 				writeFully(out!, copy, n * frameBytes, pos);
 				pos += n * frameBytes;
 				frame += n;
 			}
 
 			if (tail > 0) {
-				readFully(src, a, tail * frameBytes, at(bodyEnd));
+				read(s, a, tail, bodyEnd);
 				b.fill(0);
 				// What led up to the next slice in the source (silence before the file's start);
 				// with silence next, the section fades out.
 				if (next && !next.silent) {
 					const from = Math.max(0, next.start - tail);
 					const have = next.start - from;
-					if (have > 0) readFully(src, b.subarray((tail - have) * frameBytes), have * frameBytes, at(from));
+					if (have > 0) read(next, b.subarray((tail - have) * frameBytes), have, from);
 				}
 				for (let k = 0; k < tail; k++) {
 					const w = blendWeight(k, tail);
@@ -193,7 +199,7 @@ export function spliceWav(srcPath: string, outPath: string, slices: Slice[], tag
 		writeFully(out, pcmHeader(info, dataBytes, pos), 44, 0);
 		return { frames: dataBytes / frameBytes, sampleRate: info.sampleRate, bits: info.bits, channels: info.channels };
 	} finally {
-		fs.closeSync(src);
+		for (const fd of fds) fs.closeSync(fd);
 		if (out !== null) fs.closeSync(out);
 	}
 }
@@ -278,24 +284,70 @@ async function sourcePcm(sourcePath: string, dir: string): Promise<string> {
 	return pcm;
 }
 
-export type EditExportJob = { sourcePath: string; outPath: string; tmpDir: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: Span[] };
+function wavInfo(file: string): WavInfo {
+	const fd = fs.openSync(file, "r");
+	try {
+		return parseWavHeader(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+// The second track of an edit as integer PCM in the first one's format and at its tempo, so
+// the two can be cut together: converted to that sample rate, channel count and bit depth,
+// and stretched (pitch kept) when its tempo is another. A file that already is all that is
+// used as it stands.
+async function matchedPcm(sourcePath: string, dir: string, like: WavInfo, fromBpm: number, toBpm: number): Promise<string> {
+	const out = path.join(dir, "second.wav");
+	const convert = async (from: string, to: string, format: string): Promise<void> => {
+		try {
+			await run("/usr/bin/afconvert", ["-f", "WAVE", "-d", format, "-c", String(like.channels), from, to]);
+		} catch {
+			throw new Error("This file could not be read as audio");
+		}
+	};
+	if (Math.abs(fromBpm - toBpm) < 1e-9) {
+		if (/\.wav$/i.test(sourcePath)) {
+			try {
+				const info = wavInfo(sourcePath);
+				if (isPcm(info) && info.bits === like.bits && info.channels === like.channels && info.sampleRate === like.sampleRate) return sourcePath;
+			} catch {
+				// not a WAV we can read ourselves: let the system decoder try
+			}
+		}
+		await convert(sourcePath, out, `LEI${like.bits}@${like.sampleRate}`);
+		return out;
+	}
+	// Stretched as floating point, so nothing clips or is rounded on the way.
+	const float = path.join(dir, "second-float.wav");
+	const stretched = path.join(dir, "second-stretched.wav");
+	await convert(sourcePath, float, `LEF32@${like.sampleRate}`);
+	await stretchFile(float, stretched, fromBpm, toBpm);
+	await convert(stretched, out, `LEI${like.bits}@${like.sampleRate}`);
+	return out;
+}
+
+// `second`: the other track of a two-track edit, which the sections with `src` 1 come from.
+// The result is in the first track's format and at its tempo (`bpm`).
+export type EditExportJob = { sourcePath: string; outPath: string; tmpDir: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: Span[]; second?: { sourcePath: string; bpm: number } };
 
 export async function exportEdit(job: EditExportJob): Promise<SpliceResult & { seconds: number }> {
 	const dir = await fs.promises.mkdtemp(path.join(job.tmpDir, "dj-edit-"));
 	const part = `${job.outPath}.part`;
 	try {
 		const pcm = await sourcePcm(job.sourcePath, dir);
-		const fd = fs.openSync(pcm, "r");
-		let info: WavInfo;
-		try {
-			info = parseWavHeader(fd);
-		} finally {
-			fs.closeSync(fd);
+		const info = wavInfo(pcm);
+		const sources = [pcm];
+		const frames = [info.frames];
+		if (job.sections.some((s) => srcOf(s) !== 0)) {
+			if (!job.second || job.sections.some((s) => srcOf(s) > 1)) throw new Error("A section's track is missing");
+			sources.push(await matchedPcm(job.second.sourcePath, dir, info, job.second.bpm, job.bpm));
+			frames.push(wavInfo(sources[1]).frames);
 		}
-		const slices = editSlices(job.leadBeat, job.sections, job.bpm, info.sampleRate, info.frames);
+		const slices = editSlices(job.leadBeat, job.sections, job.bpm, info.sampleRate, frames);
 		if (slices.length === 0) throw new Error("There is nothing to export");
 		const tag: GridTag = job.downbeatSec === undefined ? { bpm: job.bpm } : { bpm: job.bpm, downbeatSec: job.downbeatSec };
-		const r = spliceWav(pcm, part, slices, tag);
+		const r = spliceWav(sources, part, slices, tag);
 		await fs.promises.rename(part, job.outPath);
 		return { ...r, seconds: r.frames / r.sampleRate };
 	} finally {

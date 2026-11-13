@@ -113,7 +113,9 @@ export type ExportProgress = { stage: string; pct: number };
 // An edited track to write out: the lead-in (the first `leadBeat` beats of the file), then
 // these stretches of the track one after the other. Beats are the track's own, at `bpm`.
 // The file is named after `name` and goes in the export folder from the settings.
-export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: { startBeat: number; lengthBeat: number; gapBeat?: number }[] };
+// `second` is the other track of a two-track edit: the sections with `src` 1 are stretches of
+// it, in its own beats. The file is at the first track's tempo, the second stretched to it.
+export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: { startBeat: number; lengthBeat: number; gapBeat?: number; src?: number }[]; second?: { sourcePath: string; bpm: number } };
 export type EditExportResult = { path: string; seconds: number; sampleRate: number; bits: number; channels: number };
 
 export type Settings = { exportDir: string };

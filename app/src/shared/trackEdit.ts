@@ -1,18 +1,23 @@
-// The track editor's model: one track cut into sections that play one after the other.
-// Positions are in the track's own beats. Each section may have silence before it, a whole
-// number of beats; where a section lands in the result is the sum of the lengths and the
-// silences before it, so sections can never overlap and the grid always lines up.
+// The track editor's model: one track, or two, cut into sections that play one after the
+// other. Positions are in the beats of the track a section comes from. Each section may have
+// silence before it, a whole number of beats; where a section lands in the result is the sum
+// of the lengths and the silences before it, so sections can never overlap and the grid
+// always lines up. With two tracks the result plays at the first one's tempo.
 
 import { firstBarBeat, trackBeats, type PlannerTrack } from "./planner";
 
 // A stretch of the source track: where it starts in the track and how long it is, and how
-// many beats of silence come before it in the result.
-export type Span = { startBeat: number; lengthBeat: number; gapBeat?: number };
+// many beats of silence come before it in the result. `src` says which of the editor's tracks
+// it is a stretch of: the first when left out, 1 for the second.
+export type Span = { startBeat: number; lengthBeat: number; gapBeat?: number; src?: number };
 export type EditSection = Span & { id: string };
 // A section in the result: `outBeat` is where it starts there, counted from the file start.
 export type Placed<T extends Span> = { section: T; outBeat: number; lengthBeat: number };
-// Frames of the source file, for the export, or `frames` of silence.
-export type Slice = { start: number; frames: number; silent?: boolean };
+// Frames of a source file (the first when `src` is left out), for the export, or `frames` of
+// silence.
+export type Slice = { start: number; frames: number; silent?: boolean; src?: number };
+
+export const srcOf = (s: { src?: number }): number => s.src ?? 0;
 
 const EPS = 1e-6;
 
@@ -32,6 +37,13 @@ export function barPhase(t: PlannerTrack): number {
 	if (bar === null) return 0;
 	const phase = bar - Math.floor(bar / 4) * 4;
 	return phase > 4 - EPS ? 0 : phase;
+}
+
+// With two tracks side by side: how many beats later than the first the second one is drawn
+// (and heard, on its own lane), so that its bar lines fall on the first one's. Under a bar.
+export function secondOffset(first: PlannerTrack, second: PlannerTrack): number {
+	const d = (((barPhase(first) - barPhase(second)) % 4) + 4) % 4;
+	return d > 4 - EPS ? 0 : d;
 }
 
 // The whole track after its lead-in, as one section.
@@ -205,21 +217,76 @@ export function slideSections(sections: EditSection[], ids: string[], by: number
 	return next.every((s, i) => s === sections[i]) ? sections : next;
 }
 
+// Puts new sections into the result where they are dropped. `pointerBeat` is the place in the
+// result the drop points at and `startBeat` where the first new section would start. Dropped
+// on a section, they go to the nearer end of it and what follows moves along. Dropped on
+// empty space (silence, or past the end) they start at `startBeat`, as close as the section
+// before allows, and the section after stays where it is unless they need its room.
+export function insertSections(lead: number, sections: EditSection[], added: EditSection[], pointerBeat: number, startBeat: number): EditSection[] {
+	if (added.length === 0) return sections;
+	const fresh = added.map((s, i) => (i === 0 ? withGap(s, 0) : s));
+	const placed = place(lead, sections);
+	const over = placed.find((p) => pointerBeat >= p.outBeat && pointerBeat < p.outBeat + p.lengthBeat);
+	if (over) {
+		const i = sections.indexOf(over.section);
+		if (pointerBeat - over.outBeat >= over.lengthBeat / 2) return [...sections.slice(0, i + 1), ...fresh, ...sections.slice(i + 1)];
+		// Before it: they land where it started, and it follows straight on.
+		fresh[0] = withGap(fresh[0], gapOf(over.section));
+		return [...sections.slice(0, i), ...fresh, withGap(over.section, 0), ...sections.slice(i + 1)];
+	}
+	const next = placed.find((p) => p.outBeat > pointerBeat);
+	const before = next ? placed[placed.indexOf(next) - 1] : placed[placed.length - 1];
+	const from = before ? before.outBeat + wholeBeats(before.lengthBeat) : lead;
+	const gap = Math.max(0, Math.round(startBeat - from));
+	fresh[0] = withGap(fresh[0], gap);
+	if (!next) return [...sections, ...fresh];
+	const end = from + gap + fresh.reduce((n, s, i) => n + (i === 0 ? 0 : gapOf(s)) + wholeBeats(s.lengthBeat), 0);
+	const i = sections.indexOf(next.section);
+	return [...sections.slice(0, i), ...fresh, withGap(next.section, Math.max(0, Math.round(next.outBeat - end))), ...sections.slice(i + 1)];
+}
+
+// A track laid out whole, as the editor shows it to take pieces from: the stretches between
+// the cut marks, from its first beat to its end. `cuts` are in the track's own beats.
+export function piecesOf(t: PlannerTrack, cuts: number[]): { startBeat: number; lengthBeat: number }[] {
+	const lead = leadBeat(t);
+	const total = trackBeats(t);
+	const marks = [...new Set(cuts.filter((c) => c > lead + EPS && c < total - EPS))].sort((a, b) => a - b);
+	const edges = [lead, ...marks, total];
+	const out: { startBeat: number; lengthBeat: number }[] = [];
+	for (let i = 0; i + 1 < edges.length; i++) if (edges[i + 1] - edges[i] > EPS) out.push({ startBeat: edges[i], lengthBeat: edges[i + 1] - edges[i] });
+	return out;
+}
+
+// The cut marks with one more at `beat`, moved to the track's nearest beat line. Unchanged
+// when there is one there already, or the place is not inside the track.
+export function addCut(t: PlannerTrack, cuts: number[], beat: number): number[] {
+	const lead = leadBeat(t);
+	const at = lead + Math.round(beat - lead);
+	if (at <= lead + EPS || at >= trackBeats(t) - EPS || cuts.some((c) => Math.abs(c - at) < EPS)) return cuts;
+	return [...cuts, at].sort((a, b) => a - b);
+}
+
 // The frames of the source file that make up the result, in order: the lead-in, then each
 // section. Every cut lands on the frame nearest its beat in the result, so rounding never
 // adds up along the file. Sections that follow each other in the source as well are joined
 // into one slice: a cut that was never moved leaves the audio exactly as it was.
-export function editSlices(lead: number, sections: Span[], bpm: number, sampleRate: number, sourceFrames: number): Slice[] {
+export function editSlices(lead: number, sections: Span[], bpm: number, sampleRate: number, sourceFrames: number | number[]): Slice[] {
 	const frameAt = (beat: number): number => Math.round(((beat * 60) / bpm) * sampleRate);
+	const framesOf = (src: number): number => (Array.isArray(sourceFrames) ? (sourceFrames[src] ?? 0) : src === 0 ? sourceFrames : 0);
 	const out: Slice[] = [];
-	let outFrame = Math.min(frameAt(lead), sourceFrames);
-	if (outFrame > 0) out.push({ start: 0, frames: outFrame });
-	let sourceEnd = lead; // where in the track the audio so far ends
+	const placed = place(lead, sections);
+	// The lead-in is the first track's. An edit that opens with the other track has silence there.
+	const ownLead = placed.length === 0 || srcOf(placed[0].section) === 0;
+	let outFrame = ownLead ? Math.min(frameAt(lead), framesOf(0)) : frameAt(lead);
+	if (outFrame > 0) out.push(ownLead ? { start: 0, frames: outFrame } : { start: 0, frames: outFrame, silent: true });
+	let sourceEnd = ownLead ? lead : NaN; // where in its track the audio so far ends
+	let endSrc = 0;
 	// The track's length in beats comes from a decode at another sample rate, so its end can
 	// miss the file's last frame by a hair. A result that ends there takes the file to its end.
 	const slack = Math.ceil(sampleRate * 0.005);
-	const placed = place(lead, sections);
 	for (const p of placed) {
+		const src = srcOf(p.section);
+		const have = framesOf(src);
 		// Silence before the section.
 		const silence = frameAt(p.outBeat) - outFrame;
 		if (silence > 0 && gapOf(p.section) > 0) {
@@ -228,15 +295,16 @@ export function editSlices(lead: number, sections: Span[], bpm: number, sampleRa
 			sourceEnd = NaN;
 		}
 		const last = out[out.length - 1];
-		const follows = Math.abs(p.section.startBeat - sourceEnd) < EPS;
-		const start = Math.min(sourceFrames, last && follows ? last.start + last.frames : follows && !last ? outFrame : frameAt(p.section.startBeat));
-		let frames = Math.min(frameAt(p.outBeat + p.lengthBeat) - outFrame, sourceFrames - start);
-		if (p === placed[placed.length - 1] && sourceFrames - (start + frames) <= slack) frames = sourceFrames - start;
+		const follows = src === endSrc && Math.abs(p.section.startBeat - sourceEnd) < EPS;
+		const start = Math.min(have, last && follows ? last.start + last.frames : follows && !last ? outFrame : frameAt(p.section.startBeat));
+		let frames = Math.min(frameAt(p.outBeat + p.lengthBeat) - outFrame, have - start);
+		if (p === placed[placed.length - 1] && have - (start + frames) <= slack) frames = have - start;
 		if (frames <= 0) continue;
 		if (last && follows) last.frames += frames;
-		else out.push({ start, frames });
+		else out.push(src ? { start, frames, src } : { start, frames });
 		outFrame += frames;
 		sourceEnd = p.section.startBeat + p.lengthBeat;
+		endSrc = src;
 	}
 	return out;
 }

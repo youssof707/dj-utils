@@ -15,15 +15,22 @@ export type ExportUi = { phase: "options" } | { phase: "running"; stage: string;
 
 export type MenuUi = { x: number; y: number; clipId: string } | null;
 
-// The track open in the editor at the bottom of the window. `track` is the track as it was
-// when it was opened; `sections` play one after the other (see @shared/trackEdit).
-export type TrackEditUi = {
-	track: PlannerTrack;
-	sections: EditSection[];
-	past: EditSection[][];
-	future: EditSection[][];
-	selection: string[]; // section ids
-	cursorBeat: number; // where a cut goes and where the preview starts, in beats of the result
+// A lane of the track editor: the result ("out"), or with two tracks open the lane a track
+// is laid out whole in, to take pieces from (0 the first track, 1 the second).
+export type EditLane = "out" | 0 | 1;
+
+// What undo steps through in the track editor. `track` is the track as it was when it was
+// opened, and `second` the one opened next to it, if any; `sections` play one after the other
+// (see @shared/trackEdit), and `cuts` are the cut marks on each track's own lane, in its beats.
+export type EditSnap = { track: PlannerTrack; second: PlannerTrack | null; sections: EditSection[]; cuts: [number[], number[]] };
+
+// The editor at the bottom of the window. The result plays at the first track's tempo.
+export type TrackEditUi = EditSnap & {
+	past: EditSnap[];
+	future: EditSnap[];
+	lane: EditLane; // the lane clicked last: the cursor, the selection, cuts and play are its
+	selection: string[]; // ids of sections of the result, or of pieces of a track's lane
+	cursorBeat: number; // where a cut goes and where the preview starts, in beats along the ruler
 	pxPerBeat: number; // 0: zoomed so that the whole edit fits the panel
 	scrollX: number;
 	width: number; // of the panel, as measured
