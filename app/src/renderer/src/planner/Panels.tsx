@@ -4,7 +4,7 @@ import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat } from "@shared/tempo";
 import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, importPaths, toggleMetronome, newSet, openExport, openSet, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, runExport, saveSet, setProjectBpm, setTrackBpm, skipImport, splitAt, zoomAround, zoomToFit } from "./actions";
 import { engine } from "./engine";
-import { mediaFor, retryMedia, workingCount } from "./media";
+import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
 
 function fmtClock(sec: number): string {
@@ -27,7 +27,7 @@ function Position() {
 	useEffect(() => {
 		let raf = 0;
 		let last = "";
-		// The time is where the playhead is heard in the export, tempo changes included.
+		// The time is where the playhead is heard, tempo changes included.
 		let mapDoc: PlannerDoc | null = null;
 		let map: TempoMap | null = null;
 		const frame = (): void => {
@@ -49,7 +49,7 @@ function Position() {
 		raf = requestAnimationFrame(frame);
 		return () => cancelAnimationFrame(raf);
 	}, []);
-	return <div className="position" ref={ref} data-testid="position" title="Bar.beat, and time in the exported file (tempo changes included)" />;
+	return <div className="position" ref={ref} data-testid="position" title="Bar.beat, and time into the set (tempo changes included)" />;
 }
 
 function BpmField() {
@@ -71,7 +71,7 @@ function BpmField() {
 		setText(String(store.get().doc.bpm));
 	};
 	return (
-		<label className="bpm-field" title="Project BPM. Every track is stretched to this tempo.">
+		<label className="bpm-field" title="Project BPM: the tempo the set starts at. Tempo changes take it from there.">
 			<span>BPM</span>
 			<input
 				data-testid="project-bpm"
@@ -109,7 +109,9 @@ export function TopBar() {
 	const libraryOpen = useStore((s) => s.libraryOpen);
 	const metronome = useStore((s) => s.metronome);
 	useStore((s) => s.mediaRev);
+	useStore((s) => s.progressRev);
 	const working = workingCount(doc);
+	const tempo = working > 0 ? null : tempoProgress(doc);
 	const name = filePath ? filePath.split("/").pop()!.replace(/\.djset$/, "") : "Untitled set";
 	useEffect(() => {
 		document.title = `${name}${dirty ? " (edited)" : ""}`;
@@ -160,8 +162,14 @@ export function TopBar() {
 					Stretching {working} track{working === 1 ? "" : "s"}
 				</div>
 			)}
+			{tempo !== null && tempo.left > 0 && (
+				<div className="working" data-testid="tempo-working" title="Tracks under a tempo change are being stretched to the tempo they play at there. Until one is done it plays at the right speed, with its pitch off.">
+					<span className="spinner" />
+					Stretching to tempo changes {Math.round(tempo.pct * 100)}%
+				</div>
+			)}
 			{length > 0 && (
-				<div className="set-length" data-testid="set-length" title="Length of the exported file, tempo changes included">
+				<div className="set-length" data-testid="set-length" title="Length of the set, tempo changes included">
 					{fmtLength(length)}
 				</div>
 			)}

@@ -1,13 +1,37 @@
-// Playback. Every clip is one buffer source started at a fixed offset from a shared start
-// time on the audio clock, so clips stay in sync by construction. There is no live
-// stretching. Any change while playing throws the schedule away and rebuilds it.
+// Playback. Every clip is played by buffer sources started at fixed offsets from a shared
+// start time on the audio clock, so clips stay in sync by construction. There is no live
+// stretching: a clip under a tempo change is played in pieces, each from a file rendered at
+// the tempo of that part of the set (see media.ts). A document change while playing throws
+// the schedule away and rebuilds it; newly ready audio is swapped in without a break.
 
-import { LANES, SAMPLE_RATE } from "@shared/planner";
-import { mediaFor } from "./media";
+import { clipPieces } from "@shared/pieces";
+import { JOIN_FADE_SEC, LANES, SAMPLE_RATE } from "@shared/planner";
+import type { TempoMap } from "@shared/tempo";
+import { pieceSource, tempoMap } from "./media";
 import { store } from "./store";
 
-type Item = { id: string; lane: number; cachePath: string; start: number; offset: number; dur: number };
+// One piece of a clip. Times are seconds on the set's clock, tempo changes included.
+type Item = {
+	id: string;
+	lane: number;
+	cachePath: string;
+	start: number;
+	dur: number;
+	offset: number; // seconds into the file at `start`
+	// How fast the file runs at the piece's start and end (it moves between them the way the
+	// tempo does). 1 for a file rendered for this piece; otherwise a stand-in file is being
+	// sped up or slowed down to fit.
+	rateA: number;
+	rateB: number;
+	lead: number; // fades in over this long before `start`, across the join with the piece before
+	fadeOut: number; // fades out over this long before its end, under the next piece's fade-in
+};
 
+type Voice = { src: AudioBufferSourceNode; gain: GainNode; sig: string; endAt: number };
+
+const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}`;
+
+const SWAP_SEC = 0.03; // crossfade when a better rendering replaces one that is sounding
 const LOOKAHEAD = 20; // seconds ahead of the playhead that get loaded and scheduled
 const KEEP_BEHIND = 5;
 const KEEP_AHEAD = 90;
@@ -89,7 +113,8 @@ class Engine {
 	private metroNextBeat = 0; // next whole beat whose click hasn't been scheduled
 	private buffers = new Map<string, AudioBuffer>();
 	private loading = new Map<string, Promise<AudioBuffer | null>>();
-	private sources = new Map<string, AudioBufferSourceNode>();
+	private sources = new Map<string, Voice>();
+	private map: TempoMap = tempoMap(store.get().doc); // the tempo curve of the schedule now playing
 	private items: Item[] = [];
 	private token = 0;
 	private t0 = 0; // audio-clock time at which `startSec` is heard
@@ -97,7 +122,8 @@ class Engine {
 	private endSec = 0;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private running = false;
-	tap: ((ctx: AudioContext, master: AudioNode) => void) | null = null;
+	// For tests: taps the music after the limiter, and the metronome on its own.
+	tap: ((ctx: AudioContext, master: AudioNode, metronome: AudioNode) => void) | null = null;
 
 	private context(): AudioContext {
 		if (!this.ctx) {
@@ -118,27 +144,48 @@ class Engine {
 			this.metroGain = new GainNode(this.ctx, { gain: store.get().metronome ? 1 : 0 });
 			this.metroGain.connect(this.ctx.destination);
 			this.clickBufs = [makeClick(false), makeClick(true)];
-			if (this.tap) this.tap(this.ctx, limiter);
+			if (this.tap) this.tap(this.ctx, limiter, this.metroGain);
 		}
 		return this.ctx;
 	}
 
-	private secPerBeat(): number {
-		return 60 / store.get().doc.bpm;
-	}
-
 	private buildItems(): Item[] {
 		const { doc } = store.get();
-		const spb = 60 / doc.bpm;
+		const map = tempoMap(doc);
 		const tracks = new Map(doc.tracks.map((t) => [t.id, t]));
 		const out: Item[] = [];
 		for (const c of doc.clips) {
-			const m = mediaFor(tracks.get(c.trackId), doc.bpm);
-			if (m?.state !== "ready") continue;
-			const offset = c.offsetBeat * spb;
-			const dur = Math.min(c.lengthBeat * spb, m.frames / SAMPLE_RATE - offset);
-			if (dur <= 0) continue;
-			out.push({ id: c.id, lane: c.lane, cachePath: m.cachePath, start: c.startBeat * spb, offset, dur });
+			const track = tracks.get(c.trackId);
+			if (!track) continue;
+			let prev: Item | null = null;
+			clipPieces(c, track, map).forEach((p, i) => {
+				const src = pieceSource(track, p);
+				const start = map.secondsAtBeat(p.fromBeat);
+				let dur = map.secondsAtBeat(p.toBeat) - start;
+				const before = prev;
+				prev = null;
+				if (!src) return;
+				let offset: number;
+				let rateA = 1;
+				let rateB = 1;
+				let room: number; // seconds of audio in the file before the piece
+				if (src.exact) {
+					offset = src.offsetSec;
+					room = src.leadSec;
+					dur = Math.min(dur, src.frames / SAMPLE_RATE - offset);
+				} else {
+					offset = (p.trackBeat * 60) / src.fileBpm;
+					rateA = p.bpmA / src.fileBpm;
+					rateB = p.bpmB / src.fileBpm;
+					room = offset / rateA;
+				}
+				if (dur <= 0) return;
+				const lead = before ? Math.max(0, Math.min(JOIN_FADE_SEC, room, before.dur)) : 0;
+				if (before) before.fadeOut = lead;
+				const item: Item = { id: `${c.id}:${i}`, lane: c.lane, cachePath: src.cachePath, start, dur, offset, rateA, rateB, lead, fadeOut: 0 };
+				out.push(item);
+				prev = item;
+			});
 		}
 		return out;
 	}
@@ -198,11 +245,10 @@ class Engine {
 	// lands exactly on its click. Bar downbeats (every 4 beats from beat 0) are brighter.
 	private scheduleClicks(now: number): void {
 		const ctx = this.ctx!;
-		const spb = this.secPerBeat();
-		const until = (now + METRO_AHEAD) / spb;
+		const until = this.map.beatAtSeconds(now + METRO_AHEAD);
 		for (; this.metroNextBeat <= until; this.metroNextBeat++) {
 			const b = this.metroNextBeat;
-			const when = this.t0 + (b * spb - this.startSec);
+			const when = this.t0 + (this.map.secondsAtBeat(b) - this.startSec);
 			if (when < ctx.currentTime + 0.005) continue;
 			const src = new AudioBufferSourceNode(ctx, { buffer: this.clickBufs![b % 4 === 0 ? 1 : 0] });
 			src.connect(this.metroGain!);
@@ -215,15 +261,15 @@ class Engine {
 		}
 	}
 
-	// Current playhead in seconds of project time.
-	positionSec(): number {
-		if (!this.running || !this.ctx) return store.get().playheadBeat * this.secPerBeat();
-		const latency = this.ctx.outputLatency || 0;
-		return Math.max(this.startSec, this.startSec + (this.ctx.currentTime - latency - this.t0));
+	// Current playhead in seconds on the set's clock.
+	private positionSec(): number {
+		const latency = this.ctx!.outputLatency || 0;
+		return Math.max(this.startSec, this.startSec + (this.ctx!.currentTime - latency - this.t0));
 	}
 
 	positionBeat(): number {
-		return this.positionSec() / this.secPerBeat();
+		if (!this.running || !this.ctx) return store.get().playheadBeat;
+		return this.map.beatAtSeconds(this.positionSec());
 	}
 
 	isPlaying(): boolean {
@@ -234,19 +280,62 @@ class Engine {
 		const token = ++this.token;
 		this.silence();
 		const ctx = this.context();
-		const from = store.get().playheadBeat * this.secPerBeat();
+		const map = tempoMap(store.get().doc);
+		const from = map.secondsAtBeat(store.get().playheadBeat);
 		this.items = this.buildItems();
 		this.endSec = this.items.reduce((m, it) => Math.max(m, it.start + it.dur), 0);
 		store.set({ playing: true });
 		const first = this.items.filter((it) => it.start + it.dur > from && it.start < from + 2);
 		await Promise.all([ctx.resume(), ...first.map((it) => this.load(it.cachePath))]);
 		if (token !== this.token) return;
+		this.map = map;
 		this.startSec = from;
 		this.t0 = ctx.currentTime + 0.08;
 		this.running = true;
-		this.metroNextBeat = Math.ceil(from / this.secPerBeat() - 1e-6);
+		this.metroNextBeat = Math.ceil(map.beatAtSeconds(from) - 1e-6);
 		this.tick(token);
 		this.timer = setInterval(() => this.tick(token), 200);
+	}
+
+	// Starts one piece no earlier than `earliest` on the audio clock: from its beginning if
+	// that is still ahead, otherwise part-way in, still locked to the shared clock.
+	private launch(it: Item, buf: AudioBuffer, earliest: number, swapIn: boolean): Voice | null {
+		const ctx = this.ctx!;
+		const startAt = this.t0 + (it.start - this.startSec);
+		const endAt = startAt + it.dur;
+		let when = Math.max(startAt - it.lead, earliest);
+		if (when >= endAt - 0.002) return null;
+		const late = when > startAt - it.lead;
+		// The file's speed follows the tempo, which moves exponentially in time along a ramp.
+		const g = it.rateA !== it.rateB ? Math.log(it.rateB / it.rateA) / it.dur : 0;
+		const rel = when - startAt;
+		let offset = it.offset + (rel <= 0 || g === 0 ? rel * it.rateA : (it.rateA * Math.expm1(g * rel)) / g);
+		if (offset < 0) {
+			when += -offset / it.rateA;
+			offset = 0;
+		}
+		const src = new AudioBufferSourceNode(ctx, { buffer: buf });
+		if (it.rateA !== 1 || it.rateB !== 1) {
+			const now = rel <= 0 ? it.rateA : it.rateA * Math.exp(g * rel);
+			src.playbackRate.value = now;
+			src.playbackRate.setValueAtTime(now, Math.max(when, startAt));
+			if (g !== 0) src.playbackRate.exponentialRampToValueAtTime(it.rateB, endAt);
+		}
+		const gain = new GainNode(ctx, { gain: 1 });
+		const fadedIn = late ? (swapIn ? when + SWAP_SEC : when) : startAt;
+		if (fadedIn > when) {
+			gain.gain.setValueAtTime(0, when);
+			gain.gain.linearRampToValueAtTime(1, fadedIn);
+		}
+		const fadeFrom = Math.max(fadedIn, endAt - it.fadeOut);
+		if (fadeFrom < endAt) {
+			gain.gain.setValueAtTime(1, fadeFrom);
+			gain.gain.linearRampToValueAtTime(0, endAt);
+		}
+		src.connect(gain).connect(this.laneGains[it.lane] ?? this.master!);
+		src.start(when, offset);
+		src.stop(endAt);
+		return { src, gain, sig: sigOf(it), endAt };
 	}
 
 	private tick(token: number): void {
@@ -263,43 +352,32 @@ class Engine {
 				});
 				continue;
 			}
-			let when = this.t0 + (it.start - this.startSec);
-			let offset = it.offset;
-			let dur = it.dur;
-			const earliest = ctx.currentTime + 0.03;
-			if (when < earliest) {
-				// Already under way: join in mid-clip, still locked to the shared clock.
-				const late = earliest - when;
-				when = earliest;
-				offset += late;
-				dur -= late;
-			}
-			if (dur <= 0) continue;
-			const src = new AudioBufferSourceNode(ctx, { buffer: buf });
-			src.connect(this.laneGains[it.lane] ?? this.master);
-			src.start(when, offset, dur);
-			this.sources.set(it.id, src);
+			const v = this.launch(it, buf, ctx.currentTime + 0.03, false);
+			if (v) this.sources.set(it.id, v);
 		}
 		this.scheduleClicks(now);
 		this.evict(now, this.items);
 		if (now > this.endSec + 0.3 && now > this.startSec + 0.3) {
-			const endBeat = this.endSec / this.secPerBeat();
+			const endBeat = this.map.beatAtSeconds(this.endSec);
 			this.stop(Math.max(endBeat, store.get().playheadBeat));
 		}
+	}
+
+	private drop(v: Voice): void {
+		try {
+			v.src.stop();
+		} catch {
+			// not started yet
+		}
+		v.src.disconnect();
+		v.gain.disconnect();
 	}
 
 	private silence(): void {
 		clearInterval(this.timer);
 		this.timer = undefined;
 		this.running = false;
-		for (const s of this.sources.values()) {
-			try {
-				s.stop();
-			} catch {
-				// not started yet
-			}
-			s.disconnect();
-		}
+		for (const v of this.sources.values()) this.drop(v);
 		this.sources.clear();
 		for (const c of this.clicks) {
 			try {
@@ -366,13 +444,58 @@ class Engine {
 		}
 	}
 
+	// Audio became ready (or failed) and the document is as it was. Pieces that have not
+	// started yet simply use what is there now. A piece that is sounding and now has a better
+	// file is crossfaded over to it, once that file is loaded, at the same place in the music.
+	refreshMedia(): void {
+		if (!store.get().playing) {
+			this.warm();
+			return;
+		}
+		if (!this.running || !this.ctx) {
+			this.refresh();
+			return;
+		}
+		const ctx = this.ctx;
+		const token = this.token;
+		this.items = this.buildItems();
+		this.endSec = this.items.reduce((m, it) => Math.max(m, it.start + it.dur), 0);
+		const byId = new Map(this.items.map((it) => [it.id, it]));
+		for (const [id, old] of this.sources) {
+			const it = byId.get(id);
+			if (it && sigOf(it) === old.sig) continue;
+			if (!it) {
+				this.drop(old);
+				this.sources.delete(id);
+				continue;
+			}
+			if (old.endAt < ctx.currentTime + 0.1) continue; // all but over
+			void this.load(it.cachePath).then((buf) => {
+				// Only if nothing else has changed this piece meanwhile.
+				if (!buf || token !== this.token || this.sources.get(id) !== old || this.items.find((x) => x.id === id) !== it) return;
+				const at = ctx.currentTime + 0.05;
+				const v = this.launch(it, buf, at, true);
+				if (!v) return;
+				old.gain.gain.cancelAndHoldAtTime(at);
+				old.gain.gain.linearRampToValueAtTime(0, at + SWAP_SEC);
+				old.src.stop(at + SWAP_SEC);
+				old.src.onended = () => {
+					old.src.disconnect();
+					old.gain.disconnect();
+				};
+				this.sources.set(id, v);
+			});
+		}
+		this.tick(token);
+	}
+
 	// While stopped, load what sits under and just after the playhead so play starts at once.
 	private warmTimer: ReturnType<typeof setTimeout> | undefined;
 	warm(): void {
 		clearTimeout(this.warmTimer);
 		this.warmTimer = setTimeout(() => {
 			if (store.get().playing) return;
-			const from = store.get().playheadBeat * this.secPerBeat();
+			const from = tempoMap(store.get().doc).secondsAtBeat(store.get().playheadBeat);
 			const items = this.buildItems();
 			for (const it of items) if (it.start + it.dur > from && it.start < from + LOOKAHEAD) void this.load(it.cachePath);
 			this.evict(from, items);

@@ -63,8 +63,23 @@ export type ProbeResult = {
 	rekordboxBpm: number | null;
 };
 
+// `projectBpm` is the tempo the file is stretched to: the project BPM, or the tempo that a
+// tempo change settles on for the clips that play there.
 export type StretchRequest = { sourcePath: string; bpm: number; projectBpm: number };
 export type StretchResult = { cachePath: string; frames: number };
+
+// A stretch of a track that plays while the tempo is moving, rendered with the tempo change
+// in it and the pitch held. `fromBeat` and `lengthBeat` are in the track's own beats; the
+// tempo goes from `bpmA` to `bpmB` over them, linearly in beats.
+export type RampRequest = { sourcePath: string; bpm: number; fromBeat: number; lengthBeat: number; bpmA: number; bpmB: number };
+
+// Where two renderings of a clip meet, the next one fades in over this long, ending on the
+// join, so the beat that sits on the join comes from one rendering only. A rendered ramp
+// starts this long before the ramp itself, with the audio just before it at the starting
+// tempo (silence, at the very start of a track).
+export const JOIN_FADE_SEC = 0.02;
+// Audio rendered on each side of a ramp and thrown away, so the ramp's own edges are clean.
+export const RAMP_PAD_FRAMES = SAMPLE_RATE / 2;
 export type StretchProgress = { key: string; pct: number };
 
 export type ExportClip = { cachePath: string; startFrame: number; offsetFrame: number; frames: number };
@@ -89,6 +104,17 @@ export type Session = {
 
 export function stretchKey(r: StretchRequest): string {
 	return `${r.sourcePath}|${r.bpm}|${r.projectBpm}`;
+}
+
+const r6 = (v: number): number => Math.round(v * 1e6) / 1e6;
+
+// Numbers are rounded so that the same ramp reached by different sums has the same key.
+export function rampRequest(track: PlannerTrack, fromBeat: number, lengthBeat: number, bpmA: number, bpmB: number): RampRequest {
+	return { sourcePath: track.sourcePath, bpm: track.bpm, fromBeat: r6(fromBeat), lengthBeat: r6(lengthBeat), bpmA: r6(bpmA), bpmB: r6(bpmB) };
+}
+
+export function rampKey(r: RampRequest): string {
+	return `ramp|${r.sourcePath}|${r.bpm}|${r.fromBeat}|${r.lengthBeat}|${r.bpmA}|${r.bpmB}`;
 }
 
 export function trackBeats(t: PlannerTrack): number {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, ty
 import type { Session } from "@shared/planner";
 import { autoSave, deleteSelection, duplicateSelection, importPaths, importViaDialog, newSet, nudgeSelection, openExport, openSet, requestNew, requestOpen, runExport, saveSet, selectAll, splitAtPlayhead, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { engine } from "./planner/engine";
-import { initMedia, reconcileMedia } from "./planner/media";
+import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
 import { ClipMenu, Library, Modals, TopBar, Toast } from "./planner/Panels";
 import { store, useStore } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
@@ -165,7 +165,6 @@ function start(): void {
 	if (started) return;
 	started = true;
 	initMedia();
-	let lastDoc = store.get().doc;
 	let lastRev = store.get().rev;
 	let lastMediaRev = store.get().mediaRev;
 	let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -173,17 +172,19 @@ function start(): void {
 	store.subscribe(() => {
 		const s = store.get();
 		if (!s.loaded) return;
-		if (s.doc !== lastDoc) {
-			lastDoc = s.doc;
-			reconcileMedia(s.doc);
-		}
 		if (s.rev !== lastRev || s.mediaRev !== lastMediaRev) {
-			// A committed edit, or newly ready audio: rebuild playback from the playhead.
 			const mediaOnly = s.rev === lastRev;
 			lastRev = s.rev;
 			lastMediaRev = s.mediaRev;
-			if (!mediaOnly || s.playing) engine.refresh();
-			else engine.warm();
+			if (mediaOnly) {
+				// Newly ready audio: playback takes it up without a break.
+				engine.refreshMedia();
+			} else {
+				// A committed edit: get whatever audio it calls for, and rebuild playback from
+				// the playhead.
+				reconcileMedia(s.doc);
+				engine.refresh();
+			}
 		}
 		clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
@@ -224,7 +225,7 @@ function start(): void {
 		engine.warm();
 	});
 	// Handles for the end-to-end tests.
-	(window as unknown as { planner: unknown }).planner = { store, engine, importPaths, saveSet, openSet, newSet, runExport };
+	(window as unknown as { planner: unknown }).planner = { store, engine, importPaths, saveSet, openSet, newSet, runExport, tempoProgress };
 }
 
 // The divider between the timeline and the bottom area; its position is a share of the height and survives restarts.

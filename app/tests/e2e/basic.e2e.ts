@@ -197,7 +197,7 @@ describe("planner", () => {
 		expect(Math.max(...errs) / SR).toBeLessThan(0.003);
 	});
 
-	it("adds tempo changes that change only the export", async () => {
+	it("adds tempo changes, and exports them", async () => {
 		const lane = (await h.page.getByTestId("tempo-lane").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		const tempos = (): Promise<any[]> => state(h.page, "s => s.doc.tempos.map(t => ({ startBeat: t.startBeat, lengthBeat: t.lengthBeat, bpm: t.bpm }))");
@@ -226,7 +226,7 @@ describe("planner", () => {
 		expect(await tempos()).toEqual([{ startBeat: 24, lengthBeat: 32, bpm: 150 }]);
 		await h.page.keyboard.press("Meta+z");
 		expect(await tempos()).toEqual([{ startBeat: 16, lengthBeat: 32, bpm: 150 }]);
-		// playback is untouched: the editor always runs at the project tempo
+		// the project BPM is where the set starts; the changes take it from there
 		expect(await state(h.page, "s => s.doc.bpm")).toBe(128);
 		const pts = blocksToPoints(await state<any[]>(h.page, "s => s.doc.tempos"), 128);
 		expect(pts.map((q) => ({ beat: q.beat, bpm: q.bpm }))).toEqual([

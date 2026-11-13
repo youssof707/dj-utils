@@ -3,7 +3,7 @@ import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, t
 import { blocksToPoints, bpmAt, TempoMap } from "@shared/tempo";
 import { addTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, tempoPoints, toggleMute, toggleSolo, zoomAround } from "./actions";
 import { engine } from "./engine";
-import { mediaFor, type Media } from "./media";
+import { clipTempoProgress, mediaFor, type Media } from "./media";
 import { store, useStore } from "./store";
 
 export const GUTTER = 52;
@@ -45,7 +45,7 @@ function Ruler({ width }: { width: number }) {
 	const pxPerBeat = useStore((s) => s.pxPerBeat);
 	const scrollX = useStore((s) => s.scrollX);
 	const doc = useStore((s) => s.doc);
-	// Times are where each bar is heard in the export, tempo changes included.
+	// Times are where each bar is heard, tempo changes included.
 	const map = useMemo(() => new TempoMap(tempoPoints(doc), doc.bpm), [doc]);
 
 	useLayoutEffect(() => {
@@ -280,9 +280,9 @@ function cueMarks(cues: Cue[] | undefined, track: PlannerTrack | undefined): Cue
 	return out;
 }
 
-type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void };
+type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; tempoPct: number | null; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void };
 
-function ClipView({ clip, track, media, cues, pxPerBeat, scrollX, width, bpm, selected, laneH, onDown }: ClipProps) {
+function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, width, bpm, selected, laneH, onDown }: ClipProps) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const left = clip.startBeat * pxPerBeat - scrollX;
 	const w = Math.max(2, clip.lengthBeat * pxPerBeat);
@@ -370,6 +370,11 @@ function ClipView({ clip, track, media, cues, pxPerBeat, scrollX, width, bpm, se
 			{media?.state === "error" && (
 				<div className="clip-status" style={{ paddingLeft: labelPad }}>
 					{media.message}
+				</div>
+			)}
+			{status === "ready" && tempoPct !== null && (
+				<div className="clip-status" style={{ paddingLeft: labelPad }} data-testid="clip-tempo">
+					Stretching to the new tempo… {Math.round(tempoPct * 100)}%
 				</div>
 			)}
 			{marks.map((m) => {
@@ -633,7 +638,7 @@ function Lanes({ width }: { width: number }) {
 					<TempoView key={t.id} block={t} from={starts.get(t.id) ?? doc.bpm} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} selected={selection.includes(t.id)} onDown={onItemDown} />
 				))}
 				<TempoCurve doc={doc} width={width} pxPerBeat={pxPerBeat} scrollX={scrollX} />
-				{doc.tempos.length === 0 && <div className="tempo-hint">Double-click to add a tempo change. Tempo changes are applied when you export.</div>}
+				{doc.tempos.length === 0 && <div className="tempo-hint">Double-click to add a tempo change.</div>}
 				{selTempo && <TempoEditor key={selTempo.id + selTempo.bpm} block={selTempo} />}
 			</div>
 			<div className="clip-lanes" ref={clipLanesRef}>
@@ -644,7 +649,7 @@ function Lanes({ width }: { width: number }) {
 							.filter((c) => c.lane === lane)
 							.map((c) => {
 								const t = tracks.get(c.trackId);
-								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} cues={t && cues[t.sourcePath]} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} laneH={laneH} onDown={onClipDown} />;
+								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} tempoPct={clipTempoProgress(doc, c, t)} cues={t && cues[t.sourcePath]} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} laneH={laneH} onDown={onClipDown} />;
 							})}
 					</div>
 				))}
