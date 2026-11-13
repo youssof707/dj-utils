@@ -637,3 +637,122 @@ describe("export cancel", () => {
 		expect(fs.existsSync(out2)).toBe(true);
 	});
 });
+
+describe("copy and paste", () => {
+	const clipboard = (): Promise<string> => h.app.evaluate(({ clipboard }) => clipboard.readText());
+	const setClipboard = (text: string): Promise<void> => h.app.evaluate(({ clipboard }, t) => clipboard.writeText(t), text);
+	const tempos = (): Promise<any[]> => state(h.page, "s => s.doc.tempos");
+	const newSet = (): Promise<void> => h.page.evaluate(() => (window as any).planner.newSet());
+	const seek = (beat: number): Promise<void> => h.page.evaluate((b) => (window as any).planner.engine.seek(b), beat);
+	const starts = async (): Promise<number[]> => (await clips()).map((c) => c.startBeat).sort((x, y) => x - y);
+
+	it("copies clips and tempo changes as text and pastes them at the playhead of another set", async () => {
+		const kept = await clipboard();
+		try {
+			const a = path.join(h.workDir, "a.wav");
+			const b = path.join(h.workDir, "b.wav");
+			await newSet();
+			await h.page.evaluate(
+				([fa, fb]) => {
+					const p = (window as any).planner;
+					p.store.commit({
+						...p.store.get().doc,
+						tracks: [
+							{ id: "ta", sourcePath: fa, name: "a", bpm: 128, durationSec: 60 },
+							{ id: "tb", sourcePath: fb, name: "b", bpm: 100, durationSec: 60 },
+						],
+						clips: [
+							{ id: "c1", trackId: "ta", lane: 0, startBeat: 8, offsetBeat: 0, lengthBeat: 16, fadeOutBeat: 4 },
+							{ id: "c2", trackId: "tb", lane: 1, startBeat: 40, offsetBeat: 4, lengthBeat: 8, muted: true },
+							{ id: "c3", trackId: "ta", lane: 2, startBeat: 100, offsetBeat: 0, lengthBeat: 8 },
+						],
+						tempos: [
+							{ id: "b1", startBeat: 16, lengthBeat: 8, bpm: 140 },
+							{ id: "b2", startBeat: 300, lengthBeat: 4, bpm: 99 },
+						],
+					});
+					p.store.set({ selection: ["c1", "c2", "b1"] });
+				},
+				[a, b] as const,
+			);
+			// ⌘C puts the selection on the system clipboard as the app's own JSON
+			await setClipboard("something else");
+			await h.page.keyboard.press("Meta+c");
+			await expect.poll(async () => (await clipboard()).slice(0, 40)).toContain('"format":"dj-set-planner/clips"');
+			const text = await clipboard();
+			const snip = JSON.parse(text);
+			expect(snip.version).toBe(1);
+			expect(snip.tracks.map((t: any) => t.sourcePath)).toEqual([a, b]);
+			expect(snip.clips.map((c: any) => c.startBeat)).toEqual([0, 32]);
+			expect(snip.tempos.map((t: any) => t.startBeat)).toEqual([8]);
+			expect((await clips()).length).toBe(3); // copying changes nothing
+
+			// ⌘V in another set, at its playhead
+			await newSet();
+			expect((await clips()).length).toBe(0);
+			await seek(32);
+			await h.page.keyboard.press("Meta+v");
+			await expect.poll(async () => (await clips()).length).toBe(2);
+			expect(await starts()).toEqual([32, 64]);
+			const pasted = await clips();
+			expect(pasted.find((c) => c.startBeat === 32).fadeOutBeat).toBe(4);
+			expect(pasted.find((c) => c.startBeat === 64).muted).toBe(true);
+			expect((await tempos()).map((t) => [t.startBeat, t.lengthBeat, t.bpm])).toEqual([[40, 8, 140]]);
+			expect(await state(h.page, "s => s.doc.tracks.map((t) => t.sourcePath)")).toEqual([a, b]);
+			expect(await state(h.page, "s => s.selection.length")).toBe(3);
+			await shot(h.page, "13-pasted");
+			// the pasted clips get their audio like any others
+			await waitReady(h.page);
+			expect(await h.page.locator('[data-testid="clip"][data-status="error"]').count()).toBe(0);
+
+			// one undo takes the paste back
+			await h.page.keyboard.press("Meta+z");
+			expect((await clips()).length).toBe(0);
+			expect((await tempos()).length).toBe(0);
+
+			// Paste from the Edit menu does the same
+			await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.paste());
+			await expect.poll(async () => (await clips()).length).toBe(2);
+			expect(await starts()).toEqual([32, 64]);
+
+			// a second paste goes on top, reuses the tracks, and its tempo change takes the place of the one there
+			await h.page.keyboard.press("Meta+v");
+			await expect.poll(async () => (await clips()).length).toBe(4);
+			expect(await state(h.page, "s => s.doc.tracks.length")).toBe(2);
+			expect((await tempos()).length).toBe(1);
+			await h.page.keyboard.press("Meta+z");
+
+			// ⌘X copies and removes
+			await setClipboard("something else");
+			await h.page.keyboard.press("Meta+a");
+			await h.page.keyboard.press("Meta+x");
+			await expect.poll(async () => (await clips()).length).toBe(0);
+			expect((await tempos()).length).toBe(0);
+			expect(JSON.parse(await clipboard()).clips.length).toBe(2);
+			// and Copy from the Edit menu, with nothing selected, leaves the clipboard alone
+			const cut = await clipboard();
+			await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.copy());
+			await h.page.waitForTimeout(200);
+			expect(await clipboard()).toBe(cut);
+
+			// any other text on the clipboard pastes nothing
+			await setClipboard("just some text");
+			await h.page.keyboard.press("Meta+v");
+			await setClipboard(JSON.stringify({ ...snip, clips: [{ ...snip.clips[0], trackId: "nope" }] }));
+			await h.page.keyboard.press("Meta+v");
+			await h.page.waitForTimeout(200);
+			expect((await clips()).length).toBe(0);
+
+			// in a text field, paste is the field's own
+			await setClipboard(text);
+			const input = h.page.getByTestId("project-bpm");
+			await input.click();
+			await h.page.keyboard.press("Meta+v");
+			await h.page.waitForTimeout(200);
+			expect((await clips()).length).toBe(0);
+			await input.press("Escape");
+		} finally {
+			await setClipboard(kept);
+		}
+	});
+});

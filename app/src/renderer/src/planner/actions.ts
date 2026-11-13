@@ -2,6 +2,7 @@
 
 import { emptyDoc, firstBarBeat, LANES, SAMPLE_RATE, trackBeats, type Clip, type ExportClip, type PlannerDoc, type PlannerTrack, type SetView, type TempoBlock } from "@shared/planner";
 import { fitFades } from "@shared/fades";
+import { parseSnippet, pasteSnippet, snippetOf } from "@shared/clipboard";
 import { blocksToPoints } from "@shared/tempo";
 import { stopEditPreview } from "./editPlayer";
 import { openTrackEditWith } from "./trackEdit";
@@ -296,6 +297,29 @@ export function duplicateSelection(): void {
 	const copiesT = selT.map((t) => ({ ...t, id: newId("b"), startBeat: t.startBeat + (end - start) }));
 	store.commit({ ...s.doc, clips: [...s.doc.clips, ...copies], tempos: [...s.doc.tempos, ...copiesT] });
 	store.set({ selection: [...copies, ...copiesT].map((c) => c.id) });
+}
+
+// The selected clips and tempo changes as clipboard text; null with nothing selected.
+export function copySelection(): string | null {
+	const s = store.get();
+	const snip = snippetOf(s.doc, s.selection);
+	return snip ? JSON.stringify(snip) : null;
+}
+
+// Pastes clipboard text at the playhead when it is a copy made by this app (see
+// @shared/clipboard), and selects what was pasted. False for any other text.
+export function pasteText(text: string): boolean {
+	const snip = parseSnippet(text);
+	if (!snip) return false;
+	const at = engine.positionBeat();
+	const r = pasteSnippet(store.get().doc, snip, at, newId);
+	store.commit(r.doc);
+	store.set({ selection: r.ids });
+	// The paste is brought into view when the playhead is off screen.
+	const s = store.get();
+	const x = at * s.pxPerBeat - s.scrollX;
+	if (x < 0 || x > s.viewportW - 80) store.set({ scrollX: clampScroll(at * s.pxPerBeat - s.viewportW / 4, s.pxPerBeat) });
+	return true;
 }
 
 export function splitAt(beat: number, onlyIds?: string[]): void {

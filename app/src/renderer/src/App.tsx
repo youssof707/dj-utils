@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { autoSave, deleteSelection, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, copySelection, deleteSelection, pasteText, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { stopEditPreview, toggleEditPreview } from "./planner/editPlayer";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
@@ -256,6 +256,33 @@ function onKey(e: KeyboardEvent): void {
 	}
 }
 
+// ⌘C, ⌘X and ⌘V (and Cut, Copy and Paste in the Edit menu) on the timeline: the selected clips and
+// tempo changes go to the system clipboard as text, and such text is pasted at the playhead.
+// Text fields, dialogs and the track editor keep their own copy and paste.
+function timelineHasClipboard(): boolean {
+	return store.get().screen === "editor" && !isTyping() && !modalOpen() && !editorHasKeys();
+}
+
+function onCopy(e: ClipboardEvent): void {
+	if (!timelineHasClipboard() || !e.clipboardData) return;
+	const text = copySelection();
+	if (text === null) return;
+	e.clipboardData.setData("text/plain", text);
+	e.preventDefault();
+}
+
+// Cut is a copy that then deletes what was copied.
+function onCut(e: ClipboardEvent): void {
+	const before = e.defaultPrevented;
+	onCopy(e);
+	if (!before && e.defaultPrevented) deleteSelection();
+}
+
+function onPaste(e: ClipboardEvent): void {
+	if (!timelineHasClipboard() || !e.clipboardData) return;
+	if (pasteText(e.clipboardData.getData("text/plain"))) e.preventDefault();
+}
+
 let started = false;
 
 // Wires the store to the rest of the app once: media, playback, autosave, menus.
@@ -304,6 +331,9 @@ function start(): void {
 		if (tool) document.body.classList.remove(tool);
 	});
 	window.addEventListener("blur", dropSplitTool);
+	document.addEventListener("copy", onCopy);
+	document.addEventListener("cut", onCut);
+	document.addEventListener("paste", onPaste);
 	// The keys go to the track editor once it is clicked, and back to the timeline on a click
 	// anywhere else.
 	window.addEventListener(
@@ -332,6 +362,8 @@ function start(): void {
 		engine,
 		importPaths,
 		exportClips,
+		copySelection,
+		pasteText,
 		// The tests are written around sets at 128 BPM.
 		newSet: (opts?: { askName?: boolean; bpm?: number }) => newSet({ bpm: 128, ...opts }),
 		openSet,
