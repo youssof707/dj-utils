@@ -178,7 +178,7 @@ export function TopBar() {
 	const length = beats > 0 ? new TempoMap(tempoPoints(doc), doc.bpm).secondsAtBeat(beats) : 0;
 	return (
 		<header className="topbar" data-testid="topbar">
-			<button className="ghost back" data-testid="all-sets" title="All sets" aria-label="All sets" onClick={() => void goHome()}>
+			<button className="ghost back" data-testid="all-sets" aria-label="All sets" onClick={() => void goHome()}>
 				‹
 			</button>
 			<button className={`ghost${libraryOpen ? " on" : ""}`} data-testid="library-toggle" onClick={() => store.set({ libraryOpen: !libraryOpen })}>
@@ -237,7 +237,7 @@ export function TopBar() {
 					{fmtLength(length)}
 				</div>
 			)}
-			<div className="zoom" title="Zoom">
+			<div className="zoom" role="group" aria-label="Zoom">
 				<button className="ghost icon" onClick={() => zoomAround(1 / 1.5)}>
 					−
 				</button>
@@ -251,7 +251,7 @@ export function TopBar() {
 			<button className="primary" data-testid="export" onClick={openExport}>
 				Export
 			</button>
-			<label className="switch" title="Show the cue points on the clips">
+			<label className="switch">
 				<span>Cues</span>
 				<button role="switch" aria-checked={showCues} className={`switch-track${showCues ? " on" : ""}`} data-testid="cues-toggle" onClick={() => store.set({ showCues: !showCues })}>
 					<span className="switch-knob" />

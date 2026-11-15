@@ -2,9 +2,11 @@ import "./paths"; // first: points every data folder at dev-data in dev
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { join } from "path";
 import { electronApp, is } from "@electron-toolkit/utils";
-import { buildMenu, setupPlanner } from "./planner";
+import { buildMenu, registerLibraryScheme, setupPlanner } from "./planner";
 import { setupSettings } from "./settings";
 import { cleanupDuplicateInstalls, registerUpdaterHandlers } from "./updater";
+
+registerLibraryScheme();
 
 // Packaged: copied to Resources by extraResources. Dev: app/build/icon.png.
 const iconPath = app.isPackaged ? join(process.resourcesPath, "icon.png") : join(app.getAppPath(), "build/icon.png");

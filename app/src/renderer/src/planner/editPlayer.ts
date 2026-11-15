@@ -59,6 +59,7 @@ export async function playEditPreview(): Promise<void> {
 	const s = store.get();
 	const e = s.trackEdit;
 	if (!e) return;
+	engine.stopPreviews(stopEditPreview);
 	// What plays, in order. On the result: the lead-in, then each section, with silence where
 	// there is a gap; sections that follow each other in their track as well, with no gap, play
 	// as one stretch. On a track's own lane: that track, as it is.
@@ -151,5 +152,5 @@ export function toggleEditPreview(): void {
 	else void playEditPreview();
 }
 
-// The set starting to play stops the preview.
-engine.onPlay = stopEditPreview;
+// The set starting to play, or the library's preview, stops this preview.
+engine.addPreview(stopEditPreview);

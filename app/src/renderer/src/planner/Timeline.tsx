@@ -237,7 +237,7 @@ function TempoView({ block, from, pxPerBeat, scrollX, width, selected, onDown }:
 			<button
 				className="tempo-switch"
 				data-testid="tempo-switch"
-				title={block.off ? "Turn this tempo change on" : "Turn this tempo change off"}
+				aria-label={block.off ? "Turn this tempo change on" : "Turn this tempo change off"}
 				aria-pressed={!block.off}
 				onPointerDown={(e) => e.stopPropagation()}
 				onDoubleClick={(e) => e.stopPropagation()}

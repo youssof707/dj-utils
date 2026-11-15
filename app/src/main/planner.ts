@@ -1,10 +1,11 @@
 // Main-process side of the set planner: import, stretch cache, export, and the stored sets.
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell, type MenuItemConstructorOptions } from "electron";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { Worker } from "node:worker_threads";
 import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type CueChange, type CueInfo, type CueRow, HOT_CUES, type PlannerDoc, type ProbeResult, type RekordboxGrid, type RekordboxLibrary, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
 import { normalizeDoc, renderingsFor, tempoMapOf } from "../shared/renderings";
@@ -1189,6 +1190,57 @@ export function setupPlanner(): void {
 		if (image.isEmpty()) return;
 		e.sender.startDrag({ file, icon: image });
 	});
+	protocol.handle(LIBRARY_SCHEME, serveLibraryAudio);
+}
+
+// The library panel's preview plays a Rekordbox track's file straight from disk, through
+// library-audio://track/?path=<file>. Only files in the Rekordbox library are served. With
+// &decoded, the file goes through the system decoder first, for formats Chromium cannot play
+// (AIFF, ALAC).
+const LIBRARY_SCHEME = "library-audio";
+
+// Called before the app is ready, as Electron requires.
+export function registerLibraryScheme(): void {
+	protocol.registerSchemesAsPrivileged([{ scheme: LIBRARY_SCHEME, privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true } }]);
+}
+
+const AUDIO_MIME: Record<string, string> = { mp3: "audio/mpeg", m4a: "audio/mp4", mp4: "audio/mp4", aac: "audio/aac", wav: "audio/wav", flac: "audio/flac", ogg: "audio/ogg", aif: "audio/aiff", aiff: "audio/aiff" };
+
+// Answers byte ranges, so the preview can jump anywhere in the track without reading it all.
+async function serveLibraryAudio(req: Request): Promise<Response> {
+	const url = new URL(req.url);
+	const source = url.searchParams.get("path") ?? "";
+	if (!library?.tracks.some((t) => t.available && t.path === source) || !fs.existsSync(source)) {
+		console.error(`Library preview: ${source} is not a file in the Rekordbox library`);
+		return new Response(null, { status: 404 });
+	}
+	let file = source;
+	if (url.searchParams.has("decoded")) {
+		try {
+			file = await decode(source);
+		} catch (e) {
+			console.error(`Library preview: ${source} could not be decoded:`, e);
+			return new Response(null, { status: 415 });
+		}
+	}
+	const size = (await fs.promises.stat(file)).size;
+	if (size === 0) return new Response(null, { status: 404 });
+	const type = AUDIO_MIME[path.extname(file).slice(1).toLowerCase()] ?? "application/octet-stream";
+	const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get("range") ?? "");
+	const partial = !!range && !!(range[1] || range[2]);
+	let start = 0;
+	let end = size - 1;
+	if (partial && range) {
+		if (range[1]) {
+			start = Number(range[1]);
+			if (range[2]) end = Math.min(end, Number(range[2]));
+		} else start = Math.max(0, size - Number(range[2]));
+		if (start > end) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}` } });
+	}
+	const body = Readable.toWeb(fs.createReadStream(file, { start, end })) as unknown as ReadableStream;
+	const headers: Record<string, string> = { "Content-Type": type, "Content-Length": String(end - start + 1), "Accept-Ranges": "bytes" };
+	if (partial) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+	return new Response(body, { status: partial ? 206 : 200, headers });
 }
 
 export function buildMenu(): void {

@@ -3,9 +3,13 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RekordboxLibrary, RekordboxPlaylist, RekordboxTrack } from "@shared/planner";
 import { importPaths } from "./actions";
 import { startLibraryDrag } from "./libraryDrag";
+import { libraryPreviewAt, playLibraryPreview, stopLibraryPreview, toggleLibraryPreview, useLibraryPreview } from "./libraryPreview";
 import { hueVars, keyHue } from "./Timeline";
 import { setTrackKeys } from "./trackKeys";
 import { store, useStore, type LibrarySort } from "./store";
+
+// Where the last press on a row was, to tell a click from the end of a drag.
+let pressedAt: { x: number; y: number } | null = null;
 
 const ROW = 44; // px; every row is the same height, so only the rows in view are drawn
 const SPARE = 6; // rows drawn beyond each edge of the view
@@ -67,6 +71,38 @@ function dragPicture(t: RekordboxTrack): { png: string; scale: number } {
 }
 
 const ALL = "All tracks";
+
+// Along the foot of a row: click anywhere on it to hear the track from there. While it
+// plays, it fills up to where the preview is.
+function PreviewBar({ track, playing }: { track: RekordboxTrack; playing: boolean }) {
+	const fill = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		if (!playing) return;
+		let frame = 0;
+		const step = (): void => {
+			if (fill.current) fill.current.style.width = `${libraryPreviewAt(track.lengthSec) * 100}%`;
+			frame = requestAnimationFrame(step);
+		};
+		step();
+		return () => cancelAnimationFrame(frame);
+	}, [playing, track]);
+	return (
+		<div
+			className="library-bar"
+			data-testid="library-bar"
+			onPointerDown={(e) => {
+				e.stopPropagation();
+				if (e.button !== 0) return;
+				const box = e.currentTarget.getBoundingClientRect();
+				playLibraryPreview(track.path, (e.clientX - box.left) / box.width, track.lengthSec);
+			}}
+			onClick={(e) => e.stopPropagation()}
+			onDoubleClick={(e) => e.stopPropagation()}
+		>
+			<div className="library-bar-line">{playing && <div className="library-bar-fill" data-testid="library-bar-fill" ref={fill} />}</div>
+		</div>
+	);
+}
 
 // The playlist to show: a button that opens a list with its own search.
 function PlaylistPicker({ playlists, chosen, onPick }: { playlists: RekordboxPlaylist[]; chosen: RekordboxPlaylist | null; onPick: (id: string | null) => void }) {
@@ -155,7 +191,6 @@ function PlaylistPicker({ playlists, chosen, onPick }: { playlists: RekordboxPla
 									key={p.id ?? ""}
 									data-testid="playlist-option"
 									className={`${i === at ? "at" : ""}${p.id === (chosen?.id ?? null) ? " chosen" : ""}`}
-									title={p.name}
 									onMouseMove={() => setAt(i)}
 									onClick={() => pick(p.id)}
 								>
@@ -180,6 +215,9 @@ export function Library() {
 	const list = useRef<HTMLDivElement>(null);
 	const search = useRef<HTMLInputElement>(null);
 	const playlistId = useStore((s) => s.libraryPlaylist);
+	const previewing = useLibraryPreview();
+	// Closing the panel stops its preview.
+	useEffect(() => stopLibraryPreview, []);
 	const sort = useStore((s) => s.librarySort);
 
 	// Asked for each time the panel opens, so what was changed in Rekordbox since is there.
@@ -244,7 +282,7 @@ export function Library() {
 	// Choosing the order it is already in turns it round.
 	const sortBy = (by: LibrarySort["by"]): void => store.set({ librarySort: { by, down: sort.by === by ? !sort.down : false } });
 	const sortButton = (by: LibrarySort["by"], label: string, name: string) => (
-		<button className={`${by === "number" ? "no" : by}${sort.by === by ? " on" : ""}`} data-testid={`library-sort-${by}`} title={`Sort by ${name}`} onClick={() => sortBy(by)}>
+		<button className={`${by === "number" ? "no" : by}${sort.by === by ? " on" : ""}`} data-testid={`library-sort-${by}`} aria-label={`Sort by ${name}`} onClick={() => sortBy(by)}>
 			{label}
 			{sort.by === by ? (sort.down ? " ▼" : " ▲") : ""}
 		</button>
@@ -309,14 +347,40 @@ export function Library() {
 								{shown.slice(first, last).map(({ track: t, no }, i) => (
 									<div
 										key={no}
-										className="library-row"
+										className={`library-row${previewing === t.path ? " playing" : ""}`}
 										data-testid="library-row"
 										style={{ top: (first + i) * ROW, height: ROW }}
-										title={t.path}
-										onPointerDown={(e) => startLibraryDrag(e, t.path, () => dragPicture(t))}
-										onDoubleClick={() => add(t)}
+										onPointerDown={(e) => {
+											pressedAt = { x: e.clientX, y: e.clientY };
+											startLibraryDrag(e, t.path, () => dragPicture(t));
+										}}
+										// A click (not the end of a drag, nor the second of a double-click) previews the
+										// track, or stops it; a double-click adds it to the set.
+										onClick={(e) => {
+											if (e.detail > 1 || !pressedAt || Math.hypot(e.clientX - pressedAt.x, e.clientY - pressedAt.y) > 4) return;
+											toggleLibraryPreview(t.path, t.lengthSec);
+										}}
+										onDoubleClick={() => {
+											stopLibraryPreview();
+											add(t);
+										}}
 									>
-										<div className="library-no">{no}</div>
+										<div className="library-no">
+											<span>{no}</span>
+											<button
+												className="library-play"
+												data-testid="library-play"
+												aria-label={previewing === t.path ? "Stop preview" : "Preview"}
+												onPointerDown={(e) => e.stopPropagation()}
+												onDoubleClick={(e) => e.stopPropagation()}
+												onClick={(e) => {
+														e.stopPropagation();
+														toggleLibraryPreview(t.path, t.lengthSec);
+													}}
+											>
+												{previewing === t.path ? "■" : "▶"}
+											</button>
+										</div>
 										<div className="library-names">
 											<div className="library-title">{t.title}</div>
 											<div className="library-artist">{t.artist}</div>
@@ -325,6 +389,7 @@ export function Library() {
 										<div className="library-key" style={hueVars(keyHue(t.key))}>
 												{t.key}
 											</div>
+										<PreviewBar track={t} playing={previewing === t.path} />
 									</div>
 								))}
 							</div>

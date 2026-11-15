@@ -934,6 +934,57 @@ button.play.on {
 	font-variant-numeric: tabular-nums;
 	color: var(--muted);
 }
+.library-play {
+	display: none;
+	padding: 0;
+	background: transparent;
+	color: var(--text);
+	font-size: 11px;
+	line-height: 1;
+}
+.library-row:hover .library-no > span,
+.library-row.playing .library-no > span {
+	display: none;
+}
+.library-row:hover .library-play,
+.library-row.playing .library-play {
+	display: inline;
+}
+.library-row.playing .library-play {
+	color: var(--accent);
+}
+/* the preview bar: from the title to the key, along the foot of the row */
+.library-bar {
+	position: absolute;
+	left: 54px;
+	right: 12px;
+	bottom: 0;
+	height: 9px;
+	cursor: pointer;
+}
+.library-bar-line {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 3px;
+	height: 3px;
+	border-radius: 2px;
+	background: var(--line);
+	overflow: hidden;
+	visibility: hidden;
+}
+.library-row:hover .library-bar-line,
+.library-row.playing .library-bar-line {
+	visibility: visible;
+}
+.library-bar:hover .library-bar-line {
+	background: #3a3f4b;
+}
+.library-bar-fill {
+	height: 100%;
+	width: 0;
+	background: var(--accent);
+}
 .library-list {
 	flex: 1;
 	min-height: 0;

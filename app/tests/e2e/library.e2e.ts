@@ -59,7 +59,7 @@ afterAll(async () => {
 });
 
 const titles = (): Promise<string[]> => h.page.locator("[data-testid=library-row] .library-title").allTextContents();
-const numbers = (): Promise<string[]> => h.page.locator("[data-testid=library-row] .library-no").allTextContents();
+const numbers = (): Promise<string[]> => h.page.locator("[data-testid=library-row] .library-no > span").allTextContents();
 const count = (): Promise<string | null> => h.page.getByTestId("library-count").textContent();
 const options = (): Promise<string[]> => h.page.getByTestId("playlist-option").allTextContents();
 
@@ -69,8 +69,8 @@ describe("the Rekordbox library panel", () => {
 		expect(await numbers()).toEqual(["1", "2", "3", "4", "5"]);
 		expect(await count()).toBe("5 tracks");
 		const rows = h.page.getByTestId("library-row");
-		expect(await rows.nth(0).textContent()).toBe("1BelfastOrbital1288A");
-		expect(await rows.nth(1).textContent()).toBe("2HalcyonOrbital126.52B");
+		expect(await rows.nth(0).textContent()).toBe("1▶BelfastOrbital1288A");
+		expect(await rows.nth(1).textContent()).toBe("2▶HalcyonOrbital126.52B");
 		await shot(h.page, "library-01-all");
 	});
 
@@ -173,6 +173,38 @@ describe("the Rekordbox library panel", () => {
 		await h.page.getByTestId("playlist-option").first().click();
 		expect(await count()).toBe("5 tracks");
 		expect(await state(h.page, "s => s.libraryPlaylist")).toBeNull();
+	});
+
+	it("previews a track from where its bar is clicked, and ▶ / ■ start and stop it", async () => {
+		const row = h.page.getByTestId("library-row").nth(0);
+		const playing = (): Promise<number> => h.page.locator(".library-row.playing").count();
+		const fill = async (): Promise<number> => parseFloat((await h.page.getByTestId("library-bar-fill").evaluate((el) => (el as HTMLElement).style.width)) || "0");
+		await row.hover();
+		const bar = (await row.getByTestId("library-bar").boundingBox())!;
+		await h.page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+		await expect.poll(playing).toBe(1);
+		// half way along the bar is half way into the track
+		await expect.poll(fill).toBeGreaterThan(45);
+		await shot(h.page, "library-05-preview");
+		const button = row.getByTestId("library-play");
+		expect(await button.getAttribute("aria-label")).toBe("Stop preview");
+		await button.click();
+		await expect.poll(playing).toBe(0);
+		// ▶ plays from the start
+		await row.hover();
+		await button.click();
+		await expect.poll(playing).toBe(1);
+		expect(await fill()).toBeLessThan(45);
+		await button.click();
+		await expect.poll(playing).toBe(0);
+		// a click on the row itself plays it too, and a second click stops it
+		await row.locator(".library-title").click();
+		await expect.poll(playing).toBe(1);
+		await h.page.waitForTimeout(400);
+		await row.locator(".library-title").click();
+		await expect.poll(playing).toBe(0);
+		// a preview adds nothing to the set
+		expect(await state(h.page, "s => s.doc.tracks.length")).toBe(0);
 	});
 
 	it("adds a track to the set on a double-click", async () => {

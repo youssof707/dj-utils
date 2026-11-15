@@ -292,9 +292,16 @@ class Engine {
 		return store.get().playing;
 	}
 
-	// The audio context and a cached file's audio, for the track editor's preview, and a hook
-	// it sets so that its preview stops when the set starts playing.
-	onPlay: (() => void) | null = null;
+	// The audio context and a cached file's audio, for the track editor's preview. Previews
+	// (the track editor's, the library's) say how to stop them: one starting stops the others,
+	// and the set starting to play stops them all.
+	private previews = new Set<() => void>();
+	addPreview(stop: () => void): void {
+		this.previews.add(stop);
+	}
+	stopPreviews(except?: () => void): void {
+		for (const stop of this.previews) if (stop !== except) stop();
+	}
 	audio(): AudioContext {
 		return this.context();
 	}
@@ -303,7 +310,7 @@ class Engine {
 	}
 
 	async play(): Promise<void> {
-		this.onPlay?.();
+		this.stopPreviews();
 		const token = ++this.token;
 		this.silence();
 		const ctx = this.context();
