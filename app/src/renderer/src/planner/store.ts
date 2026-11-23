@@ -61,6 +61,7 @@ export type State = {
 	cues: Record<string, Cue[]>; // Rekordbox cue points by source file; looked up, never saved
 	cueEdit: Record<string, boolean>; // whether the file's cues can be changed (it is in Rekordbox)
 	cueWait: CueSpot | null; // "Add hot cue" was chosen here: waiting for its letter to be pressed
+	cueTool: number | null; // a cue button is on: a click on a track puts this cue there (0 memory, 1 to 8 A to H)
 	mediaRev: number; // bumps when a stretched file becomes ready or fails
 	progressRev: number; // bumps while stretch progress changes (repaint only)
 	selection: string[]; // clip and tempo-block ids
@@ -73,8 +74,8 @@ export type State = {
 	playing: boolean;
 	laneMuted: boolean[]; // playback only; never saved with the set
 	soloLane: number | null;
-	metronome: boolean; // playback only; never saved with the set
 	showCues: boolean; // cue points drawn on the timeline's clips; for this session only
+	playlistMode: boolean; // the toolbar under the top bar, with the set's Rekordbox playlist and its Sync button, shows
 	screen: "home" | "editor" | "settings"; // the list of sets, one set open, or the settings
 	settings: Settings | null; // null until first read
 	trackEdit: TrackEditUi | null;
@@ -96,6 +97,9 @@ export type State = {
 	libraryOpen: boolean;
 	libraryPlaylist: string | null; // the Rekordbox playlist the library shows; null for all tracks
 	librarySort: LibrarySort;
+	libraryFilter: LibraryFilter;
+	tagMode: boolean; // tag editor mode: the quick tags show on every library row, one click to add
+	quickTags: string[]; // the tags picked for tag editor mode, by id
 	starred: string[]; // the library tracks starred for the open set, by file; saved with it
 	trackKeys: Record<string, string>; // Rekordbox's key for each file in its library, by path
 	loaded: boolean;
@@ -103,6 +107,9 @@ export type State = {
 
 // What the library is ordered by; `down` is largest first.
 export type LibrarySort = { by: "number" | "key" | "bpm"; down: boolean };
+// Which library tracks are shown: a BPM range (either end may be open) and Camelot keys (none: any).
+export type LibraryFilter = { bpmMin: number | null; bpmMax: number | null; keys: string[] };
+export const NO_FILTER: LibraryFilter = { bpmMin: null, bpmMax: null, keys: [] };
 
 const HISTORY = 300;
 
@@ -114,6 +121,7 @@ let state: State = {
 	cues: {},
 	cueEdit: {},
 	cueWait: null,
+	cueTool: null,
 	mediaRev: 0,
 	progressRev: 0,
 	selection: [],
@@ -126,8 +134,8 @@ let state: State = {
 	playing: false,
 	laneMuted: Array.from({ length: LANES }, () => false),
 	soloLane: null,
-	metronome: false,
 	showCues: true,
+	playlistMode: false,
 	screen: "home",
 	settings: null,
 	trackEdit: null,
@@ -146,9 +154,12 @@ let state: State = {
 	exportUi: null,
 	menu: null,
 	toast: null,
-	libraryOpen: false,
+	libraryOpen: true,
 	libraryPlaylist: null,
 	librarySort: { by: "number", down: false },
+	libraryFilter: NO_FILTER,
+	tagMode: false,
+	quickTags: [],
 	starred: [],
 	trackKeys: {},
 	loaded: false,
@@ -231,7 +242,7 @@ export const store = {
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, trackEdit: null, editFocus: false, starred: [] });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, cueTool: null, trackEdit: null, editFocus: false, starred: [] });
 	},
 };
 

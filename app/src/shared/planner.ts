@@ -79,12 +79,23 @@ export const HOT_CUES = 8; // A to H
 // `key` is in Camelot form (8A, 7B) where Rekordbox's can be read that way, and `keyOrder`
 // then puts keys in the order 1A, 1B, 2A ... 12B; it is null for any other key. `added`
 // counts up in the order tracks were added to Rekordbox. `available` is false when there
-// is no file to load: a streaming track, or a file that is gone.
-export type RekordboxTrack = { id: string; title: string; artist: string; bpm: number; key: string; keyOrder: number | null; lengthSec: number; path: string; available: boolean; added: number };
+// is no file to load: a streaming track, or a file that is gone. `tags` are the ids of its
+// app tags.
+export type RekordboxTrack = { id: string; title: string; artist: string; bpm: number; key: string; keyOrder: number | null; lengthSec: number; path: string; available: boolean; added: number; tags: string[] };
 // A playlist with the folders it sits in as part of its name ("Folder / Playlist"), and
 // its tracks' ids in playlist order.
 export type RekordboxPlaylist = { id: string; name: string; tracks: string[] };
-export type RekordboxLibrary = { tracks: RekordboxTrack[]; playlists: RekordboxPlaylist[] };
+// The tags this app made, which are Rekordbox My Tags in a category of their own
+// (APP_TAG_GROUP), in Rekordbox's order. Rekordbox's other My Tags are left out.
+export const APP_TAG_GROUP = "DJ Utilities";
+export type RekordboxTag = { id: string; name: string };
+// `canTag` is false when this build cannot write to Rekordbox's database.
+export type RekordboxLibrary = { tracks: RekordboxTrack[]; playlists: RekordboxPlaylist[]; tags: RekordboxTag[]; canTag?: boolean };
+// The app's tags a track is to have from now on: these existing ones, and new ones by these
+// names (a tag of the same name already there is used instead). Its other My Tags stay.
+export type TagChange = { contentId: string; keep: string[]; create: { name: string }[] };
+// The track's app tags after the change, and the tags that were made for it.
+export type TagChangeResult = { tags: string[]; created: RekordboxTag[] };
 
 export type ProbeResult = {
 	path: string;
@@ -137,13 +148,23 @@ export type ExportProgress = { stage: string; pct: number };
 export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: { startBeat: number; lengthBeat: number; gapBeat?: number; src?: number }[]; second?: { sourcePath: string; bpm: number } };
 export type EditExportResult = { path: string; seconds: number; sampleRate: number; bits: number; channels: number };
 
-export type Settings = { exportDir: string };
+// `lastSetId`: the set that was open when the app last closed, reopened at launch.
+export type Settings = { exportDir: string; lastSetId: string | null };
 
 // A set as the app stores it. The app keeps every set itself; there are no set files to
 // save or open. `view` is where the timeline was left.
 // `starred`: the library tracks starred for this set, by file, in the order they were starred.
 export type SetView = { pxPerBeat: number; scrollX: number; playheadBeat: number; starred?: string[] };
-export type SetFile = { id: string; name: string; createdAt: number; updatedAt: number; openedAt: number; view: SetView; doc: PlannerDoc };
+// `playlist`: the Rekordbox playlist this set owns (playlist mode), by id. No two sets own
+// the same one; syncing makes it hold exactly the set's tracks.
+export type SetFile = { id: string; name: string; createdAt: number; updatedAt: number; openedAt: number; view: SetView; doc: PlannerDoc; playlist?: string };
+
+// Where a set stands with its Rekordbox playlist. `playlists` are all of Rekordbox's, each
+// with the name of the other set that owns it, if one does. `tracks` is how many of the
+// set's tracks would go in; `missing` names the ones Rekordbox does not have. `synced` is
+// true when the playlist already holds exactly those, in order. `canWrite` is false when
+// this build cannot write to Rekordbox's database. Null when there is no Rekordbox here.
+export type PlaylistStatus = { linked: RekordboxPlaylist | null; playlists: (RekordboxPlaylist & { takenBy?: string })[]; tracks: number; missing: string[]; synced: boolean; canWrite: boolean };
 export type SetInfo = { id: string; name: string; updatedAt: number; tracks: number; lengthSec: number };
 
 export function stretchKey(r: StretchRequest): string {

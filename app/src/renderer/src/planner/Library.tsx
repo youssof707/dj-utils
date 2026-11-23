@@ -1,19 +1,20 @@
 // The library panel: Rekordbox's tracks and playlists, to search, sort and add to the set. Read-only.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { RekordboxLibrary, RekordboxPlaylist, RekordboxTrack } from "@shared/planner";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import type { RekordboxLibrary, RekordboxPlaylist, RekordboxTag, RekordboxTrack, TagChangeResult } from "@shared/planner";
 import { snapBpm } from "@shared/tempo";
-import { importPaths } from "./actions";
 import { startLibraryDrag } from "./libraryDrag";
-import { libraryPreviewAt, playLibraryPreview, stopLibraryPreview, toggleLibraryPreview, useLibraryPreview } from "./libraryPreview";
+import { libraryPreviewAt, playLibraryPreview, stopLibraryPreview, useLibraryPreview } from "./libraryPreview";
 import { hueVars, keyHue } from "./Timeline";
 import { setTrackKeys } from "./trackKeys";
-import { store, useStore, type LibrarySort } from "./store";
+import { NO_FILTER, store, useStore, type LibraryFilter, type LibrarySort } from "./store";
+import { TagModal } from "./TagModal";
+import { plain } from "./text";
 import { VersionChip } from "../VersionChip";
 
 // Where the last press on a row was, to tell a click from the end of a drag.
 let pressedAt: { x: number; y: number } | null = null;
 
-const ROW = 58; // px; every row is the same height, so only the rows in view are drawn
+const ROW = 50; // px; every row is the same height, so only the rows in view are drawn
 const SPARE = 6; // rows drawn beyond each edge of the view
 
 // The panel's width is dragged from its right edge and survives restarts.
@@ -26,14 +27,6 @@ const clampWidth = (w: number): number => Math.min(widthMax(), Math.max(WIDTH_MI
 function savedWidth(): number {
 	const v = Number(localStorage.getItem(WIDTH_KEY));
 	return v > 0 ? clampWidth(v) : WIDTH_DEFAULT;
-}
-
-// Lower case and without accents, so "beyonce" finds "Beyoncé".
-function plain(text: string): string {
-	return text
-		.normalize("NFD")
-		.replace(/[̀-ͯ]/g, "")
-		.toLowerCase();
 }
 
 function fmtBpm(bpm: number): string {
@@ -99,7 +92,7 @@ const ALL = "All tracks";
 
 // Along the foot of a row: click anywhere on it to hear the track from there. While it
 // plays, it fills up to where the preview is.
-function PreviewBar({ track, playing }: { track: RekordboxTrack; playing: boolean }) {
+function PreviewBar({ track, playing, onSelect }: { track: RekordboxTrack; playing: boolean; onSelect: () => void }) {
 	const fill = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		if (!playing) return;
@@ -118,6 +111,7 @@ function PreviewBar({ track, playing }: { track: RekordboxTrack; playing: boolea
 			onPointerDown={(e) => {
 				e.stopPropagation();
 				if (e.button !== 0) return;
+				onSelect();
 				const box = e.currentTarget.getBoundingClientRect();
 				playLibraryPreview(track.path, (e.clientX - box.left) / box.width, track.lengthSec);
 			}}
@@ -230,14 +224,200 @@ function PlaylistPicker({ playlists, chosen, onPick }: { playlists: RekordboxPla
 	);
 }
 
-// One track in the library: click to preview, double-click or drag to add it, and a star
-// that keeps it in the Starred list for this set. `top` places it in the scrolled list; the
-// Starred list stacks its rows instead.
-function TrackRow({ track: t, no, top, previewing, starred, onAdd }: { track: RekordboxTrack; no: number; top?: number; previewing: boolean; starred: boolean; onAdd: (t: RekordboxTrack) => void }) {
+const KEYS = ["A", "B"].map((m) => Array.from({ length: 12 }, (_, i) => `${i + 1}${m}`));
+const filtering = (f: LibraryFilter): boolean => f.bpmMin !== null || f.bpmMax !== null || f.keys.length > 0;
+
+function passes(t: RekordboxTrack, f: LibraryFilter): boolean {
+	if (f.keys.length && !f.keys.includes(t.key.toUpperCase())) return false;
+	if (f.bpmMin === null && f.bpmMax === null) return true;
+	if (!(t.bpm > 0)) return false;
+	const bpm = snapBpm(t.bpm);
+	return (f.bpmMin === null || bpm >= f.bpmMin) && (f.bpmMax === null || bpm <= f.bpmMax);
+}
+
+// A BPM typed in the filter; anything that is not a number leaves that end open.
+const bpmOf = (text: string): number | null => {
+	const n = Number(text.trim());
+	return text.trim() && n > 0 ? n : null;
+};
+
+// Next to the playlist: a filter icon that opens the BPM range and keys to show. While a
+// filter is on, the icon lights up and an X beside it clears it. At its foot, tag editor
+// mode: the tags picked there show hollow on every row, to add with one click.
+function FilterButton({ filter, tags, canTag }: { filter: LibraryFilter; tags: RekordboxTag[]; canTag: boolean }) {
+	const tagMode = useStore((s) => s.tagMode);
+	const quickTags = useStore((s) => s.quickTags);
+	const pickQuick = (id: string): void => store.set({ quickTags: quickTags.includes(id) ? quickTags.filter((x) => x !== id) : [...quickTags, id] });
+	const [open, setOpen] = useState(false);
+	const [min, setMin] = useState("");
+	const [max, setMax] = useState("");
+	const box = useRef<HTMLDivElement>(null);
+	const on = filtering(filter);
+	const set = (f: Partial<LibraryFilter>): void => store.set({ libraryFilter: { ...store.get().libraryFilter, ...f } });
+
+	useEffect(() => {
+		if (!open) return;
+		const down = (e: MouseEvent): void => {
+			if (!box.current?.contains(e.target as Node)) setOpen(false);
+		};
+		const key = (e: KeyboardEvent): void => {
+			if (e.key === "Escape") setOpen(false);
+		};
+		window.addEventListener("mousedown", down, true);
+		window.addEventListener("keydown", key);
+		return () => {
+			window.removeEventListener("mousedown", down, true);
+			window.removeEventListener("keydown", key);
+		};
+	}, [open]);
+
+	const toggle = (): void => {
+		if (!open) {
+			setMin(filter.bpmMin === null ? "" : String(filter.bpmMin));
+			setMax(filter.bpmMax === null ? "" : String(filter.bpmMax));
+		}
+		setOpen(!open);
+	};
+	const pickKey = (k: string): void => set({ keys: filter.keys.includes(k) ? filter.keys.filter((x) => x !== k) : [...filter.keys, k] });
+
+	return (
+		<div className="library-filter-box" ref={box}>
+			<div className={`library-filter${on ? " on" : ""}${open ? " open" : ""}`}>
+				<button data-testid="library-filter" aria-label="Filter" aria-expanded={open} onClick={toggle}>
+					<svg width="13" height="13" viewBox="0 0 24 24" fill={on ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" aria-hidden="true">
+						<path d="M3 4.5h18l-7 8.2V19l-4 2v-8.3z" />
+					</svg>
+				</button>
+				{on && (
+					<button
+						className="library-filter-clear"
+						data-testid="library-filter-clear"
+						aria-label="Clear filter"
+						onClick={() => {
+							store.set({ libraryFilter: NO_FILTER });
+							setMin("");
+							setMax("");
+						}}
+					>
+						<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" aria-hidden="true">
+							<path d="M5 5l14 14M19 5L5 19" />
+						</svg>
+					</button>
+				)}
+			</div>
+			{open && (
+				<div className="filter-menu" data-testid="filter-menu">
+					<div className="filter-bpm">
+						<span className="filter-label">BPM</span>
+						<input
+							data-testid="filter-bpm-min"
+							aria-label="Lowest BPM"
+							inputMode="decimal"
+							placeholder="Min"
+							spellCheck={false}
+							autoFocus
+							value={min}
+							onChange={(e) => {
+								setMin(e.target.value);
+								set({ bpmMin: bpmOf(e.target.value) });
+							}}
+						/>
+						<span className="muted">–</span>
+						<input
+							data-testid="filter-bpm-max"
+							aria-label="Highest BPM"
+							inputMode="decimal"
+							placeholder="Max"
+							spellCheck={false}
+							value={max}
+							onChange={(e) => {
+								setMax(e.target.value);
+								set({ bpmMax: bpmOf(e.target.value) });
+							}}
+						/>
+					</div>
+					<div className="filter-keys" data-testid="filter-keys">
+						{KEYS.map((row, r) => (
+							<div key={r}>
+								{row.map((k) => (
+									<button key={k} className={filter.keys.includes(k) ? "on" : ""} data-testid="filter-key" aria-pressed={filter.keys.includes(k)} style={hueVars(keyHue(k))} onClick={() => pickKey(k)}>
+										{k}
+									</button>
+								))}
+							</div>
+						))}
+					</div>
+					{canTag && (
+						<div className="filter-tagmode">
+							<label className="switch small">
+								<span>Tag editor mode</span>
+								<button role="switch" aria-checked={tagMode} className={`switch-track${tagMode ? " on" : ""}`} data-testid="tag-mode" onClick={() => store.set({ tagMode: !tagMode })}>
+									<span className="switch-knob" />
+								</button>
+							</label>
+							{tagMode &&
+								(tags.length ? (
+									<div className="filter-quick" data-testid="quick-tags">
+										{tags.map((t) => (
+											<button key={t.id} className={quickTags.includes(t.id) ? "on" : ""} data-testid="quick-tag" aria-pressed={quickTags.includes(t.id)} onClick={() => pickQuick(t.id)}>
+												{t.name}
+											</button>
+										))}
+									</div>
+								) : (
+									<p className="muted">No tags yet</p>
+								))}
+						</div>
+					)}
+				</div>
+			)}
+		</div>
+	);
+}
+
+// One track in the library: click to select it, drag it to add it, its bar to
+// preview it, and a star that keeps it in the Starred list for this set. `top` places it in
+// the scrolled list; the Starred list stacks its rows instead.
+// In tag editor mode, a picked tag as a row shows it: solid when the track has it (or it is
+// being written), hollow when one click would add it.
+type QuickTag = { id: string; name: string; on: boolean };
+type RowTag = { id: string; name: string };
+
+// A tag on a row in tag editor mode: its name opens the tag editor, its X takes it off.
+function EditTag({ tag, testId, onOpen, onRemove }: { tag: RowTag; testId: string; onOpen: () => void; onRemove: () => void }) {
+	return (
+		<span className="library-tag library-edit-tag" data-testid={testId}>
+			<button
+				className="library-tag-name"
+				onClick={(e) => {
+					e.stopPropagation();
+					onOpen();
+				}}
+			>
+				{tag.name}
+			</button>
+			<button
+				className="library-tag-x"
+				data-testid="tag-remove"
+				aria-label={`Remove tag ${tag.name}`}
+				onClick={(e) => {
+					e.stopPropagation();
+					onRemove();
+				}}
+			>
+				<svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true">
+					<path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+				</svg>
+			</button>
+		</span>
+	);
+}
+
+function TrackRow({ track: t, tags, ghosts, editing, no, top, previewing, starred, selected, numbered, onSelect, onMenu, onTag, onQuickTag }: { track: RekordboxTrack; tags: RowTag[]; ghosts: QuickTag[]; editing: boolean; no: number; top?: number; previewing: boolean; starred: boolean; selected: boolean; numbered: boolean; onSelect: () => void; onMenu: (t: RekordboxTrack, x: number, y: number) => void; onTag: (t: RekordboxTrack) => void; onQuickTag: (t: RekordboxTrack, id: string, add: boolean) => void }) {
 	const n = names(t);
 	return (
 		<div
-			className={`library-row${previewing ? " playing" : ""}${top === undefined ? " stacked" : ""}`}
+			className={`library-row${previewing ? " playing" : ""}${selected ? " selected" : ""}${numbered ? " numbered" : ""}${top === undefined ? " stacked" : ""}`}
 			data-testid={top === undefined ? "starred-row" : "library-row"}
 			data-no={no}
 			style={top === undefined ? { height: ROW } : { top, height: ROW }}
@@ -245,33 +425,113 @@ function TrackRow({ track: t, no, top, previewing, starred, onAdd }: { track: Re
 				pressedAt = { x: e.clientX, y: e.clientY };
 				startLibraryDrag(e, t.path, () => dragPicture(t));
 			}}
-			// A click (not the end of a drag, nor the second of a double-click) previews the
-			// track, or stops it; a double-click adds it to the set.
+			// A click (not the end of a drag, nor the second of a double-click) selects the
+			// track. A double-click does nothing.
 			onClick={(e) => {
 				if (e.detail > 1 || !pressedAt || Math.hypot(e.clientX - pressedAt.x, e.clientY - pressedAt.y) > 4) return;
-				toggleLibraryPreview(t.path, t.lengthSec);
+				onSelect();
 			}}
-			onDoubleClick={() => {
-				stopLibraryPreview();
-				onAdd(t);
+			onContextMenu={(e) => {
+				e.preventDefault();
+				onMenu(t, e.clientX, e.clientY);
 			}}
 		>
-			<button
-				className="library-play"
-				data-testid="library-play"
-				aria-label={previewing ? "Stop preview" : "Preview"}
-				onPointerDown={(e) => e.stopPropagation()}
-				onDoubleClick={(e) => e.stopPropagation()}
-				onClick={(e) => {
-					e.stopPropagation();
-					toggleLibraryPreview(t.path, t.lengthSec);
-				}}
-			>
-				{previewing ? "■" : "▶"}
-			</button>
 			<div className="library-names">
-				<div className="library-title">{n.title}</div>
-				<div className={n.artist ? "library-artist" : "library-artist none"}>{n.artist || "Unknown artist"}</div>
+				<div className="library-line">
+					{previewing ? (
+						<button
+							className="library-no library-stop"
+							data-testid="library-stop"
+							aria-label="Stop preview"
+							onPointerDown={(e) => e.stopPropagation()}
+							onDoubleClick={(e) => e.stopPropagation()}
+							onClick={(e) => {
+								e.stopPropagation();
+								stopLibraryPreview();
+							}}
+						>
+							<svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+								<rect x="1" y="1" width="8" height="8" rx="1" />
+							</svg>
+						</button>
+					) : numbered && (
+						<span className="library-no" data-testid="library-no">
+							{no}
+						</span>
+					)}
+					<div className="library-title">{n.title}</div>
+				</div>
+				<div className="library-sub">
+					<div className={n.artist ? "library-artist" : "library-artist none"}>{n.artist || "Unknown artist"}</div>
+					{/* after the artist, its tags, or a plus on hover where there are none: either opens the
+					    tag editor. In tag editor mode the picked tags follow, always in the same place: solid
+					    when the track has them, hollow to add with a click. */}
+					<div className="library-tag-line" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+						{editing ? (
+							<>
+								{tags.map((g) => (
+									<EditTag key={g.id} tag={g} testId="row-tag" onOpen={() => onTag(t)} onRemove={() => onQuickTag(t, g.id, false)} />
+								))}
+								{ghosts.map((g) =>
+									g.on ? (
+										<EditTag key={g.id} tag={g} testId="quick-tag-on" onOpen={() => onTag(t)} onRemove={() => onQuickTag(t, g.id, false)} />
+									) : (
+										<button
+											key={g.id}
+											className="library-tag library-edit-tag library-ghost-tag"
+											data-testid="ghost-tag"
+											aria-label={`Add tag ${g.name}`}
+											onClick={(e) => {
+												e.stopPropagation();
+												onQuickTag(t, g.id, true);
+											}}
+										>
+											<span className="library-tag-name">{g.name}</span>
+											<span className="library-tag-x" aria-hidden="true">
+												<svg width="7" height="7" viewBox="0 0 8 8">
+													<path d="M4 1v6M1 4h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+												</svg>
+											</span>
+										</button>
+									),
+								)}
+								{tags.length === 0 && ghosts.length === 0 && (
+									<button className="library-tags none" data-testid="library-tags" aria-label="Add tags" onClick={(e) => { e.stopPropagation(); onTag(t); }}>
+										<span className="library-tag library-tag-add" aria-hidden="true">
+									<svg width="8" height="8" viewBox="0 0 8 8">
+										<path d="M4 1v6M1 4h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+									</svg>
+								</span>
+									</button>
+								)}
+							</>
+						) : (
+							<button
+								className={`library-tags${tags.length ? "" : " none"}`}
+								data-testid="library-tags"
+								aria-label={tags.length ? `Tags: ${tags.map((g) => g.name).join(", ")}` : "Add tags"}
+								onClick={(e) => {
+									e.stopPropagation();
+									onTag(t);
+								}}
+							>
+								{tags.length ? (
+									tags.map((g) => (
+										<span key={g.id} className="library-tag">
+											{g.name}
+										</span>
+									))
+								) : (
+									<span className="library-tag library-tag-add" aria-hidden="true">
+									<svg width="8" height="8" viewBox="0 0 8 8">
+										<path d="M4 1v6M1 4h6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+									</svg>
+								</span>
+								)}
+							</button>
+						)}
+					</div>
+				</div>
 			</div>
 			<div className="library-meta">
 				<div className="library-key" style={hueVars(keyHue(t.key))}>
@@ -295,7 +555,33 @@ function TrackRow({ track: t, no, top, previewing, starred, onAdd }: { track: Re
 					<path d="M12 2.8l2.84 5.76 6.36.92-4.6 4.49 1.09 6.33L12 17.31l-5.69 2.99 1.09-6.33-4.6-4.49 6.36-.92z" />
 				</svg>
 			</button>
-			<PreviewBar track={t} playing={previewing} />
+			<PreviewBar track={t} playing={previewing} onSelect={onSelect} />
+		</div>
+	);
+}
+
+// The right-click menu of a library track.
+function RowMenu({ x, y, onTag, onClose }: { x: number; y: number; onTag: () => void; onClose: () => void }) {
+	useEffect(() => {
+		window.addEventListener("pointerdown", onClose);
+		window.addEventListener("blur", onClose);
+		return () => {
+			window.removeEventListener("pointerdown", onClose);
+			window.removeEventListener("blur", onClose);
+		};
+	}, [onClose]);
+	return (
+		<div className="menu" data-testid="library-menu" style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 50) }} onContextMenu={(e) => e.preventDefault()}>
+			<button
+				data-testid="library-menu-tag"
+				onPointerDown={(e) => e.stopPropagation()}
+				onClick={() => {
+					onClose();
+					onTag();
+				}}
+			>
+				<span>Tag…</span>
+			</button>
 		</div>
 	);
 }
@@ -320,8 +606,27 @@ export function Library() {
 	// Closing the panel stops its preview.
 	useEffect(() => stopLibraryPreview, []);
 	const sort = useStore((s) => s.librarySort);
+	const filter = useStore((s) => s.libraryFilter);
+	const tagMode = useStore((s) => s.tagMode);
+	const quickTags = useStore((s) => s.quickTags);
+	// Tags being put on or taken off tracks in tag editor mode, shown before Rekordbox has them.
+	const [ops, setOps] = useState<{ track: string; id: string; add: boolean }[]>([]);
 	const starred = useStore((s) => s.starred);
 	const [width, setWidth] = useState(savedWidth);
+	const [menu, setMenu] = useState<{ x: number; y: number; track: RekordboxTrack } | null>(null);
+	const [tagging, setTagging] = useState<RekordboxTrack | null>(null);
+	// The row clicked last, by its number in the list it was picked from. It stays through a
+	// new search or order, so a track found by search can be seen in its place afterwards.
+	const [picked, setPicked] = useState<{ list: string | null; no: number } | null>(null);
+	const openMenu = (track: RekordboxTrack, x: number, y: number): void => setMenu({ x, y, track });
+	const closeMenu = useCallback(() => setMenu(null), []);
+	// What was written to Rekordbox, put into the library as it is shown.
+	const tagged = (id: string, r: TagChangeResult): void =>
+		setLibrary((lib) => {
+			if (!lib) return lib;
+			const tags = [...lib.tags, ...r.created.filter((t) => !lib.tags.some((x) => x.id === t.id))];
+			return { ...lib, tags, tracks: lib.tracks.map((t) => (t.id === id ? { ...t, tags: r.tags } : t)) };
+		});
 
 	const onResize = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
@@ -385,10 +690,58 @@ export function Library() {
 		}
 		return out;
 	}, [library, playlist]);
+	// The picked tags of tag editor mode, in the order the tags are listed; none while it is off.
+	const quick = useMemo(() => (tagMode && library?.canTag !== false ? (library?.tags ?? []).filter((t) => quickTags.includes(t.id)) : []), [library, tagMode, quickTags]);
+	// A track's tags as they are about to be: with the ones being written put on or taken off.
+	const tagsNow = useCallback(
+		(t: RekordboxTrack): string[] => ops.reduce((tags, o) => (o.track !== t.id ? tags : o.add ? (tags.includes(o.id) ? tags : [...tags, o.id]) : tags.filter((x) => x !== o.id)), t.tags),
+		[ops],
+	);
+	// A track's tags, in the order the tags are listed, leaving out the picked ones of tag
+	// editor mode, which have their own place after them.
+	const tagsOf = useMemo(() => {
+		const order = new Map((library?.tags ?? []).map((t, i) => [t.id, i]));
+		const name = new Map((library?.tags ?? []).map((t) => [t.id, t.name]));
+		const skip = new Set(quick.map((q) => q.id));
+		return (t: RekordboxTrack): RowTag[] =>
+			tagsNow(t)
+				.filter((id) => name.has(id) && !skip.has(id))
+				.sort((a, b) => order.get(a)! - order.get(b)!)
+				.map((id) => ({ id, name: name.get(id)! }));
+	}, [library, quick, tagsNow]);
+	const ghostsOf = useMemo(() => {
+		return (t: RekordboxTrack): QuickTag[] => {
+			const now = tagsNow(t);
+			return quick.map((q) => ({ id: q.id, name: q.name, on: now.includes(q.id) }));
+		};
+	}, [quick, tagsNow]);
+	// One click in tag editor mode puts a tag on a track in Rekordbox, or takes it off. It shows
+	// at once; a write that fails puts it back as it was.
+	const changeTag = (t: RekordboxTrack, id: string, add: boolean): void => {
+		if (ops.some((o) => o.track === t.id && o.id === id)) return;
+		const now = tagsNow(t);
+		const op = { track: t.id, id, add };
+		setOps((o) => [...o, op]);
+		window.api
+			.setTrackTags({ contentId: t.id, keep: add ? [...now, id] : now.filter((x) => x !== id), create: [] })
+			.then(
+				(r) => tagged(t.id, r),
+				(e) => store.set({ toast: `Could not ${add ? "add" : "remove"} the tag: ${String(e instanceof Error ? e.message : e).replace(/^Error invoking remote method '[^']+': (Error: )?/, "")}` }),
+			)
+			.finally(() => setOps((o) => o.filter((x) => x !== op)));
+	};
+	const selected = picked && picked.list === (playlist?.id ?? null) ? picked.no : null;
+	const select = (no: number): void => setPicked({ list: playlist?.id ?? null, no });
+	// A starred track picks its row in the list, if it is there.
+	const selectTrack = (t: RekordboxTrack): void => {
+		const r = rows.find((x) => x.track.path === t.path);
+		if (r) select(r.no);
+	};
 	const shown = useMemo(() => {
 		const words = plain(query).split(/\s+/).filter(Boolean);
-		return sorted(words.length ? rows.filter((r) => words.every((w) => r.text.includes(w))) : rows, sort);
-	}, [rows, query, sort]);
+		const on = filtering(filter);
+		return sorted(words.length || on ? rows.filter((r) => words.every((w) => r.text.includes(w)) && (!on || passes(r.track, filter))) : rows, sort);
+	}, [rows, query, sort, filter]);
 
 	// The starred tracks that are in the library, in the order they were starred.
 	const starredTracks = useMemo(() => {
@@ -406,31 +759,25 @@ export function Library() {
 		watch.observe(el);
 		return () => watch.disconnect();
 	}, [ready]);
-	// A new search, playlist or order starts at the top.
+	// A new search, playlist or order starts at the top, unless the selected track is still in
+	// the list: then it is brought to the middle of the view.
 	useLayoutEffect(() => {
-		if (list.current) list.current.scrollTop = 0;
-		setScrollTop(0);
-	}, [query, playlist, sort]);
+		const el = list.current;
+		const at = selected === null ? -1 : shown.findIndex((r) => r.no === selected);
+		const view = el?.clientHeight ?? 0;
+		const top = at < 0 ? 0 : Math.max(0, Math.min(at * ROW - (view - ROW) / 2, shown.length * ROW - view));
+		if (el) el.scrollTop = top;
+		setScrollTop(el ? el.scrollTop : top);
+	}, [query, playlist, sort, filter]);
 
 	const first = Math.max(0, Math.floor(scrollTop / ROW) - SPARE);
 	const last = Math.min(shown.length, Math.ceil((scrollTop + height) / ROW) + SPARE);
-	const add = (t: RekordboxTrack): void => {
-		void importPaths([t.path], 0, store.get().playheadBeat);
-	};
 	// A new order starts going up; the arrow turns it round.
 	const sortBy = (by: LibrarySort["by"]): void => store.set({ librarySort: { by, down: false } });
 	const flipSort = (): void => store.set({ librarySort: { ...sort, down: !sort.down } });
 
 	return (
 		<aside className="library" data-testid="library" style={{ width }}>
-			<div className="library-head">
-				<h2>Rekordbox</h2>
-				{library && (
-					<span className="muted" data-testid="library-count">
-						{shown.length === rows.length ? `${shown.length.toLocaleString()} tracks` : `${shown.length.toLocaleString()} of ${rows.length.toLocaleString()}`}
-					</span>
-				)}
-			</div>
 			{failed ? (
 				<p className="muted" data-testid="library-failed">
 					The Rekordbox library could not be read
@@ -443,30 +790,50 @@ export function Library() {
 				</p>
 			) : (
 				<>
-					<PlaylistPicker
-						playlists={library.playlists}
-						chosen={playlist}
-						onPick={(id) => {
-							store.set({ libraryPlaylist: id });
-							search.current?.focus();
-						}}
-					/>
-					<div className="library-tools">
-						<input
-							ref={search}
-							className="search"
-							data-testid="library-search"
-							placeholder="Search title or artist"
-							spellCheck={false}
-							autoFocus
-							value={query}
-							onChange={(e) => setQuery(e.target.value)}
-							onKeyDown={(e) => {
-								if (e.key !== "Escape") return;
-								if (query) setQuery("");
-								else e.currentTarget.blur();
+					<div className="library-pick">
+						<PlaylistPicker
+							playlists={library.playlists}
+							chosen={playlist}
+							onPick={(id) => {
+								store.set({ libraryPlaylist: id });
+								search.current?.focus();
 							}}
 						/>
+						<FilterButton filter={filter} tags={library.tags} canTag={library.canTag !== false} />
+					</div>
+					<div className="library-tools">
+						<div className="library-search">
+							<input
+								ref={search}
+								className="search"
+								data-testid="library-search"
+								placeholder="Search title or artist"
+								spellCheck={false}
+								autoFocus
+								value={query}
+								onChange={(e) => setQuery(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key !== "Escape") return;
+									if (query) setQuery("");
+									else e.currentTarget.blur();
+								}}
+							/>
+							{query && (
+								<button
+									className="library-search-clear"
+									data-testid="library-search-clear"
+									aria-label="Clear search"
+									onClick={() => {
+										setQuery("");
+										search.current?.focus();
+									}}
+								>
+									<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden="true">
+										<path d="M5 5l14 14M19 5L5 19" />
+									</svg>
+								</button>
+							)}
+						</div>
 						<div className="library-sort">
 							<select data-testid="library-sort" aria-label="Sort by" value={sort.by} onChange={(e) => sortBy(e.target.value as LibrarySort["by"])}>
 								<option value="number">{playlist ? "Playlist order" : "Date added"}</option>
@@ -486,7 +853,7 @@ export function Library() {
 						) : (
 							<div style={{ height: shown.length * ROW }}>
 								{shown.slice(first, last).map(({ track: t, no }, i) => (
-									<TrackRow key={no} track={t} no={no} top={(first + i) * ROW} previewing={previewing === t.path} starred={starred.includes(t.path)} onAdd={add} />
+									<TrackRow key={no} track={t} tags={tagsOf(t)} ghosts={ghostsOf(t)} editing={tagMode && library.canTag !== false} no={no} top={(first + i) * ROW} previewing={previewing === t.path} starred={starred.includes(t.path)} selected={no === selected} numbered={!!playlist} onSelect={() => select(no)} onMenu={openMenu} onTag={setTagging} onQuickTag={changeTag} />
 								))}
 							</div>
 						)}
@@ -502,12 +869,23 @@ export function Library() {
 							</h2>
 							<div className="library-starred-list">
 								{starredTracks.map((t, i) => (
-									<TrackRow key={t.path} track={t} no={i + 1} previewing={previewing === t.path} starred onAdd={add} />
+									<TrackRow key={t.path} track={t} tags={tagsOf(t)} ghosts={ghostsOf(t)} editing={tagMode && library.canTag !== false} no={i + 1} previewing={previewing === t.path} starred selected={false} numbered={false} onSelect={() => selectTrack(t)} onMenu={openMenu} onTag={setTagging} onQuickTag={changeTag} />
 								))}
 							</div>
 						</section>
 					)}
 				</>
+			)}
+			{menu && <RowMenu x={menu.x} y={menu.y} onClose={closeMenu} onTag={() => setTagging(menu.track)} />}
+			{tagging && library && (
+				<TagModal
+					track={tagging}
+					{...names(tagging)}
+					tags={library.tags}
+					canTag={library.canTag !== false}
+					onClose={() => setTagging(null)}
+					onSaved={(r) => tagged(tagging.id, r)}
+				/>
 			)}
 			{/* the version sits here while the library covers the bottom-left corner it otherwise uses */}
 			<div className="library-foot">

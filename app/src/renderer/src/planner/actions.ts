@@ -284,6 +284,17 @@ export function nudgeSelection(dir: -1 | 1): void {
 	});
 }
 
+// ⌘↑ ⌘↓: moves the selected clips one lane up or down (overlap is fine). If any selected clip
+// is already in the top or bottom lane, nothing moves.
+export function moveSelectionLanes(dir: -1 | 1): void {
+	const s = store.get();
+	const sel = new Set(s.selection);
+	const clips = s.doc.clips.filter((c) => sel.has(c.id));
+	if (clips.length === 0) return;
+	if (clips.some((c) => c.lane + dir < 0 || c.lane + dir > LANES - 1)) return;
+	store.commit({ ...s.doc, clips: s.doc.clips.map((c) => (sel.has(c.id) ? { ...c, lane: c.lane + dir } : c)) });
+}
+
 export function duplicateSelection(): void {
 	const s = store.get();
 	const sel = s.doc.clips.filter((c) => s.selection.includes(c.id));
@@ -499,11 +510,6 @@ export function toggleSolo(lane: number): void {
 	engine.applyMutes();
 }
 
-export function toggleMetronome(): void {
-	store.set({ metronome: !store.get().metronome });
-	engine.applyMetronome();
-}
-
 export function zoomToFit(): void {
 	const s = store.get();
 	const beats = Math.max(32, contentBeats(s.doc));
@@ -603,14 +609,23 @@ function closeSet(): void {
 
 // `askName`: the top bar opens on the name, ready to type (the New set button and Cmd+N).
 // `bpm`: the tempo to start at instead of the default.
+// Remembers which set is open, so the next launch opens it again (null: the list of sets).
+function rememberOpenSet(id: string | null): void {
+	window.api.setSettings({ lastSetId: id }).catch(() => {
+		// only a convenience: the set itself is stored either way
+	});
+}
+
 export async function newSet(opts?: { askName?: boolean; bpm?: number }): Promise<void> {
 	await flushAutoSave();
 	closeSet();
-	store.load(emptyDoc(opts?.bpm), newId("s"), null);
+	const id = newId("s");
+	store.load(emptyDoc(opts?.bpm), id, null);
 	store.set({ screen: "editor", pxPerBeat: 12, askName: !!opts?.askName });
+	rememberOpenSet(id); // a new set never stored is simply not there next time, and the list opens
 }
 
-export async function openSet(id: string): Promise<void> {
+export async function openSet(id: string, opts?: { quiet?: boolean }): Promise<void> {
 	try {
 		await flushAutoSave();
 		const f = await window.api.openSet(id);
@@ -618,8 +633,9 @@ export async function openSet(id: string): Promise<void> {
 		store.load(f.doc, f.id, f.name);
 		stored = { gen: store.get().setGen, text: "" };
 		store.set({ screen: "editor", pxPerBeat: f.view.pxPerBeat, scrollX: f.view.scrollX, playheadBeat: f.view.playheadBeat, cueBeat: f.view.playheadBeat, starred: f.view.starred ?? [] });
+		rememberOpenSet(f.id);
 	} catch (e) {
-		toast(`Could not open the set: ${errorText(e)}`);
+		if (!opts?.quiet) toast(`Could not open the set: ${errorText(e)}`);
 		void refreshSets();
 	}
 }
@@ -634,7 +650,8 @@ export async function goHome(): Promise<void> {
 	await flushAutoSave();
 	closeSet();
 	store.load(emptyDoc(), null, null);
-	store.set({ screen: "home", libraryOpen: false });
+	store.set({ screen: "home", libraryOpen: true });
+	rememberOpenSet(null);
 	await refreshSets();
 }
 

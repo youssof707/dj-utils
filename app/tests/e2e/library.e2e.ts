@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { queryDb } from "../rekordboxDb";
+import { MY_TAG_TABLE, myTagRows, queryDb, SONG_MY_TAG_TABLE } from "../rekordboxDb";
 import { writeBarTrack } from "../signals";
 import { testDir } from "../testdata";
 import { launch, shot, state, type Harness } from "./harness";
@@ -47,10 +47,23 @@ beforeAll(async () => {
 			"insert into djmdPlaylist values ('p3', 2, 'Nothing yet', 0, 'root', 0);",
 			// Belfast is in the playlist twice
 			"insert into djmdSongPlaylist values ('s1', 'p1', 't4', 1, 0), ('s6', 'p1', 't6', 2, 0), ('s2', 'p1', 't1', 3, 0), ('s3', 'p1', 't5', 4, 0), ('s4', 'p1', 't1', 5, 0), ('s7', 'p1', 't7', 6, 0), ('s5', 'p2', 't2', 1, 0);",
+			// My Tags, the tables as Rekordbox has them: the app's category and one of Rekordbox's
+			// own. Halcyon is tagged Techno (the app's) and Deep (Rekordbox's).
+			MY_TAG_TABLE,
+			SONG_MY_TAG_TABLE,
+			...myTagRows(
+				[
+					{ id: "g1", name: "DJ Utilities", tags: [["x1", "Techno"], ["x2", "House"], ["x3", "Peak Time"]] },
+					{ id: "g2", name: "Genre", tags: [["x4", "Deep"]] },
+				],
+				[
+					{ id: "m1", tag: "x1", track: "t2" },
+					{ id: "m2", tag: "x4", track: "t2" },
+				],
+			),
 		].join("\n"),
 	);
 	h = await launch(undefined, undefined, { DJ_REKORDBOX_DB: db });
-	await h.page.getByTestId("library-toggle").click();
 	await h.page.getByTestId("library-list").waitFor();
 });
 afterAll(async () => {
@@ -66,14 +79,15 @@ const sortBy = async (by: "number" | "bpm" | "key"): Promise<void> => {
 	if ((await menu.inputValue()) === by) await h.page.getByTestId("library-sort-dir").click();
 	else await menu.selectOption(by);
 };
-const count = (): Promise<string | null> => h.page.getByTestId("library-count").textContent();
+// the rows shown (the test library is small enough for all of them to be drawn)
+const count = (): Promise<number> => h.page.getByTestId("library-row").count();
 const options = (): Promise<string[]> => h.page.getByTestId("playlist-option").allTextContents();
 
 describe("the Rekordbox library panel", () => {
 	it("lists every track with a file, in the order it was added", async () => {
 		expect(await titles()).toEqual(["Belfast", "Halcyon", "Windowlicker", "Café Noir", "Xtal"]);
 		expect(await numbers()).toEqual(["1", "2", "3", "4", "5"]);
-		expect(await count()).toBe("5 tracks");
+		expect(await count()).toBe(5);
 		const rows = h.page.getByTestId("library-row");
 		expect(await rows.nth(0).textContent()).toBe("▶BelfastOrbital8A128");
 		expect(await rows.nth(1).textContent()).toBe("▶HalcyonOrbital2B126.5");
@@ -84,7 +98,7 @@ describe("the Rekordbox library panel", () => {
 		const search = h.page.getByTestId("library-search");
 		await search.fill("ORBITAL");
 		expect(await titles()).toEqual(["Belfast", "Halcyon"]);
-		expect(await count()).toBe("2 of 5");
+		expect(await count()).toBe(2);
 		// a space is typed, it does not start playback
 		await search.fill("");
 		await search.pressSequentially("etienne cafe");
@@ -95,7 +109,7 @@ describe("the Rekordbox library panel", () => {
 		expect(await titles()).toEqual([]);
 		await search.press("Escape");
 		expect(await search.inputValue()).toBe("");
-		expect(await count()).toBe("5 tracks");
+		expect(await count()).toBe(5);
 	});
 
 	it("sorts by BPM, key and number from the menu, and the arrow turns the order round", async () => {
@@ -117,6 +131,31 @@ describe("the Rekordbox library panel", () => {
 		await sortBy("number");
 	});
 
+	it("filters by a BPM range and keys, and the X clears the filter", async () => {
+		const button = h.page.getByTestId("library-filter");
+		expect(await h.page.getByTestId("library-filter-clear").count()).toBe(0);
+		await button.click();
+		await h.page.getByTestId("filter-bpm-min").fill("110");
+		// the track with no BPM is left out once there is a range
+		expect(await titles()).toEqual(["Belfast", "Halcyon", "Xtal"]);
+		await h.page.getByTestId("filter-bpm-max").fill("127");
+		expect(await titles()).toEqual(["Halcyon", "Xtal"]);
+		await h.page.getByTestId("filter-key").filter({ hasText: /^1A$/ }).click();
+		expect(await titles()).toEqual(["Xtal"]);
+		await shot(h.page, "library-02b-filter");
+		await h.page.keyboard.press("Escape");
+		await h.page.getByTestId("filter-menu").waitFor({ state: "detached" });
+		// the filter stays on, and the button opens it again as it was
+		expect(await titles()).toEqual(["Xtal"]);
+		await button.click();
+		expect(await h.page.getByTestId("filter-bpm-min").inputValue()).toBe("110");
+		expect(await h.page.getByTestId("filter-key").filter({ hasText: /^1A$/ }).getAttribute("aria-pressed")).toBe("true");
+		await h.page.keyboard.press("Escape");
+		await h.page.getByTestId("library-filter-clear").click();
+		expect(await count()).toBe(5);
+		expect(await h.page.getByTestId("library-filter-clear").count()).toBe(0);
+	});
+
 	it("filters by a playlist found by searching, in the playlist's order", async () => {
 		await h.page.getByTestId("library-playlist").click();
 		expect(await options()).toEqual(["All tracks", "Clubs / Warm up", "Late", "Nothing yet"]);
@@ -130,12 +169,12 @@ describe("the Rekordbox library panel", () => {
 		expect(await titles()).toEqual(["Café Noir", "Belfast", "Xtal", "Belfast"]);
 		// Lost (2) and Streamed (6) have no file
 		expect(await numbers()).toEqual(["1", "3", "4", "5"]);
-		expect(await count()).toBe("4 tracks");
+		expect(await count()).toBe(4);
 		// search and sorting act inside the playlist
 		await h.page.getByTestId("library-search").fill("aphex");
 		expect(await titles()).toEqual(["Xtal"]);
 		expect(await numbers()).toEqual(["4"]);
-		expect(await count()).toBe("1 of 4");
+		expect(await count()).toBe(1);
 		await h.page.getByTestId("library-search").fill("");
 		await sortBy("bpm");
 		expect(await titles()).toEqual(["Café Noir", "Xtal", "Belfast", "Belfast"]);
@@ -159,7 +198,7 @@ describe("the Rekordbox library panel", () => {
 		expect(await h.page.locator("[data-testid=playlist-option].at").textContent()).toBe("Clubs / Warm up");
 		await search.press("Escape");
 		await h.page.getByTestId("playlist-menu").waitFor({ state: "detached" });
-		expect(await count()).toBe("4 tracks");
+		expect(await count()).toBe(4);
 		await h.page.getByTestId("library-playlist").click();
 		await search.press("ArrowDown");
 		await search.press("ArrowDown");
@@ -177,11 +216,11 @@ describe("the Rekordbox library panel", () => {
 		expect(await titles()).toEqual(["Halcyon"]);
 		await h.page.getByTestId("library-playlist").click();
 		await h.page.getByTestId("playlist-option").first().click();
-		expect(await count()).toBe("5 tracks");
+		expect(await count()).toBe(5);
 		expect(await state(h.page, "s => s.libraryPlaylist")).toBeNull();
 	});
 
-	it("previews a track from where its bar is clicked, and ▶ / ■ start and stop it", async () => {
+	it("previews a track from where its bar is clicked, and a click on the row does not play it", async () => {
 		const row = h.page.getByTestId("library-row").nth(0);
 		const playing = (): Promise<number> => h.page.locator(".library-row.playing").count();
 		const fill = async (): Promise<number> => parseFloat((await h.page.getByTestId("library-bar-fill").evaluate((el) => (el as HTMLElement).style.width)) || "0");
@@ -192,37 +231,56 @@ describe("the Rekordbox library panel", () => {
 		// half way along the bar is half way into the track
 		await expect.poll(fill).toBeGreaterThan(45);
 		await shot(h.page, "library-05-preview");
-		const button = row.getByTestId("library-play");
-		expect(await button.getAttribute("aria-label")).toBe("Stop preview");
-		await button.click();
+		// the stop button, where the number would be, shuts it up
+		await row.getByTestId("library-stop").click();
 		await expect.poll(playing).toBe(0);
-		// ▶ plays from the start
+		await expect(row.getByTestId("library-stop")).toHaveCount(0);
 		await row.hover();
-		await button.click();
+		await h.page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
 		await expect.poll(playing).toBe(1);
-		expect(await fill()).toBeLessThan(45);
-		await button.click();
-		await expect.poll(playing).toBe(0);
-		// a click on the row itself plays it too, and a second click stops it
-		await row.locator(".library-title").click();
-		await expect.poll(playing).toBe(1);
-		await h.page.waitForTimeout(400);
-		await row.locator(".library-title").click();
-		await expect.poll(playing).toBe(0);
+		// a click on another row selects it and plays nothing new
+		const other = h.page.getByTestId("library-row").nth(1);
+		await other.locator(".library-title").click();
+		await expect(other).toHaveClass(/selected/);
+		expect(await other.evaluate((el) => el.classList.contains("playing"))).toBe(false);
 		// a preview adds nothing to the set
 		expect(await state(h.page, "s => s.doc.tracks.length")).toBe(0);
 	});
 
-	it("adds a track to the set on a double-click", async () => {
-		await h.page.getByTestId("library-row").nth(0).dblclick();
-		await h.page.getByTestId("import-modal").waitFor();
-		await h.page.getByTestId("bpm-input").fill("128");
-		await h.page.getByTestId("bpm-confirm").click();
-		await h.page.getByTestId("import-modal").waitFor({ state: "detached" });
-		expect(await state(h.page, "s => s.doc.tracks.map((t) => t.sourcePath)")).toEqual([song]);
+	it("keeps the selected track through a search and brings it into view when the search is cleared", async () => {
+		const search = h.page.getByTestId("library-search");
+		const rows = h.page.getByTestId("library-row");
+		// all tracks show no numbers
+		expect(await rows.nth(0).getByTestId("library-no").count()).toBe(0);
+		const all = await titles();
+		const target = all[all.length - 1];
+		await search.fill(target);
+		const found = rows.filter({ hasText: target }).first();
+		const no = await found.getAttribute("data-no");
+		await found.locator(".library-title").click();
+		await expect(found).toHaveClass(/selected/);
+		await search.fill("");
+		const selected = h.page.locator(`[data-testid=library-row][data-no="${no}"]`);
+		await expect(selected).toHaveClass(/selected/);
+		await expect(selected).toBeInViewport();
+		expect(await h.page.locator(".library-row.selected").count()).toBe(1);
+		// a new order keeps it too
+		await h.page.getByTestId("library-sort-dir").click();
+		await expect(selected).toHaveClass(/selected/);
+		await expect(selected).toBeInViewport();
+		await h.page.getByTestId("library-sort-dir").click();
+		await shot(h.page, "library-05b-selected");
+	});
+
+	it("does nothing on a double-click", async () => {
+		await h.page.getByTestId("library-row").nth(0).locator(".library-title").dblclick();
+		await h.page.waitForTimeout(300);
+		expect(await h.page.getByTestId("import-modal").count()).toBe(0);
+		expect(await state(h.page, "s => s.doc.tracks.length")).toBe(0);
 	});
 
 	it("adds a track to the set when it is dragged onto a lane", async () => {
+		const before = await state(h.page, "s => s.doc.clips.length");
 		const row = (await h.page.getByTestId("library-row").nth(0).boundingBox())!;
 		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
 		await h.page.mouse.move(row.x + 40, row.y + row.height / 2);
@@ -232,11 +290,102 @@ describe("the Rekordbox library panel", () => {
 		await h.page.mouse.move(lanes.x + lanes.width / 2, lanes.y + lanes.height * 0.8, { steps: 8 });
 		await h.page.mouse.up();
 		await h.page.getByTestId("library-ghost").waitFor({ state: "detached" });
-		await expect.poll(() => state(h.page, "s => s.doc.clips.length")).toBe(2);
+		await expect.poll(() => state(h.page, "s => s.doc.clips.length")).toBe(Number(before) + 1);
 		// clips show Rekordbox's key before the name
 		expect(await h.page.locator(".clip-name").first().textContent()).toMatch(/^8A - Belfast/);
 		// and are coloured by it: 8 is C / Am, pink on the key wheel
 		expect(await h.page.locator(".clip").first().evaluate((el) => (el as HTMLElement).style.getPropertyValue("--hue"))).toBe("310");
 		await shot(h.page, "library-drag");
+	});
+
+	it("tags a track from its right-click menu: picks a tag, makes one and takes one off", async () => {
+		await h.page.getByTestId("library-playlist").click();
+		await h.page.getByTestId("playlist-option").filter({ hasText: /^All tracks$/ }).click();
+		await h.page.getByTestId("library-search").fill("Halcyon");
+		const open = async (): Promise<void> => {
+			await h.page.getByTestId("library-row").filter({ hasText: "Halcyon" }).click({ button: "right" });
+			await h.page.getByTestId("library-menu-tag").click();
+			await h.page.getByTestId("tag-modal").waitFor();
+		};
+		const options = (): Promise<string[]> => h.page.getByTestId("tag-option").locator(".tag-name").allTextContents();
+		const ticked = (): Promise<string[]> => h.page.locator("[data-testid=tag-option][aria-pressed=true] .tag-name").allTextContents();
+		await open();
+		expect(await options()).toEqual(["Techno", "House", "Peak Time"]);
+		expect(await ticked()).toEqual(["Techno"]);
+
+		// only the app's tags, in one list: Deep is Rekordbox's own
+		expect(await h.page.getByTestId("tag-list").locator("h4").count()).toBe(0);
+
+		// take Techno off, pick Peak Time from a search, make Acid
+		await h.page.getByTestId("tag-option").filter({ hasText: "Techno" }).click();
+		const search = h.page.getByTestId("tag-search");
+		await search.fill("peak");
+		await search.press("Enter");
+		await search.fill("Acid");
+		await h.page.getByTestId("tag-create").click();
+		// a tag made here is in the list, ticked and marked new
+		expect(await ticked()).toEqual(["Peak Time", "Acid"]);
+		expect(await h.page.locator("[data-testid=tag-option][data-new]").locator(".tag-name").allTextContents()).toEqual(["Acid"]);
+		await shot(h.page, "library-tags");
+		await h.page.getByTestId("tag-save").click();
+		await h.page.getByTestId("tag-modal").waitFor({ state: "detached" });
+
+		const db = path.join(work, "master.db");
+		const written = queryDb(db, "select t.Name as name, t.ParentID as groupId from djmdSongMyTag s join djmdMyTag t on t.ID = s.MyTagID where s.ContentID = 't2' order by t.Name;");
+		expect(written).toEqual([
+			{ name: "Acid", groupId: "g1" },
+			{ name: "Deep", groupId: "g2" },
+			{ name: "Peak Time", groupId: "g1" },
+		]);
+		// the row shows its tags after the artist, and a click on them opens the tag editor
+		const row = h.page.getByTestId("library-row").filter({ hasText: "Halcyon" });
+		expect(await row.locator(".library-tag").allTextContents()).toEqual(["Peak Time", "Acid"]);
+		await row.getByTestId("library-tags").click();
+		await h.page.getByTestId("tag-modal").waitFor();
+		// and the modal shows it again, with the new tag at the end
+		expect(await options()).toEqual(["Techno", "House", "Peak Time", "Acid"]);
+		expect(await ticked()).toEqual(["Peak Time", "Acid"]);
+		await h.page.keyboard.press("Escape");
+		await h.page.getByTestId("tag-modal").waitFor({ state: "detached" });
+		await h.page.getByTestId("library-search").fill("");
+	});
+
+	it("in tag editor mode, the picked tags show hollow on every row and a click adds one", async () => {
+		await h.page.getByTestId("library-search").fill("Halcyon");
+		const row = h.page.getByTestId("library-row").filter({ hasText: "Halcyon" });
+		expect(await row.getByTestId("ghost-tag").count()).toBe(0);
+		await h.page.getByTestId("library-filter").click();
+		expect(await h.page.getByTestId("quick-tag").count()).toBe(0);
+		await h.page.getByTestId("tag-mode").click();
+		await h.page.getByTestId("quick-tag").filter({ hasText: /^House$/ }).click();
+		await h.page.getByTestId("quick-tag").filter({ hasText: /^Acid$/ }).click();
+		await h.page.keyboard.press("Escape");
+		// the picked tags have their own place after the rest: Acid, which Halcyon has, solid, House hollow
+		expect(await row.getByTestId("row-tag").allTextContents()).toEqual(["Peak Time"]);
+		expect(await row.getByTestId("quick-tag-on").allTextContents()).toEqual(["Acid"]);
+		expect(await row.getByTestId("ghost-tag").allTextContents()).toEqual(["House"]);
+		await shot(h.page, "library-tag-mode");
+		// a click turns it solid where it is
+		const before = await row.getByTestId("ghost-tag").boundingBox();
+		await row.getByTestId("ghost-tag").click();
+		expect(await row.getByTestId("ghost-tag").count()).toBe(0);
+		expect(await row.getByTestId("quick-tag-on").allTextContents()).toEqual(["House", "Acid"]);
+		expect(await row.getByTestId("quick-tag-on").first().boundingBox()).toEqual(before);
+		const db = path.join(work, "master.db");
+		const written = (): unknown => queryDb(db, "select t.Name as name from djmdSongMyTag s join djmdMyTag t on t.ID = s.MyTagID where s.ContentID = 't2' and t.ParentID = 'g1' order by t.Name;");
+		await expect.poll(written).toEqual([{ name: "Acid" }, { name: "House" }, { name: "Peak Time" }]);
+		// a click on the hollow tag does not select the row
+		expect(await row.getAttribute("class")).not.toContain("selected");
+		// every tag has an X: on a picked tag it turns it hollow where it is, on another it takes it away
+		await row.getByTestId("quick-tag-on").filter({ hasText: "Acid" }).getByTestId("tag-remove").click();
+		expect(await row.getByTestId("ghost-tag").allTextContents()).toEqual(["Acid"]);
+		await row.getByTestId("row-tag").getByTestId("tag-remove").click();
+		expect(await row.getByTestId("row-tag").count()).toBe(0);
+		await expect.poll(written).toEqual([{ name: "House" }]);
+		expect(await row.getAttribute("class")).not.toContain("selected");
+		await h.page.getByTestId("library-filter").click();
+		await h.page.getByTestId("tag-mode").click();
+		await h.page.keyboard.press("Escape");
+		await h.page.getByTestId("library-search").fill("");
 	});
 });

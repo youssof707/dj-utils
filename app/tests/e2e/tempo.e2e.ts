@@ -36,25 +36,15 @@ beforeAll(async () => {
 	await h.page.evaluate(() => {
 		const w = window as any;
 		w.rec = [];
-		w.recMetro = [];
-		w.planner.engine.tap = (ctx: AudioContext, node: AudioNode, metro: AudioNode) => {
-			const sp = ctx.createScriptProcessor(4096, 2, 2);
+		w.planner.engine.tap = (ctx: AudioContext, node: AudioNode) => {
+			const sp = ctx.createScriptProcessor(4096, 1, 1);
 			sp.onaudioprocess = (e: AudioProcessingEvent) => {
 				w.rec.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-				w.recMetro.push(new Float32Array(e.inputBuffer.getChannelData(1)));
 			};
-			// music on the left input, the metronome on the right
-			const merge = ctx.createChannelMerger(2);
-			const mono = (n: AudioNode): AudioNode => {
-				const g = ctx.createGain();
-				g.channelCount = 1;
-				g.channelCountMode = "explicit";
-				n.connect(g);
-				return g;
-			};
-			mono(node).connect(merge, 0, 0);
-			mono(metro).connect(merge, 0, 1);
-			merge.connect(sp);
+			const g = ctx.createGain();
+			g.channelCount = 1;
+			g.channelCountMode = "explicit";
+			node.connect(g).connect(sp);
 			sp.connect(ctx.destination);
 		};
 	});
@@ -63,15 +53,14 @@ afterAll(async () => {
 	await h?.close();
 });
 
-async function recorded(which: "rec" | "recMetro" = "rec"): Promise<Float32Array> {
-	const rec: number[] = await h.page.evaluate((k) => {
+async function recorded(): Promise<Float32Array> {
+	const rec: number[] = await h.page.evaluate(() => {
 		const w = window as any;
 		const out: number[] = [];
-		for (const c of w[k]) for (const v of c) out.push(v);
+		for (const c of w.rec) for (const v of c) out.push(v);
 		w.rec = [];
-		w.recMetro = [];
 		return out;
-	}, which);
+	});
 	return Float32Array.from(rec);
 }
 
@@ -87,7 +76,7 @@ const playing = (): Promise<boolean> => state(h.page, "s => s.playing");
 const playhead = async (): Promise<number> => Number(await h.page.getByTestId("playhead").getAttribute("data-beat"));
 
 // Plays from a whole beat for a while and returns what came out, starting at the first click.
-async function playFrom(beat: number, ms: number, which: "rec" | "recMetro" = "rec"): Promise<Float32Array> {
+async function playFrom(beat: number, ms: number): Promise<Float32Array> {
 	if (await playing()) await h.page.keyboard.press("Space");
 	await seek(beat);
 	await h.page.waitForTimeout(400);
@@ -96,7 +85,7 @@ async function playFrom(beat: number, ms: number, which: "rec" | "recMetro" = "r
 	await h.page.waitForTimeout(ms);
 	expect(await playing()).toBe(true);
 	await h.page.keyboard.press("Space");
-	return recorded(which);
+	return recorded();
 }
 
 // Clicks sit on whole beats of the set. With playback started on beat `from`, the first click
@@ -208,16 +197,8 @@ describe("tempo changes in playback", () => {
 		}
 	});
 
-	it("moves the playhead and the metronome along the tempo curve", async () => {
+	it("moves the playhead along the tempo curve", async () => {
 		await mute([0, 1, 2]);
-		await h.page.getByTestId("metronome").click();
-		const x = await playFrom(12, 12000, "recMetro");
-		await h.page.getByTestId("metronome").click();
-		const g = clickErrors(x, 12, map, 0.3);
-		console.log("metronome: clicks", g.n, "last beat", g.lastBeat, "worst error (ms)", g.worstMs.toFixed(3));
-		expect(g.lastBeat).toBeGreaterThanOrEqual(37);
-		expect(g.n).toBeGreaterThanOrEqual(g.lastBeat - 12);
-		expect(g.worstMs).toBeLessThan(1);
 		// in the steady 140 stretch, three seconds is seven beats (6.4 at 128)
 		await seek(40);
 		await h.page.keyboard.press("Space");

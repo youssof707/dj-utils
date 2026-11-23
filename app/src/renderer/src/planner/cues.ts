@@ -54,6 +54,20 @@ export function deleteCue(spot: CueSpot, id: string): void {
 	change(spot.path, () => window.api.cueDelete(spot.path, [id]), remember(spot, store.get().setGen));
 }
 
+// The cue buttons in the toolbar: while one is on, a click on a track puts that cue there,
+// on the nearest beat line. Pressing the same button again, or Escape, turns it off.
+export function toggleCueTool(kind: number): void {
+	const on = store.get().cueTool === kind ? null : kind;
+	store.set(on === null ? { cueTool: null } : { cueTool: on, showCues: true });
+}
+
+// A click with a cue button on, `beat` beats into the track; `edit` when in the track editor.
+export function placeCue(track: PlannerTrack, beat: number, pxPerBeat: number, edit: boolean): void {
+	const kind = store.get().cueTool;
+	if (kind === null || beat < 0) return;
+	addCue(cueSpot(track, [], beat, pxPerBeat, edit), kind);
+}
+
 // "Add hot cue" was chosen: the next key picks its letter.
 export function waitForHotCue(spot: CueSpot): void {
 	store.set({ cueWait: spot });

@@ -49,27 +49,6 @@ const LOOKAHEAD = 20; // seconds ahead of the playhead that get loaded and sched
 const KEEP_BEHIND = 5;
 const KEEP_AHEAD = 90;
 const MAX_BUFFERS = 12;
-const METRO_AHEAD = 0.5; // seconds of metronome clicks scheduled ahead (tick runs every 0.2 s)
-
-// A short percussive tick: a burst of noise plus a fast-decaying high body, about 20 ms long,
-// with its peak on the very first sample so the hit point is exact. The bar click is brighter.
-function makeClick(accent: boolean): AudioBuffer {
-	const len = Math.round(SAMPLE_RATE * 0.02);
-	const buf = new AudioBuffer({ numberOfChannels: 1, length: len, sampleRate: SAMPLE_RATE });
-	const d = buf.getChannelData(0);
-	const f = accent ? 3200 : 2400;
-	let seed = 12345;
-	let peak = 0;
-	for (let i = 0; i < len; i++) {
-		const t = i / SAMPLE_RATE;
-		seed = (seed * 1103515245 + 12345) >>> 0;
-		const noise = (seed / 0xffffffff) * 2 - 1;
-		d[i] = noise * Math.exp(-t / 0.0015) * 0.7 + Math.cos(2 * Math.PI * f * t) * Math.exp(-t / 0.004);
-		peak = Math.max(peak, Math.abs(d[i]));
-	}
-	for (let i = 0; i < len; i++) d[i] /= peak;
-	return buf;
-}
 
 function parseWav(bytes: Uint8Array): AudioBuffer {
 	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -120,10 +99,6 @@ class Engine {
 	private ctx: AudioContext | null = null;
 	private master: GainNode | null = null;
 	private laneGains: GainNode[] = [];
-	private metroGain: GainNode | null = null;
-	private clicks = new Set<AudioBufferSourceNode>();
-	private clickBufs: [AudioBuffer, AudioBuffer] | null = null; // [beat, bar]
-	private metroNextBeat = 0; // next whole beat whose click hasn't been scheduled
 	private buffers = new Map<string, AudioBuffer>();
 	private loading = new Map<string, Promise<AudioBuffer | null>>();
 	private sources = new Map<string, Voice>();
@@ -136,8 +111,8 @@ class Engine {
 	private endSec = 0;
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private running = false;
-	// For tests: taps the music after the limiter, and the metronome on its own.
-	tap: ((ctx: AudioContext, master: AudioNode, metronome: AudioNode) => void) | null = null;
+	// For tests: taps the music after the limiter.
+	tap: ((ctx: AudioContext, master: AudioNode) => void) | null = null;
 
 	private context(): AudioContext {
 		if (!this.ctx) {
@@ -153,12 +128,7 @@ class Engine {
 				g.connect(gain);
 				return g;
 			});
-			// Clicks are always scheduled while playing; this gain turns them on and off live.
-			// The click bypasses the music's headroom and limiter so it stays loud over a full mix.
-			this.metroGain = new GainNode(this.ctx, { gain: store.get().metronome ? 1 : 0 });
-			this.metroGain.connect(this.ctx.destination);
-			this.clickBufs = [makeClick(false), makeClick(true)];
-			if (this.tap) this.tap(this.ctx, limiter, this.metroGain);
+			if (this.tap) this.tap(this.ctx, limiter);
 		}
 		return this.ctx;
 	}
@@ -254,33 +224,6 @@ class Engine {
 		});
 	}
 
-	applyMetronome(): void {
-		if (!this.ctx || !this.metroGain) return;
-		const now = this.ctx.currentTime;
-		this.metroGain.gain.cancelScheduledValues(now);
-		this.metroGain.gain.setTargetAtTime(store.get().metronome ? 1 : 0, now, 0.003);
-	}
-
-	// One click per beat, on the same audio clock as the clips, so a kick that sits on the grid
-	// lands exactly on its click. Bar downbeats (every 4 beats from beat 0) are brighter.
-	private scheduleClicks(now: number): void {
-		const ctx = this.ctx!;
-		const until = this.map.beatAtSeconds(now + METRO_AHEAD);
-		for (; this.metroNextBeat <= until; this.metroNextBeat++) {
-			const b = this.metroNextBeat;
-			const when = this.t0 + (this.map.secondsAtBeat(b) - this.startSec);
-			if (when < ctx.currentTime + 0.005) continue;
-			const src = new AudioBufferSourceNode(ctx, { buffer: this.clickBufs![b % 4 === 0 ? 1 : 0] });
-			src.connect(this.metroGain!);
-			src.start(when);
-			this.clicks.add(src);
-			src.onended = () => {
-				this.clicks.delete(src);
-				src.disconnect();
-			};
-		}
-	}
-
 	// Current playhead in seconds on the set's clock.
 	private positionSec(): number {
 		const latency = this.ctx!.outputLatency || 0;
@@ -331,7 +274,6 @@ class Engine {
 		this.startSec = from;
 		this.t0 = ctx.currentTime + 0.08;
 		this.running = true;
-		this.metroNextBeat = Math.ceil(map.beatAtSeconds(from) - 1e-6);
 		this.tick(token);
 		this.timer = setInterval(() => this.tick(token), 200);
 	}
@@ -421,7 +363,6 @@ class Engine {
 			const v = this.launch(it, buf, ctx.currentTime + 0.03, false);
 			if (v) this.sources.set(it.id, v);
 		}
-		this.scheduleClicks(now);
 		this.evict(now, this.items);
 		if (now > this.endSec + 0.3 && now > this.startSec + 0.3) {
 			const endBeat = this.map.beatAtSeconds(this.endSec);
@@ -465,15 +406,6 @@ class Engine {
 		this.running = false;
 		for (const v of this.sources.values()) this.drop(v);
 		this.sources.clear();
-		for (const c of this.clicks) {
-			try {
-				c.stop();
-			} catch {
-				// not started yet
-			}
-			c.disconnect();
-		}
-		this.clicks.clear();
 	}
 
 	stop(atBeat?: number): void {

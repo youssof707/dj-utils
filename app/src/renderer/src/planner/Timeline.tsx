@@ -4,7 +4,7 @@ import { cueMarks } from "@shared/cues";
 import { fadeGain, fitFades } from "@shared/fades";
 import { blocksToPoints, bpmAt } from "@shared/tempo";
 import { addTempo, toggleTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
-import { cueSpot } from "./cues";
+import { cueSpot, placeCue } from "./cues";
 import { useLibraryDrop } from "./libraryDrag";
 import { refreshTrackKeys } from "./trackKeys";
 import { engine } from "./engine";
@@ -473,6 +473,14 @@ function Lanes({ width }: { width: number }) {
 		if (e.button !== 0) return;
 		e.stopPropagation();
 		store.set({ menu: null });
+		const cueTool = store.get().cueTool !== null;
+		if (cueTool) {
+			// A cue button is on: the click puts that cue on the track, on the nearest beat line.
+			const clip = item.lane === TEMPO_ROW ? undefined : doc.clips.find((c) => c.id === item.id);
+			const track = clip && tracks.get(clip.trackId);
+			if (clip && track) placeCue(track, clip.offsetBeat + (e.clientX - (e.currentTarget as HTMLElement).getBoundingClientRect().left) / store.get().pxPerBeat, store.get().pxPerBeat, false);
+			return;
+		}
 		if (splitToolOn()) {
 			// Cuts on the nearest line drawn at this zoom (Option: exactly where clicked). A
 			// clip that is part of the selection takes the other selected clips with it.
@@ -741,7 +749,7 @@ function Lanes({ width }: { width: number }) {
 	const onBackgroundDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
 		store.set({ menu: null });
-		if (splitToolOn() || flagTool()) return; // a cut or mute that missed every clip changes nothing
+		if (splitToolOn() || flagTool() || store.get().cueTool !== null) return; // a cut, mute or cue that missed every clip changes nothing
 		const el = ref.current!;
 		const sx = e.clientX;
 		const sy = e.clientY;

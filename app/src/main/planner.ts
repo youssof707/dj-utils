@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { Worker } from "node:worker_threads";
-import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type CueChange, type CueInfo, type CueRow, HOT_CUES, type PlannerDoc, type ProbeResult, type RekordboxGrid, type RekordboxLibrary, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
+import { PEAKS_EXT, rampKey, SAMPLE_RATE, stretchKey, type RampRequest, type EditExportRequest, type EditExportResult, type ExportRequest, type ExportResult, type Cue, type CueChange, type CueInfo, type CueRow, HOT_CUES, type PlannerDoc, type ProbeResult, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, type PlaylistStatus, type TagChange, type TagChangeResult, type SetFile, type SetInfo, type SetView, type StretchRequest, type StretchResult } from "../shared/planner";
 import { normalizeDoc, renderingsFor, tempoMapOf } from "../shared/renderings";
 import { afconvertToWav } from "./audio/dsp";
 import { readGridTag, type SpliceResult } from "./audio/splice";
@@ -424,7 +424,131 @@ async function rekordboxLibrary(): Promise<RekordboxLibrary | null> {
 			if (!library) throw e;
 		}
 	}
-	return library;
+	return library && { ...library, canTag: fs.existsSync(sqlcipherPath()) };
+}
+
+// Gives a library track the tags asked for, in Rekordbox's database. Takes its turn with
+// the cue changes; the library is read again next time, as the database has changed.
+async function setTrackTags(change: TagChange): Promise<TagChangeResult> {
+	const dbPath = rekordboxDb;
+	if (!dbPath) throw new Error("There is no Rekordbox library here");
+	if (!change || typeof change.contentId !== "string" || !Array.isArray(change.keep) || !Array.isArray(change.create)) throw new Error("That is not a change of tags");
+	return inCueTurn(async () => {
+		const bin = sqlcipherPath();
+		if (!fs.existsSync(bin)) throw new Error("Tags cannot be changed in this build of the app");
+		return runWorker<TagChangeResult>({ type: "rekordbox-tag-change", job: { bin, dbPath, change } }, () => {});
+	});
+}
+
+// ---- playlist mode ------------------------------------------------------------------
+// A set can own one Rekordbox playlist. Syncing wipes it and fills it with the set's tracks
+// in the order the set first plays them.
+
+const pathKey = (p: string): string => path.resolve(p).normalize("NFC");
+
+// The Rekordbox track of each of these files, in order, without repeats, and the names of
+// the files Rekordbox does not have. A file is found by where it is, or else by its
+// analysis (a copy of a library file somewhere else).
+async function contentIdsOf(lib: RekordboxLibrary, paths: string[]): Promise<{ ids: string[]; missing: string[] }> {
+	const byPath = new Map<string, string>();
+	for (const t of lib.tracks) if (t.path && path.isAbsolute(t.path)) byPath.set(pathKey(t.path), t.id);
+	const ids: string[] = [];
+	const missing: string[] = [];
+	let cuesRead = false;
+	for (const p of paths) {
+		let id = byPath.get(pathKey(p));
+		if (!id) {
+			const m = await rekordboxMatch(p, false);
+			if (m) {
+				if (!cuesRead) await loadCues();
+				cuesRead = true;
+				id = cueLibrary.contents[datKey(m.dat)]?.id;
+			}
+		}
+		if (!id) missing.push(path.basename(p).replace(/\.[^.]+$/, ""));
+		else if (!ids.includes(id)) ids.push(id);
+	}
+	return { ids, missing };
+}
+
+const cleanPaths = (v: unknown): string[] => [...new Set(Array.isArray(v) ? v.filter((p): p is string => typeof p === "string" && path.isAbsolute(p)) : [])];
+
+function ownerOf(playlistId: string, except: string): SetFile | null {
+	return allSets().find((s) => s.playlist === playlistId && s.id !== except) ?? null;
+}
+
+async function playlistStatus(setId: string, paths: string[]): Promise<PlaylistStatus | null> {
+	const lib = await rekordboxLibrary();
+	if (!lib) return null;
+	let own: string | undefined;
+	try {
+		own = readSet(setId).playlist;
+	} catch {
+		// not stored yet: it owns nothing
+	}
+	const owners = new Map<string, string>();
+	for (const s of allSets()) if (s.playlist && s.id !== setId) owners.set(s.playlist, s.name);
+	const linked = (own && lib.playlists.find((p) => p.id === own)) || null;
+	const { ids, missing } = await contentIdsOf(lib, cleanPaths(paths));
+	return {
+		linked,
+		playlists: lib.playlists.map((p) => (owners.has(p.id) ? { ...p, takenBy: owners.get(p.id) } : p)),
+		tracks: ids.length,
+		missing,
+		synced: !!linked && linked.tracks.length === ids.length && linked.tracks.every((t, i) => t === ids[i]),
+		canWrite: fs.existsSync(sqlcipherPath()),
+	};
+}
+
+// Makes the set own this playlist (null: none). A playlist another set owns is refused.
+function storedSet(setId: string): SetFile {
+	try {
+		return readSet(setId);
+	} catch {
+		throw new Error("Add a track to the set first");
+	}
+}
+
+function linkPlaylist(setId: string, playlistId: string | null): void {
+	const s = storedSet(setId);
+	if (playlistId !== null) {
+		if (typeof playlistId !== "string" || !playlistId) throw new Error("That is not a playlist");
+		const other = ownerOf(playlistId, setId);
+		if (other) throw new Error(`That playlist belongs to the set “${other.name}”`);
+		s.playlist = playlistId;
+	} else delete s.playlist;
+	writeAtomic(setFilePath(setId), JSON.stringify(s));
+}
+
+function writeBin(): { bin: string; dbPath: string } {
+	const dbPath = rekordboxDb;
+	if (!dbPath) throw new Error("There is no Rekordbox library here");
+	const bin = sqlcipherPath();
+	if (!fs.existsSync(bin)) throw new Error("Playlists cannot be written in this build of the app");
+	return { bin, dbPath };
+}
+
+// Makes a new Rekordbox playlist and gives it to the set.
+async function createSetPlaylist(setId: string, name: string): Promise<void> {
+	storedSet(setId); // the set has to be stored to own anything
+	const made = await inCueTurn(async () => {
+		const { bin, dbPath } = writeBin();
+		return runWorker<RekordboxPlaylist>({ type: "rekordbox-playlist-create", job: { bin, dbPath, name: String(name ?? "") } }, () => {});
+	});
+	linkPlaylist(setId, made.id);
+}
+
+// Makes the set's playlist hold exactly the set's tracks, in the order given.
+async function syncSetPlaylist(setId: string, paths: string[]): Promise<void> {
+	const own = storedSet(setId).playlist;
+	if (!own) throw new Error("Link a playlist first");
+	const lib = await rekordboxLibrary();
+	if (!lib?.playlists.some((p) => p.id === own)) throw new Error("This playlist is no longer in Rekordbox");
+	const { ids } = await contentIdsOf(lib, cleanPaths(paths));
+	await inCueTurn(async () => {
+		const { bin, dbPath } = writeBin();
+		return runWorker<string[]>({ type: "rekordbox-playlist-fill", job: { bin, dbPath, playlistId: own, tracks: ids } }, () => {});
+	});
 }
 
 // The file's beat grid: Rekordbox's when it has analysed the file, otherwise the one an
@@ -752,7 +876,7 @@ function storeSet(id: string, name: string | null, view: SetView, doc: PlannerDo
 	const asked = (name ?? "").trim();
 	const finalName = asked && asked !== old?.name ? freeName(asked, id) : (old?.name ?? freeName(datedName(), id));
 	const changed = !old || old.name !== finalName || JSON.stringify(old.doc) !== JSON.stringify(doc);
-	const s: SetFile = { id, name: finalName, createdAt: old?.createdAt ?? now, updatedAt: changed ? now : old!.updatedAt, openedAt: now, view, doc };
+	const s: SetFile = { id, name: finalName, createdAt: old?.createdAt ?? now, updatedAt: changed ? now : old!.updatedAt, openedAt: now, view, doc, ...(old?.playlist ? { playlist: old.playlist } : {}) };
 	writeAtomic(setFilePath(id), JSON.stringify(s));
 	return finalName;
 }
@@ -1079,6 +1203,11 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:cue-delete", (_e, p: string, remove: string[]) => deleteCues(p, remove));
 	ipcMain.handle("planner:cue-apply", (_e, p: string, remove: string[], insert: CueRow[]) => applyCues(p, remove, insert));
 	ipcMain.handle("planner:rekordbox-library", () => rekordboxLibrary());
+	ipcMain.handle("planner:tags-set", (_e, change: TagChange) => setTrackTags(change));
+	ipcMain.handle("planner:playlist-status", (_e, setId: string, paths: string[]) => playlistStatus(setId, paths));
+	ipcMain.handle("planner:playlist-link", (_e, setId: string, playlistId: string | null) => linkPlaylist(setId, playlistId));
+	ipcMain.handle("planner:playlist-create", (_e, setId: string, name: string) => createSetPlaylist(setId, name));
+	ipcMain.handle("planner:playlist-sync", (_e, setId: string, paths: string[]) => syncSetPlaylist(setId, paths));
 	// A rendering dropped because the set moved on is not an error: it comes back as null
 	// (the preload turns that into a "cancelled" rejection), so Electron does not log it.
 	const quietCancel = <T>(p: Promise<T>): Promise<T | null> => p.catch((e) => (e instanceof Error && e.message === "cancelled" ? null : Promise.reject(e)));

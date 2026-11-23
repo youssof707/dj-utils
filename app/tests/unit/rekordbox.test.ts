@@ -347,7 +347,7 @@ describe("tracks and playlists from the database", () => {
 		const lib = readLibrary(db);
 		expect(lib.tracks.map((t) => t.id)).toEqual(["t2", "t1", "t3", "t5"]);
 		expect(lib.tracks.map((t) => t.added)).toEqual([0, 1, 2, 3]);
-		expect(lib.tracks[1]).toEqual({ id: "t1", title: "Belfast", artist: "Orbital", bpm: 128, key: "8A", keyOrder: 14, lengthSec: 480, path: song, available: true, added: 1 });
+		expect(lib.tracks[1]).toEqual({ id: "t1", title: "Belfast", artist: "Orbital", bpm: 128, key: "8A", keyOrder: 14, lengthSec: 480, path: song, available: true, added: 1, tags: [] });
 		// no title: the file's name; a file that is gone cannot be loaded
 		expect(lib.tracks[0]).toMatchObject({ title: "Gone", artist: "", bpm: 90.5, key: "7B", available: false });
 		expect(lib.tracks[2]).toMatchObject({ bpm: 0, key: "odd", keyOrder: null });
@@ -357,5 +357,36 @@ describe("tracks and playlists from the database", () => {
 			{ id: "p2", name: "Clubs / Warm up", tracks: ["t3", "t1"] },
 			{ id: "p1", name: "Late", tracks: ["t2"] },
 		]);
+		// this database has no My Tag tables: no tags, and the rest still reads
+		expect(lib.tags).toEqual([]);
+	});
+
+	it("reads only the app's tags, in Rekordbox's order, and which tracks have them", () => {
+		const home = testDir("db-tags-");
+		const db = path.join(home, "master.db");
+		writeDatabase(
+			db,
+			[
+				"create table djmdArtist (ID text, Name text, rb_local_deleted integer);",
+				"create table djmdKey (ID text, ScaleName text, rb_local_deleted integer);",
+				"create table djmdContent (ID text, FolderPath text, Title text, ArtistID text, BPM integer, Length integer, KeyID text, rb_local_deleted integer, created_at text);",
+				"create table djmdPlaylist (ID text, Seq integer, Name text, Attribute integer, ParentID text, rb_local_deleted integer);",
+				"create table djmdSongPlaylist (ID text, PlaylistID text, ContentID text, TrackNo integer, rb_local_deleted integer);",
+				"create table djmdMyTag (ID text, Seq integer, Name text, Attribute integer, ParentID text, rb_local_deleted integer);",
+				"create table djmdSongMyTag (ID text, MyTagID text, ContentID text, TrackNo integer, rb_local_deleted integer);",
+				"insert into djmdContent values ('t1', '/x/a.mp3', 'A', null, 0, 1, null, 0, '2024-01-01'), ('t2', '/x/b.mp3', 'B', null, 0, 1, null, 0, '2024-01-02');",
+				// the app's category and one of Rekordbox's; tags out of order; a deleted tag; a tag in no category
+				"insert into djmdMyTag values ('g2', 2, 'Situation', 1, 'root', 0), ('g1', 1, 'DJ Utilities', 1, 'root', 0);",
+				"insert into djmdMyTag values ('x2', 2, 'Techno', 0, 'g1', 0), ('x1', 1, 'House', 0, 'g1', 0), ('x3', 1, 'Peak', 0, 'g2', 0), ('x4', 3, 'Gone', 0, 'g1', 1), ('x5', 1, 'Lost', 0, 'nowhere', 0);",
+				"insert into djmdSongMyTag values ('s1', 'x2', 't1', 1, 0), ('s2', 'x3', 't1', 1, 0), ('s3', 'x4', 't1', 1, 0), ('s4', 'x1', 't2', 1, 1), ('s5', 'x5', 't2', 1, 0);",
+			].join("\n"),
+		);
+		const lib = readLibrary(db);
+		expect(lib.tags).toEqual([
+			{ id: "x1", name: "House" },
+			{ id: "x2", name: "Techno" },
+		]);
+		// Peak is Rekordbox's own: left out
+		expect(lib.tracks.map((t) => t.tags)).toEqual([["x2"], []]);
 	});
 });

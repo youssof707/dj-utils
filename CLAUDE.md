@@ -26,3 +26,11 @@
 
 - In dev (unpackaged) the app keeps ALL its data in the gitignored `dev-data/` at the repo root: sets, caches, stretched audio, Rekordbox caches, downloads ledger, Chromium data, logs, temp files (`app/src/main/paths.ts`). It can be deleted at any time; the next launch makes it again. Packaged builds use the normal OS folders.
 - Tests write only inside `dev-data/test-runs/<run>/`, which is removed when the run ends (`app/tests/globalSetup.ts`). In tests, get folders from `testDir()` in `app/tests/testdata.ts`. Never use `os.tmpdir()`, the home folder, or a path of your own.
+
+## UI design
+
+- Before adding a line, row or panel, look for room in what is already there, and keep the surrounding UI just as dense.
+- Empty states take no space and need no text unless the emptiness is not obvious.
+- Hover and selection stay subtle and only show while the user is actually on that element; check each colour against the background it sits on.
+- When a layout request would make the UI bigger or busier, build the version that gets the same result more compactly, and say so in one line.
+- Before replying on UI work, walk through every state: empty, full, overflowing, hovered, not hovered, selected.

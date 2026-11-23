@@ -18,7 +18,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SAMPLE_RATE, type CueRow, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, type RekordboxTrack } from "../shared/planner";
+import { SAMPLE_RATE, type CueRow, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, APP_TAG_GROUP, type RekordboxTag, type RekordboxTrack, type TagChange, type TagChangeResult } from "../shared/planner";
 import { WavReader } from "./audio/wav";
 
 export type AnlzBeat = { no: number; tempo: number; ms: number }; // bar position 1-4, BPM x 100, time
@@ -509,14 +509,18 @@ function readEncrypted(dbPath: string): Buffer {
 
 // The rows each query gives, read from a plain copy of the database that is deleted again
 // straight away. Never touches the files Rekordbox has open.
-function queryDatabase(dbPath: string, sqls: string[]): Record<string, unknown>[][] {
+// A query given as `{ optional }` gives no rows instead of failing, for tables that not
+// every database has.
+function queryDatabase(dbPath: string, sqls: (string | { optional: string })[]): Record<string, unknown>[][] {
 	const plain = decryptDatabase(readEncrypted(dbPath));
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dj-rb-"));
 	try {
 		const file = path.join(dir, "library.db");
 		fs.writeFileSync(file, plain, { mode: 0o600 });
-		return sqls.map((sql) => {
+		return sqls.map((q) => {
+			const sql = typeof q === "string" ? q : q.optional;
 			const r = spawnSync(SQLITE, ["-readonly", "-json", file, sql], { encoding: "utf8", maxBuffer: 1 << 28 });
+			if (r.status !== 0 && typeof q !== "string") return [];
 			if (r.status !== 0) throw new Error(`Rekordbox database could not be read: ${(r.stderr || String(r.error ?? "")).trim()}`);
 			return r.stdout.trim() ? (JSON.parse(r.stdout) as Record<string, unknown>[]) : [];
 		});
@@ -687,6 +691,209 @@ export function changeCues(bin: string, dbPath: string, job: CueChangeJob): CueC
 	return { removed: rows("removed"), added: rows("added") };
 }
 
+// ---- changing My Tags ---------------------------------------------------------------
+
+// The columns of Rekordbox's tag tables; as with cues, a table that has changed is not written.
+export const TAG_COLUMNS = ["ID", "Seq", "Name", "Attribute", "ParentID", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "usn", "rb_local_usn", "created_at", "updated_at"];
+export const SONG_TAG_COLUMNS = ["ID", "MyTagID", "ContentID", "TrackNo", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "usn", "rb_local_usn", "created_at", "updated_at"];
+
+const newRowId = (): string => String(crypto.randomInt(1, 0xffffffff));
+
+// Gives a track exactly the app tags `job` asks for, in one step that happens whole or not
+// at all: app tags it should no longer have are taken off, new tags are made in the
+// APP_TAG_GROUP category (made first if missing; a tag of the same name there is used
+// instead), and the rest are put on. The track's other My Tags are not touched. Doing it
+// twice changes nothing.
+export function changeTags(bin: string, dbPath: string, job: TagChange): TagChangeResult {
+	const c = sqlValue(job.contentId);
+	const at = sqlValue(stampNow());
+	const live = (t: string): string => `coalesce(${t}.rb_local_deleted, 0) = 0`;
+	const columns = (table: string, cols: string[]): string =>
+		`insert into dj_check select (select group_concat(name, ',') from (select name from pragma_table_info('${table}') order by cid)) = ${sqlValue(cols.join(","))};`;
+	const keep = [...new Set(job.keep.filter((id) => typeof id === "string" && id))];
+	const create = [...new Set(job.create.map((t) => String(t?.name ?? "").trim().slice(0, 255)).filter(Boolean))];
+	// the app's category, as SQL
+	const g = "(select id from dj_group limit 1)";
+	const ours = `(select t.ID from djmdMyTag t where t.ParentID = ${g} and t.Attribute = 0)`;
+	const made: string[] = [];
+	const lines = [
+		`PRAGMA key = '${DB_KEY}';`,
+		"PRAGMA cipher_compatibility = 4;",
+		"PRAGMA busy_timeout = 3000;",
+		"PRAGMA wal_autocheckpoint = 0;",
+		"create temp table dj_check (ok integer, constraint tag_table_changed check (ok));",
+		columns("djmdMyTag", TAG_COLUMNS),
+		columns("djmdSongMyTag", SONG_TAG_COLUMNS),
+		"create temp table dj_track (ok integer, constraint track_missing check (ok));",
+		`insert into dj_track select exists (select 1 from djmdContent c where c.ID = ${c} and ${live("c")});`,
+		"create temp table dj_want (n integer, id text);",
+		"create temp table dj_group (id text);",
+		"BEGIN IMMEDIATE;",
+		`insert into dj_group select t.ID from djmdMyTag t where t.ParentID = 'root' and t.Attribute = 1 and ${live("t")} and trim(t.Name) = ${sqlValue(APP_TAG_GROUP)} order by t.Seq, t.ID limit 1;`,
+	];
+	if (create.length) {
+		const id = sqlValue(newRowId());
+		lines.push(
+			`insert into djmdMyTag (${TAG_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${id}, coalesce((select max(t.Seq) from djmdMyTag t where t.ParentID = 'root' and ${live("t")}), 0) + 1, ${sqlValue(APP_TAG_GROUP)}, 1, 'root', ${sqlValue(crypto.randomUUID())}, 0, 0, 0, 0, NULL, NULL, ${at}, ${at} ` +
+				`where not exists (select 1 from dj_group) and not exists (select 1 from djmdMyTag where ID = ${id});`,
+			`insert into dj_group select ID from djmdMyTag where ID = ${id} and not exists (select 1 from dj_group);`,
+		);
+	}
+	let n = 0;
+	for (const id of keep) lines.push(`insert into dj_want select ${n++}, t.ID from djmdMyTag t where t.ID = ${sqlValue(id)} and t.ParentID = ${g} and t.Attribute = 0 and ${live("t")};`);
+	for (const name of create) {
+		const id = newRowId();
+		made.push(id);
+		const same = `t.ParentID = ${g} and t.Attribute = 0 and ${live("t")} and lower(trim(t.Name)) = lower(${sqlValue(name)})`;
+		lines.push(
+			`insert into djmdMyTag (${TAG_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${sqlValue(id)}, coalesce((select max(t.Seq) from djmdMyTag t where t.ParentID = ${g} and ${live("t")}), 0) + 1, ${sqlValue(name)}, 0, ${g}, ${sqlValue(crypto.randomUUID())}, 0, 0, 0, 0, NULL, NULL, ${at}, ${at} ` +
+				`where exists (select 1 from dj_group) and not exists (select 1 from djmdMyTag t where ${same}) and not exists (select 1 from djmdMyTag where ID = ${sqlValue(id)});`,
+			`insert into dj_want select ${n++}, t.ID from djmdMyTag t where ${same} order by t.Seq, t.ID limit 1;`,
+		);
+	}
+	lines.push(`delete from djmdSongMyTag where ContentID = ${c} and MyTagID in ${ours} and MyTagID not in (select id from dj_want);`);
+	for (let i = 0; i < n; i++) {
+		const id = sqlValue(newRowId());
+		lines.push(
+			`insert into djmdSongMyTag (${SONG_TAG_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${id}, w.id, ${c}, coalesce((select max(s.TrackNo) from djmdSongMyTag s where s.MyTagID = w.id and ${live("s")}), 0) + 1, ${sqlValue(crypto.randomUUID())}, 0, 0, 0, 0, NULL, NULL, ${at}, ${at} ` +
+				`from dj_want w where w.n = ${i} and not exists (select 1 from djmdSongMyTag s where s.ContentID = ${c} and s.MyTagID = w.id and ${live("s")}) and not exists (select 1 from djmdSongMyTag where ID = ${id});`,
+		);
+	}
+	lines.push(`select 'DJ:tags:' || json_group_array(MyTagID) from (select s.MyTagID from djmdSongMyTag s where s.ContentID = ${c} and s.MyTagID in ${ours} and ${live("s")} order by s.ID);`);
+	if (made.length) lines.push(`select 'DJ:created:' || json_group_array(json_object('id', ID, 'name', Name)) from djmdMyTag where ID in (${made.map(sqlValue).join(", ")});`);
+	lines.push("COMMIT;");
+
+	const r = spawnSync(bin, ["-batch", "-bail", dbPath], { input: lines.join("\n"), encoding: "utf8", maxBuffer: 1 << 26 });
+	if (r.status !== 0) {
+		const said = (r.stderr || String(r.error ?? "")).trim();
+		if (/tag_table_changed|no such table/.test(said)) throw new Error("This version of Rekordbox is not supported for changing tags yet");
+		if (/track_missing/.test(said)) throw new Error("This track is no longer in Rekordbox");
+		if (/locked|busy/i.test(said)) throw new Error("Rekordbox is busy with its library. Try again in a moment");
+		throw new Error(`Rekordbox's database could not be changed: ${said.split("\n").pop()}`);
+	}
+	const out = <T>(tag: string): T[] => {
+		const line = r.stdout.split("\n").find((l) => l.startsWith(`DJ:${tag}:`));
+		return line ? (JSON.parse(line.slice(tag.length + 4)) as T[]) : [];
+	};
+	return {
+		tags: out<unknown>("tags").map(String),
+		created: out<{ id: unknown; name: unknown }>("created").map((t) => ({ id: String(t.id), name: String(t.name) })),
+	};
+}
+
+// ---- writing playlists --------------------------------------------------------------
+
+// The columns of Rekordbox's playlist tables; as with cues, a table that has changed is not written.
+export const PLAYLIST_COLUMNS = ["ID", "Seq", "Name", "ImagePath", "Attribute", "ParentID", "SmartList", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "usn", "rb_local_usn", "created_at", "updated_at"];
+export const SONG_PLAYLIST_COLUMNS = ["ID", "PlaylistID", "ContentID", "TrackNo", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "usn", "rb_local_usn", "created_at", "updated_at"];
+
+// Runs one change to the playlist tables, whole or not at all, and gives back what it printed.
+function writePlaylists(bin: string, dbPath: string, checks: string[], steps: string[]): string {
+	const columns = (table: string, cols: string[]): string =>
+		`insert into dj_check select (select group_concat(name, ',') from (select name from pragma_table_info('${table}') order by cid)) = ${sqlValue(cols.join(","))};`;
+	const lines = [
+		`PRAGMA key = '${DB_KEY}';`,
+		"PRAGMA cipher_compatibility = 4;",
+		"PRAGMA busy_timeout = 3000;",
+		"PRAGMA wal_autocheckpoint = 0;",
+		"create temp table dj_check (ok integer, constraint playlist_table_changed check (ok));",
+		columns("djmdPlaylist", PLAYLIST_COLUMNS),
+		columns("djmdSongPlaylist", SONG_PLAYLIST_COLUMNS),
+		...checks,
+		"BEGIN IMMEDIATE;",
+		...steps,
+		"COMMIT;",
+	];
+	const r = spawnSync(bin, ["-batch", "-bail", dbPath], { input: lines.join("\n"), encoding: "utf8", maxBuffer: 1 << 26 });
+	if (r.status !== 0) {
+		const said = (r.stderr || String(r.error ?? "")).trim();
+		if (/playlist_table_changed|no such table/.test(said)) throw new Error("This version of Rekordbox is not supported for writing playlists yet");
+		if (/playlist_missing/.test(said)) throw new Error("This playlist is no longer in Rekordbox");
+		if (/locked|busy/i.test(said)) throw new Error("Rekordbox is busy with its library. Try again in a moment");
+		throw new Error(`Rekordbox's database could not be changed: ${said.split("\n").pop()}`);
+	}
+	return r.stdout;
+}
+
+const printed = <T>(out: string, tag: string): T | null => {
+	const line = out.split("\n").find((l) => l.startsWith(`DJ:${tag}:`));
+	return line ? (JSON.parse(line.slice(tag.length + 4)) as T) : null;
+};
+
+// Rekordbox also lists its playlists in masterPlaylists6.xml beside the database, by id in
+// hex, each with the time it last changed. A playlist made here is added to it and one
+// filled here gets a new time, the way Rekordbox does it itself. Left alone when the file
+// is not there or not one we know.
+export function notePlaylist(dbPath: string, id: string, isNew: boolean): void {
+	const file = path.join(path.dirname(dbPath), "masterPlaylists6.xml");
+	const no = Number(id);
+	if (!/^\d+$/.test(id) || !Number.isSafeInteger(no)) return;
+	const hex = no.toString(16).toUpperCase();
+	try {
+		const xml = fs.readFileSync(file, "utf8");
+		const node = new RegExp(`(<NODE Id="${hex}"[^>]*?Timestamp=")\\d+(")`, "i");
+		let next: string;
+		if (node.test(xml)) next = xml.replace(node, `$1${Date.now()}$2`);
+		else if (isNew && xml.includes("</PLAYLISTS>")) next = xml.replace("</PLAYLISTS>", `  <NODE Id="${hex}" ParentId="0" Attribute="0" Timestamp="${Date.now()}" Lib_Type="0" CheckType="0"/>\n  </PLAYLISTS>`);
+		else return;
+		const tmp = `${file}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, next);
+		fs.renameSync(tmp, file);
+	} catch {
+		// no such file: the database alone holds the playlist
+	}
+}
+
+// Makes an empty playlist at the top level of Rekordbox's playlists, after the others.
+export function createPlaylist(bin: string, dbPath: string, name: string): RekordboxPlaylist {
+	const want = name.trim().slice(0, 255);
+	if (!want) throw new Error("A playlist needs a name");
+	const id = sqlValue(newRowId());
+	const at = sqlValue(stampNow());
+	const out = writePlaylists(
+		bin,
+		dbPath,
+		[],
+		[
+			`insert into djmdPlaylist (${PLAYLIST_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${id}, coalesce((select max(p.Seq) from djmdPlaylist p where p.ParentID = 'root' and coalesce(p.rb_local_deleted, 0) = 0), 0) + 1, ${sqlValue(want)}, NULL, 0, 'root', NULL, ${sqlValue(crypto.randomUUID())}, 0, 0, 0, 0, NULL, NULL, ${at}, ${at} ` +
+				`where not exists (select 1 from djmdPlaylist where ID = ${id});`,
+			`select 'DJ:playlist:' || json_object('id', ID, 'name', Name) from djmdPlaylist where ID = ${id};`,
+		],
+	);
+	const made = printed<{ id: unknown; name: unknown }>(out, "playlist");
+	if (!made) throw new Error("The playlist was not made. Try again");
+	notePlaylist(dbPath, String(made.id), true);
+	return { id: String(made.id), name: String(made.name), tracks: [] };
+}
+
+// Makes the playlist hold exactly these tracks, in this order: whatever it held before is
+// taken out. Tracks no longer in Rekordbox are left out. Gives back what it holds now.
+export function fillPlaylist(bin: string, dbPath: string, playlistId: string, tracks: string[]): string[] {
+	const p = sqlValue(playlistId);
+	const at = sqlValue(stampNow());
+	const live = (t: string): string => `coalesce(${t}.rb_local_deleted, 0) = 0`;
+	const steps = [`delete from djmdSongPlaylist where PlaylistID = ${p};`];
+	for (const c of [...new Set(tracks.filter((t) => typeof t === "string" && t))]) {
+		const id = sqlValue(crypto.randomUUID());
+		steps.push(
+			`insert into djmdSongPlaylist (${SONG_PLAYLIST_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${id}, ${p}, c.ID, (select count(*) from djmdSongPlaylist s where s.PlaylistID = ${p}) + 1, ${sqlValue(crypto.randomUUID())}, 0, 0, 0, 0, NULL, NULL, ${at}, ${at} ` +
+				`from djmdContent c where c.ID = ${sqlValue(c)} and ${live("c")} and not exists (select 1 from djmdSongPlaylist where ID = ${id});`,
+		);
+	}
+	steps.push(`update djmdPlaylist set updated_at = ${at} where ID = ${p};`, `select 'DJ:tracks:' || json_group_array(ContentID) from (select s.ContentID from djmdSongPlaylist s where s.PlaylistID = ${p} order by s.TrackNo);`);
+	const out = writePlaylists(
+		bin,
+		dbPath,
+		[
+			"create temp table dj_list (ok integer, constraint playlist_missing check (ok));",
+			`insert into dj_list select exists (select 1 from djmdPlaylist l where l.ID = ${p} and l.Attribute = 0 and ${live("l")} and coalesce(l.SmartList, '') = '');`,
+		],
+		steps,
+	);
+	notePlaylist(dbPath, playlistId, false);
+	return (printed<unknown[]>(out, "tracks") ?? []).map(String);
+}
+
 // ---- tracks and playlists -----------------------------------------------------------
 
 const PITCH: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -720,12 +927,16 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 // their rules, not their tracks.
 export function readLibrary(dbPath: string): RekordboxLibrary {
 	const live = (t: string): string => `coalesce(${t}.rb_local_deleted, 0) = 0`;
-	const [trackRows, listRows, memberRows] = queryDatabase(dbPath, [
+	const [trackRows, listRows, memberRows, tagRows, songTagRows] = queryDatabase(dbPath, [
 		"select c.ID as id, c.Title as title, a.Name as artist, c.BPM as bpm, k.ScaleName as key, c.Length as length, c.FolderPath as path " +
 			`from djmdContent c left join djmdArtist a on a.ID = c.ArtistID left join djmdKey k on k.ID = c.KeyID where ${live("c")} order by c.created_at, c.ID`,
 		`select p.ID as id, p.Name as name, p.ParentID as parent, p.Attribute as kind from djmdPlaylist p where ${live("p")} order by p.Seq, p.ID`,
 		`select s.PlaylistID as list, s.ContentID as track from djmdSongPlaylist s where ${live("s")} order by s.TrackNo, s.ID`,
+		// My Tags: not in every database
+		{ optional: `select t.ID as id, t.Name as name, t.ParentID as parent, t.Attribute as kind from djmdMyTag t where ${live("t")} order by t.Seq, t.ID` },
+		{ optional: `select s.MyTagID as tag, s.ContentID as track from djmdSongMyTag s where ${live("s")} order by s.ID` },
 	]);
+	const { tags, tagsOf } = readTags(tagRows, songTagRows);
 
 	const tracks: RekordboxTrack[] = [];
 	const known = new Set<string>();
@@ -747,6 +958,7 @@ export function readLibrary(dbPath: string): RekordboxLibrary {
 			// streaming tracks have an address of the service's own instead of a file
 			available: path.isAbsolute(file) && fs.existsSync(file),
 			added: tracks.length,
+			tags: tagsOf.get(id) ?? [],
 		});
 	}
 
@@ -779,5 +991,30 @@ export function readLibrary(dbPath: string): RekordboxLibrary {
 		}
 	};
 	walk("root", "");
-	return { tracks, playlists };
+	return { tracks, playlists, tags };
+}
+
+// The app's tags (the My Tags in the APP_TAG_GROUP category), and each track's app tags,
+// in Rekordbox's order. Rekordbox's other My Tags are left out.
+function readTags(tagRows: Record<string, unknown>[], songTagRows: Record<string, unknown>[]): { tags: RekordboxTag[]; tagsOf: Map<string, string[]> } {
+	const group = tagRows.find((row) => text(row["id"]) && num(row["kind"]) === 1 && text(row["parent"]) === "root" && text(row["name"]).trim() === APP_TAG_GROUP);
+	const groupId = group ? text(group["id"]) : null;
+	const tags: RekordboxTag[] = [];
+	const known = new Set<string>();
+	for (const row of tagRows) {
+		const id = text(row["id"]);
+		if (!id || !groupId || text(row["parent"]) !== groupId || num(row["kind"]) !== 0 || known.has(id)) continue;
+		known.add(id);
+		tags.push({ id, name: text(row["name"]).trim() || "Untitled" });
+	}
+	const tagsOf = new Map<string, string[]>();
+	for (const row of songTagRows) {
+		const tag = text(row["tag"]);
+		const track = text(row["track"]);
+		if (!known.has(tag) || !track) continue;
+		const into = tagsOf.get(track) ?? [];
+		if (into.length === 0) tagsOf.set(track, into);
+		if (!into.includes(tag)) into.push(tag);
+	}
+	return { tags, tagsOf };
 }

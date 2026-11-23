@@ -110,11 +110,33 @@ describe("sets kept by the app", () => {
 		expect((await clips()).length).toBe(2);
 		h = await h.relaunch({ home: true, abrupt: true });
 		expect(onDisk(id).doc.clips.length).toBe(2);
-		// the app is back on the list, with the set in it
+		// the app opens on the set that was open, with the change in it
+		await h.page.getByTestId("topbar").waitFor();
+		expect(await state(h.page, "s => s.setId")).toBe(id);
+		await expect.poll(async () => (await clips()).length).toBe(2);
+	});
+
+	it("opens on the list next time when the app was left on it", async () => {
+		await h.page.keyboard.press("Meta+o");
+		await h.page.getByTestId("home").waitFor();
+		h = await h.relaunch({ home: true });
 		await h.page.getByTestId("home").waitFor();
 		expect(await rows()).toEqual(["Friday warm-up"]);
 		await row("Friday warm-up").click();
 		await expect.poll(async () => (await clips()).length).toBe(2);
+	});
+
+	it("comes back where the window was, at the size it was", async () => {
+		const want = await h.app.evaluate(({ BrowserWindow, screen }) => {
+			const area = screen.getPrimaryDisplay().workArea;
+			const b = { x: area.x + 40, y: area.y + 30, width: Math.min(1000, area.width - 80), height: Math.min(640, area.height - 60) };
+			BrowserWindow.getAllWindows()[0].setBounds(b);
+			return BrowserWindow.getAllWindows()[0].getBounds();
+		});
+		h = await h.relaunch({ home: true });
+		expect(await h.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds())).toEqual(want);
+		// and on the set that was open
+		expect(await state(h.page, "s => s.setId")).toBe(id);
 	});
 
 	it("Cmd+O goes to the list and Cmd+N starts a set from anywhere", async () => {
@@ -218,6 +240,7 @@ describe("sets kept by the app", () => {
 		expect(await state(h.page, "s => s.pxPerBeat")).toBe(20);
 		expect(await state(h.page, "s => s.playheadBeat")).toBe(4);
 		// and not a second time
+		await h.page.evaluate(() => (window as any).planner.goHome());
 		h = await h.relaunch({ home: true });
 		expect((await rows()).sort()).toEqual(["Old Night", "Set 2026-01-02 03.04"]);
 		await h.close();
@@ -335,6 +358,7 @@ describe("the cache of stretched audio", () => {
 		age(0);
 		const data = h.dataDir;
 		const work = h.workDir;
+		await goHome(); // so nothing is open at the next launch
 		await h.app.close();
 		extraDirs.push(data, work);
 		// a limit of one byte: at launch nothing is open, so everything goes

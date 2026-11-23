@@ -286,13 +286,15 @@ describe("planner", () => {
 	});
 
 	it("opens and closes the library", async () => {
-		await h.page.getByTestId("library-toggle").click();
+		// the library is open by default
 		await h.page.getByTestId("library").waitFor();
 		// tests never look at the Rekordbox library on this machine
 		await h.page.getByTestId("library-missing").waitFor();
 		await shot(h.page, "08b-library");
 		await h.page.getByTestId("library-toggle").click();
 		await h.page.getByTestId("library").waitFor({ state: "detached" });
+		await h.page.getByTestId("library-toggle").click();
+		await h.page.getByTestId("library").waitFor();
 	});
 
 	it("changes project BPM: clips stay on their bars and are restretched", async () => {

@@ -44,6 +44,19 @@ body.split-tool .edit-row * {
 	/* scissors beside a cut line; the hotspot is on the line */
 	cursor: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><g fill='none' stroke-linecap='round'><path d='M8 3v26' stroke='black' stroke-width='4'/><path d='M8 3v26' stroke='white' stroke-width='2'/><g stroke='black' stroke-width='4'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g><g stroke='white' stroke-width='2'><path d='M21.5 12.6 12 18.4M21.5 19.4 12 13.6'/><circle cx='24.5' cy='10.5' r='3.2'/><circle cx='24.5' cy='21.5' r='3.2'/></g></g></svg>") 8 16, col-resize !important;
 }
+/* Playlist mode: every track grey, without its key colour. */
+body.playlist-mode .clip,
+body.playlist-mode .clip-fades,
+body.playlist-mode .track-editor,
+body.playlist-mode .track-editor * {
+	--sat: 0 !important;
+}
+body.cue-tool .clip,
+body.cue-tool .clip *,
+body.cue-tool .edit-row,
+body.cue-tool .edit-row * {
+	cursor: crosshair !important;
+}
 body.mute-tool .clip,
 body.mute-tool .clip *,
 body.bass-tool .clip,
@@ -80,12 +93,6 @@ button.ghost:hover,
 button.ghost.on {
 	background: var(--panel-2);
 	color: var(--text);
-}
-button.ghost.metro.active,
-button.ghost.metro.active:hover {
-	background: rgba(91, 140, 255, 0.16);
-	color: var(--accent);
-	box-shadow: inset 0 0 0 1px var(--accent);
 }
 button.icon {
 	padding: 6px 8px;
@@ -427,6 +434,124 @@ button.play.on {
 }
 .zoom button {
 	padding: 4px 10px;
+}
+/* The second toolbar, under the top bar, for playlist mode: the set's playlist and its Sync
+   button. More tools for finishing a set go here later. */
+.toolbar {
+	height: 40px;
+	flex: none;
+	display: grid;
+	grid-template-columns: 1fr auto 1fr; /* the cue buttons stay in the middle */
+	align-items: center;
+	gap: 12px;
+	padding: 0 18px 0 14px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+}
+.sync {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+}
+.cue-tools {
+	display: flex;
+	gap: 4px;
+}
+button.cue-tool-btn {
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--muted);
+	background: var(--panel-2);
+	border: 1px solid transparent;
+}
+button.cue-tool-btn:hover {
+	color: var(--text);
+}
+button.cue-tool-btn.memory {
+	color: rgba(255, 59, 48, 0.85);
+}
+button.cue-tool-btn.on {
+	color: rgb(48, 209, 88);
+	background: rgba(48, 209, 88, 0.14);
+	border-color: rgba(48, 209, 88, 0.6);
+}
+button.cue-tool-btn.memory.on {
+	color: rgb(255, 59, 48);
+	background: rgba(255, 59, 48, 0.14);
+	border-color: rgba(255, 59, 48, 0.6);
+}
+.sync-pick {
+	position: relative;
+	min-width: 0;
+}
+.sync-pick > button {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	max-width: 220px;
+	color: var(--text);
+}
+.sync-pick > button > span:first-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.sync-menu {
+	right: auto;
+	width: 280px;
+}
+.sync-menu .playlist-options button {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+}
+.sync-menu .playlist-options button > span:first-child {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.sync-menu .playlist-options button.at {
+	background: rgba(255, 255, 255, 0.06);
+	color: inherit;
+}
+.sync-menu .playlist-options button.tag-create {
+	color: var(--accent);
+}
+.sync-menu .playlist-options button:disabled {
+	opacity: 0.45;
+}
+.sync-owner {
+	flex: none;
+	max-width: 45%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	color: var(--muted);
+	font-size: 12px;
+}
+.sync-menu .playlist-options button.sync-unlink {
+	margin-top: 4px;
+	border-top: 1px solid var(--line);
+	border-radius: 0 0 6px 6px;
+	color: var(--muted);
+}
+.sync-missing {
+	color: var(--muted);
+	font-size: 12px;
+	white-space: nowrap;
+}
+button.sync-go {
+	color: var(--accent);
+	white-space: nowrap;
+}
+button.sync-go.done:disabled {
+	opacity: 1;
+	color: var(--muted);
 }
 .topbar button.primary {
 	padding: 7px 16px;
@@ -861,13 +986,6 @@ button.play.on {
 .library > .library-resize:active {
 	background: linear-gradient(to right, transparent 3px, var(--line-strong) 3px, var(--line-strong) 5px, transparent 5px);
 }
-.library-head {
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	margin-bottom: 8px;
-	font-size: 11px;
-}
 .library h2 {
 	margin: 0;
 	font-size: 11px;
@@ -882,10 +1000,34 @@ button.play.on {
 	gap: 6px;
 	margin-bottom: 8px;
 }
+.library-search {
+	flex: 1;
+	min-width: 0;
+	position: relative;
+	display: flex;
+}
 .library-tools input.search {
 	flex: 1;
 	min-width: 0;
 	width: auto;
+}
+.library-search input.search {
+	padding-right: 26px;
+}
+.library-search-clear {
+	position: absolute;
+	right: 4px;
+	top: 50%;
+	transform: translateY(-50%);
+	display: flex;
+	padding: 5px;
+	background: transparent;
+	color: var(--muted);
+	border-radius: 4px;
+}
+.library-search-clear:hover {
+	background: transparent;
+	color: var(--text);
 }
 /* the sort order and its direction, joined into one box that matches the search field */
 .library-sort {
@@ -932,9 +1074,168 @@ button.play.on {
 	outline: none;
 	color: var(--accent);
 }
+/* the playlist, and the filter beside it */
+.library-pick {
+	position: relative;
+	display: flex;
+	gap: 6px;
+	margin-bottom: 8px;
+}
 .library-playlist {
 	position: relative;
-	margin-bottom: 8px;
+	flex: 1;
+	min-width: 0;
+}
+.library-filter-box {
+	flex: none;
+	display: flex;
+}
+/* the filter icon; while a filter is on it is lit and has an X beside it to clear it */
+.library-filter {
+	display: flex;
+	background: var(--panel-2);
+	border-radius: 6px;
+	overflow: hidden;
+}
+.library-filter > button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 9px;
+	border-radius: 0;
+	background: transparent;
+	color: var(--muted);
+}
+.library-filter > button:hover,
+.library-filter.open > button:first-child {
+	color: var(--text);
+	background: rgba(255, 255, 255, 0.05);
+}
+.library-filter.on {
+	background: rgba(91, 140, 255, 0.14);
+}
+.library-filter.on > button:first-child {
+	color: var(--accent);
+	padding-right: 4px;
+}
+.library-filter.on > .library-filter-clear {
+	padding: 0 8px 0 4px;
+	color: var(--accent);
+}
+.library-filter.on > button:hover {
+	color: #fff;
+	background: transparent;
+}
+.filter-menu {
+	position: absolute;
+	z-index: 20;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px;
+	background: var(--panel-2);
+	border: 1px solid var(--line-strong);
+	border-radius: 9px;
+	box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+.filter-bpm {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.filter-bpm input {
+	width: 64px;
+	min-width: 0;
+	padding: 4px 7px;
+	text-align: center;
+}
+.filter-label {
+	width: 28px;
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	color: var(--muted);
+}
+/* the 24 Camelot keys, 1A–12A over 1B–12B; a picked key takes its colour */
+.filter-keys {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+.filter-keys > div {
+	display: grid;
+	grid-template-columns: repeat(12, 1fr);
+	gap: 2px;
+}
+.filter-keys button {
+	min-width: 0;
+	padding: 4px 0;
+	font-size: 10.5px;
+	font-weight: 600;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--muted);
+}
+.filter-keys button:hover {
+	background: rgba(255, 255, 255, 0.06);
+	color: var(--text);
+}
+/* tag editor mode, at the foot of the filter, and the tags it puts on every row */
+.filter-tagmode {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line);
+}
+.filter-tagmode > p {
+	margin: 0;
+	font-size: 11px;
+}
+.switch.small {
+	justify-content: space-between;
+	font-size: 12px;
+}
+.switch.small button.switch-track {
+	width: 28px;
+	height: 16px;
+	border-radius: 8px;
+}
+.switch.small .switch-knob {
+	width: 12px;
+	height: 12px;
+}
+.switch.small button.switch-track.on .switch-knob {
+	transform: translateX(12px);
+}
+.filter-quick {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+.filter-quick button {
+	padding: 2px 7px;
+	font-size: 11px;
+	border-radius: 4px;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	background: transparent;
+	color: var(--muted);
+}
+.filter-quick button:hover {
+	color: var(--text);
+}
+.filter-quick button.on {
+	border: 1px solid transparent;
+	background: rgba(91, 140, 255, 0.16);
+	color: var(--accent);
+}
+.filter-keys button.on,
+.filter-keys button.on:hover {
+	background: hsl(var(--hue) calc(75% * var(--sat, 1)) 65% / 0.18);
+	color: hsl(var(--hue) calc(75% * var(--sat, 1)) 68%);
 }
 .library-playlist > button {
 	display: flex;
@@ -990,25 +1291,48 @@ button.play.on {
 	background: var(--accent);
 	color: #fff;
 }
-/* play or stop, in the row's left margin, while it is hovered or playing */
-.library-play {
-	position: absolute;
-	left: 8px;
-	top: 0;
-	bottom: 6px;
-	display: none;
-	padding: 0;
-	background: transparent;
-	color: var(--text);
-	font-size: 11px;
-	line-height: 1;
+/* the track's number in the list, small, in the row's left margin */
+/* on the title's line, out in the row's left margin */
+.library-line {
+	display: flex;
+	align-items: center;
 }
-.library-row:hover .library-play,
-.library-row.playing .library-play {
-	display: block;
+.library-line > .library-title {
+	flex: 1;
+	min-width: 0;
 }
-.library-row.playing .library-play {
+.library-no {
+	flex: none;
+	width: 18px;
+	margin: 0 2px 0 -20px;
+	color: var(--muted);
+	font-size: 8px;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.7;
+}
+.library-row.playing .library-no {
 	color: var(--accent);
+	opacity: 1;
+}
+/* centred on the row (above its 6px foot), not on the title's line like the number */
+.library-stop {
+	position: absolute;
+	left: 6px;
+	top: calc((100% - 6px) / 2);
+	transform: translateY(-50%);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	background: none;
+	cursor: pointer;
+}
+.library-stop:hover {
+	color: #fff;
 }
 /* the preview bar: from the title to the key, along the foot of the row */
 .library-bar {
@@ -1016,7 +1340,7 @@ button.play.on {
 	left: 28px;
 	right: 16px;
 	bottom: 0;
-	height: 14px;
+	height: 12px;
 	cursor: pointer;
 }
 .library-bar-line {
@@ -1066,6 +1390,12 @@ button.play.on {
 }
 .library-row:hover {
 	background: var(--panel-2);
+}
+/* the row clicked last: kept through a new search or order */
+.library-row.selected,
+.library-row.selected:hover {
+	background: color-mix(in srgb, var(--accent) 16%, transparent);
+	box-shadow: inset 2px 0 0 var(--accent);
 }
 /* the Starred list stacks its rows instead of placing each one */
 .library-row.stacked {
@@ -1149,7 +1479,19 @@ button.play.on {
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 3px;
+	gap: 2px;
+}
+/* the artist, then the track's tags right after it */
+.library-sub {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	height: 14px;
+}
+.library-sub > .library-artist {
+	flex: 0 1 auto;
+	min-width: 30px;
 }
 .library-title,
 .library-artist {
@@ -1160,7 +1502,108 @@ button.play.on {
 .library-artist {
 	font-size: 11px;
 	color: var(--muted);
-	min-height: 14px;
+}
+/* the track's tags, after the artist; they keep their room and the artist gives way */
+.library-tags {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 3px;
+	max-width: 65%;
+	height: 13px;
+	padding: 0;
+	border: 0;
+	background: none;
+	overflow: hidden;
+	cursor: pointer;
+}
+.library-tag-line {
+	flex: 0 0 auto;
+	max-width: 65%;
+	display: flex;
+	gap: 3px;
+	overflow: hidden;
+}
+.library-tag-line > .library-tags {
+	max-width: none;
+}
+/* tag editor mode: every tag has an X to take it off; a picked tag the track lacks is hollow
+   with a plus in the X's place, so it keeps its size when a click makes it solid */
+.library-edit-tag {
+	display: inline-flex;
+	align-items: center;
+	height: 13px;
+	padding: 0 2px 0 5px;
+	border: 1px solid transparent;
+	line-height: 11px;
+}
+.library-edit-tag > .library-tag-name {
+	padding: 0;
+	border-radius: 0;
+	background: none;
+	font: inherit;
+	color: inherit;
+	line-height: inherit;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.library-edit-tag > .library-tag-name:hover {
+	color: var(--text);
+}
+.library-edit-tag > .library-tag-x {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 11px;
+	height: 11px;
+	margin-left: 1px;
+	padding: 0;
+	border-radius: 2px;
+	background: none;
+	color: inherit;
+	opacity: 0.6;
+}
+button.library-tag-x:hover {
+	opacity: 1;
+	color: var(--text);
+	background: rgba(255, 255, 255, 0.1);
+}
+button.library-ghost-tag {
+	border-color: rgba(255, 255, 255, 0.14);
+	background: transparent;
+	color: rgba(138, 144, 160, 0.75);
+	cursor: pointer;
+}
+button.library-ghost-tag:hover {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+button.library-ghost-tag:hover > .library-tag-x {
+	opacity: 1;
+}
+.library-tags:hover .library-tag {
+	color: var(--text);
+}
+/* no tags: a plus, shown only while the row is hovered */
+.library-tag-add {
+	display: flex;
+	align-items: center;
+	visibility: hidden;
+}
+.library-row:hover .library-tag-add {
+	visibility: visible;
+}
+.library-tag {
+	flex: none;
+	max-width: 100%;
+	padding: 0 5px;
+	border-radius: 3px;
+	background: rgba(255, 255, 255, 0.07);
+	color: var(--muted);
+	font-size: 9.5px;
+	line-height: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .library-artist.none {
 	opacity: 0.45;
@@ -1796,6 +2239,93 @@ button.play.on {
 	border: 0;
 	border-top: 1px solid var(--line-strong);
 	margin: 5px 0;
+}
+/* the library's own menu and the tag modal sit over everything, not inside its margins */
+.library > .menu,
+.library > .modal-backdrop {
+	margin: 0;
+}
+
+/* Tags of a library track (TagModal.tsx) */
+.modal:has(.tag-modal) {
+	width: 440px;
+}
+.tag-modal .file-name {
+	margin: 2px 0 14px;
+}
+.tag-search {
+	width: 100%;
+	padding: 7px 10px;
+}
+/* sized in the component by how many tags there are, so a search does not resize it */
+.tag-list {
+	overflow-y: auto;
+	margin: 8px -6px 0;
+	padding: 0 6px;
+}
+.tag-line {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	height: 32px;
+	padding: 0 10px;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--text);
+	text-align: left;
+}
+.tag-line.at {
+	background: rgba(255, 255, 255, 0.06);
+}
+.tag-line:disabled {
+	opacity: 1;
+	cursor: default;
+}
+.tag-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.tag-new {
+	flex: none;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--accent) 16%, transparent);
+	color: var(--accent);
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+/* the tick sits at the right, so names line up with the search whether ticked or not */
+.tag-check {
+	flex: none;
+	color: var(--accent);
+	visibility: hidden;
+}
+.tag-option.on .tag-check {
+	visibility: visible;
+}
+.tag-option.on .tag-name {
+	font-weight: 600;
+}
+.tag-create {
+	color: var(--accent);
+}
+.tag-plus {
+	flex: none;
+}
+.tag-empty {
+	margin: 0;
+	padding: 8px 10px;
+	color: var(--muted);
+}
+.tag-count {
+	margin-right: auto;
+	align-self: center;
 }
 .toast {
 	position: fixed;

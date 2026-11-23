@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cueName, sameMoment } from "@shared/cues";
 import type { PlannerDoc } from "@shared/planner";
 import { TempoMap, isFlat, snapBpm } from "@shared/tempo";
-import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, toggleMetronome, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
+import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
+import { PlaylistToggle } from "./PlaylistMode";
 import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
@@ -165,7 +166,6 @@ export function TopBar() {
 	const setGen = useStore((s) => s.setGen);
 	const doc = useStore((s) => s.doc);
 	const libraryOpen = useStore((s) => s.libraryOpen);
-	const metronome = useStore((s) => s.metronome);
 	const showCues = useStore((s) => s.showCues);
 	useStore((s) => s.mediaRev);
 	useStore((s) => s.progressRev);
@@ -220,13 +220,6 @@ export function TopBar() {
 						</svg>
 					)}
 				</button>
-				<button className={`ghost icon metro${metronome ? " active" : ""}`} data-testid="metronome" onClick={() => toggleMetronome()}>
-					<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round">
-						<path d="M6 1.75h4l3.25 12.5H2.75z" />
-						<path d="M4.5 10.5h7" />
-						<path d="M8 10.5l4-6.5" />
-					</svg>
-				</button>
 				<Position />
 			</div>
 			<div className="spacer" />
@@ -258,6 +251,7 @@ export function TopBar() {
 					+
 				</button>
 			</div>
+			<PlaylistToggle />
 			<button className="primary" data-testid="export" onClick={openExport}>
 				Export
 			</button>
@@ -273,7 +267,7 @@ export function TopBar() {
 
 // ---- modals -------------------------------------------------------------------------
 
-function Modal({ children, onClose, onEnter, testId }: { children: ReactNode; onClose: () => void; onEnter?: () => void; testId: string }) {
+export function Modal({ children, onClose, onEnter, testId }: { children: ReactNode; onClose: () => void; onEnter?: () => void; testId: string }) {
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		// Take focus a moment after opening, so the key press that opened the dialog cannot

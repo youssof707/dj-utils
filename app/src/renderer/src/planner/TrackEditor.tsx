@@ -7,7 +7,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { cueMarks, type CueMark } from "@shared/cues";
 import { PEAK_BUCKET, SAMPLE_RATE, trackBeats } from "@shared/planner";
 import { barPhase, insertSections, leadBeat, place, slideSections, srcOf, type EditSection, type Placed } from "@shared/trackEdit";
-import { cueSpot } from "./cues";
+import { cueSpot, placeCue } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
 import { openFileInEditor, parseBpm } from "./actions";
 import { useLibraryDrop } from "./libraryDrag";
@@ -289,6 +289,13 @@ function Editor({ e }: { e: TrackEditUi }) {
 		if (ev.button !== 0) return;
 		const row = ev.currentTarget as HTMLElement;
 		const at = beatAt(ev.clientX);
+		// A cue button is on: the cue goes on whichever track's stretch is under the pointer.
+		if (store.get().cueTool !== null) {
+			const p = placed.find((q) => at >= q.outBeat && at < q.outBeat + q.lengthBeat);
+			const so = p ? (sources[srcOf(p.section)] ?? sources[0]) : ownLead && at >= 0 && at < lead ? sources[0] : undefined;
+			if (so) placeCue(so.track, p ? p.section.startBeat + (at - p.outBeat) : at, view.pxPerBeat, true);
+			return;
+		}
 		// S is held (set in App.tsx): a click cuts there, as on the timeline.
 		if (document.body.classList.contains("split-tool")) {
 			editCutAt(at, "out");
@@ -383,6 +390,10 @@ function Editor({ e }: { e: TrackEditUi }) {
 		if (ev.button !== 0) return;
 		const row = ev.currentTarget as HTMLElement;
 		const at = beatAt(ev.clientX);
+		if (store.get().cueTool !== null) {
+			if (at - so.off <= trackBeats(so.track)) placeCue(so.track, at - so.off, view.pxPerBeat, true);
+			return;
+		}
 		if (document.body.classList.contains("split-tool")) {
 			editCutAt(at, so.i);
 			return;

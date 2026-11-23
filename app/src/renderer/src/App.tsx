@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { autoSave, copySelection, deleteSelection, pasteText, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
+import { autoSave, copySelection, deleteSelection, pasteText, duplicateSelection, exportClips, flagTargets, importPaths, importViaDialog, flushAutoSave, goHome, moveSelectionLanes, newSet, nudgeSelection, openExport, openSet, refreshSets, runExport, saveBeforeClose, selectAll, splitAtPlayhead, toggleClipsFlag, watchCues, zoomAround, zoomToFit } from "./planner/actions";
 import { stopEditPreview, toggleEditPreview } from "./planner/editPlayer";
 import { engine } from "./planner/engine";
 import { initMedia, reconcileMedia, tempoProgress } from "./planner/media";
@@ -7,6 +7,7 @@ import { Home } from "./planner/Home";
 import { Library } from "./planner/Library";
 import { cueWaitKey } from "./planner/cues";
 import { ClipMenu, CueWait, Modals, TopBar, Toast } from "./planner/Panels";
+import { PlaylistBar } from "./planner/PlaylistMode";
 import { closeSettings, Settings } from "./planner/Settings";
 import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
@@ -141,6 +142,8 @@ function shortcut(e: KeyboardEvent): string | null {
 	const k = e.key.toLowerCase();
 	if (mod && !e.altKey) {
 		if (k === "z") return e.shiftKey ? "redo" : "undo";
+		if (k === "arrowup" && !e.shiftKey) return "lane-up";
+		if (k === "arrowdown" && !e.shiftKey) return "lane-down";
 		if (k === "a") return "select-all";
 		if (k === "d") return "duplicate";
 		if (k === "m" && !e.shiftKey) return "mute";
@@ -185,6 +188,12 @@ function onKey(e: KeyboardEvent): void {
 		return;
 	}
 	if (modalOpen()) return;
+	// Escape turns a cue button off before it means anything else.
+	if (e.key === "Escape" && store.get().cueTool !== null && !isTyping()) {
+		e.preventDefault();
+		store.set({ cueTool: null });
+		return;
+	}
 	// A set name or a search being typed takes every key, Space included.
 	if (document.activeElement instanceof HTMLInputElement && (document.activeElement.classList.contains("name-edit") || document.activeElement.classList.contains("search"))) return;
 	// Space is otherwise the transport key outside dialogs. The other fields outside dialogs
@@ -216,7 +225,7 @@ function onKey(e: KeyboardEvent): void {
 	}
 	if (store.get().screen !== "editor" && action !== "new") return;
 	e.preventDefault();
-	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right" && action !== "slide-left" && action !== "slide-right") return;
+	if (e.repeat && action !== "undo" && action !== "redo" && action !== "zoom-in" && action !== "zoom-out" && action !== "nudge-left" && action !== "nudge-right" && action !== "lane-up" && action !== "lane-down" && action !== "slide-left" && action !== "slide-right") return;
 	// ⌥← ⌥→ move the editor's selected sections in time; the timeline has no use for them.
 	if (action === "slide-left" || action === "slide-right") {
 		if (inEditor) editNudge(action === "slide-left" ? -1 : 1);
@@ -234,7 +243,8 @@ function onKey(e: KeyboardEvent): void {
 		else editSelect([]);
 		return;
 	}
-	if (action === "toggle") engine.toggle();
+	if (action === "lane-up" || action === "lane-down") moveSelectionLanes(action === "lane-up" ? -1 : 1);
+	else if (action === "toggle") engine.toggle();
 	else if (action === "cue") engine.cue();
 	else if (action === "nudge-left") nudgeSelection(-1);
 	else if (action === "nudge-right") nudgeSelection(1);
@@ -351,11 +361,16 @@ function start(): void {
 	window.addEventListener("dragover", (e) => e.preventDefault());
 	window.addEventListener("drop", (e) => e.preventDefault());
 	watchCues();
-	// The app opens on the list of sets.
-	void refreshSets().then(() => {
-		store.set({ loaded: true });
-		engine.warm();
-	});
+	// The app opens on the set that was open when it last closed, or else on the list of sets.
+	void refreshSets()
+		.then(async () => {
+			const last = await window.api.getSettings().then((st) => st.lastSetId, () => null);
+			if (last && store.get().sets?.some((x) => x.id === last)) await openSet(last, { quiet: true });
+		})
+		.finally(() => {
+			store.set({ loaded: true });
+			engine.warm();
+		});
 	// Handles for the end-to-end tests.
 	(window as unknown as { planner: unknown }).planner = {
 		store,
@@ -468,6 +483,7 @@ export default function App() {
 			) : (
 				<>
 					<TopBar />
+					<PlaylistBar />
 					{/* the library runs the full height beside both the timeline and the track editor */}
 					<div className="workspace">
 						{libraryOpen && <Library />}

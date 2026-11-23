@@ -6,7 +6,10 @@ import path from "node:path";
 import type { Settings } from "../shared/planner";
 import { dataRoot } from "./paths";
 
-type Stored = { version: 1; exportDir?: string };
+// Where the window was and how big, as it was last closed.
+export type WindowState = { x: number; y: number; width: number; height: number; maximized?: boolean; fullScreen?: boolean };
+
+type Stored = { version: 1; exportDir?: string; lastSetId?: string | null; window?: WindowState };
 
 const file = (): string => path.join(dataRoot(), "settings.json");
 
@@ -34,7 +37,26 @@ export function exportDir(): string {
 	return app.isPackaged ? path.join(app.getPath("music"), "DJ Utilities Edits") : path.join(dataRoot(), "exports");
 }
 
-const current = (): Settings => ({ exportDir: exportDir() });
+export function windowState(): WindowState | null {
+	const w = read().window;
+	if (!w || ![w.x, w.y, w.width, w.height].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+	return w;
+}
+
+export function saveWindowState(w: WindowState): void {
+	try {
+		write({ ...read(), window: w });
+	} catch (e) {
+		console.warn("[settings] could not store the window:", e);
+	}
+}
+
+const lastSetId = (): string | null => {
+	const id = read().lastSetId;
+	return typeof id === "string" && id ? id : null;
+};
+
+const current = (): Settings => ({ exportDir: exportDir(), lastSetId: lastSetId() });
 
 export function setupSettings(): void {
 	ipcMain.handle("settings:get", (): Settings => current());
@@ -42,6 +64,11 @@ export function setupSettings(): void {
 		if (patch && typeof patch.exportDir === "string") {
 			if (!path.isAbsolute(patch.exportDir)) throw new Error("Not a folder");
 			write({ ...read(), exportDir: patch.exportDir });
+		}
+		if (patch && "lastSetId" in patch) {
+			const id = patch.lastSetId;
+			if (id !== null && (typeof id !== "string" || !/^[\w-]+$/.test(id))) throw new Error("Not a set");
+			write({ ...read(), lastSetId: id });
 		}
 		return current();
 	});

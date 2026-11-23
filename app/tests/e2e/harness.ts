@@ -20,7 +20,7 @@ export type Harness = {
 };
 
 // Starts the app on its own data folder, with a new empty set open. With `home`, it is left
-// on the list of sets, as the app opens.
+// as the app opens: on the list of sets, or on the set that was open when it last closed.
 export async function launch(dataDir?: string, workDir?: string, env: Record<string, string> = {}, opts: { home?: boolean } = {}): Promise<Harness> {
 	const made: string[] = [];
 	const temp = (prefix: string): string => {
@@ -61,6 +61,7 @@ async function start(data: string, work: string, env: Record<string, string>, ma
 			if (opts.home) return next;
 			const reopened: boolean = await next.page.evaluate(async (setId) => {
 				const p = (window as any).planner;
+				if (setId && p.store.get().setId === setId) return true; // the app reopened it itself
 				if (setId && p.store.get().sets.some((s: { id: string }) => s.id === setId)) await p.openSet(setId);
 				else await p.newSet();
 				return p.store.get().setId === setId;
