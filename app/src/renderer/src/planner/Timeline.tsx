@@ -523,7 +523,9 @@ function Lanes({ width }: { width: number }) {
 		let moved = false;
 		// Shift held while dragging the middle: the originals stay and copies are dragged.
 		// The copies keep their ids for the whole drag, as Shift can be pressed or let go.
+		// A drag started with Shift held stays a copy even if Shift is let go before the drop.
 		let copying = false;
+		let copyLocked = false;
 		const copyIds = new Map(group.map((c) => [c.id, newId(base.clips.includes(c as Clip) ? "c" : "b")]));
 		let lastEvent: PointerEvent | null = null;
 		let scrollTimer: ReturnType<typeof setInterval> | undefined;
@@ -541,7 +543,7 @@ function Lanes({ width }: { width: number }) {
 				}
 				// Clips can change lanes when a clip is grabbed; tempo changes stay in their lane.
 				const dl = isTempo || groupClips.length === 0 ? 0 : Math.min(LANES - 1 - maxLane, Math.max(-minLane, laneAt(ev.clientY) - item.lane));
-				copying = ev.shiftKey;
+				copying = copyLocked || ev.shiftKey;
 				document.body.classList.toggle("dragging-copy", copying);
 				const shift = <T extends Clip | TempoBlock>(c: T): T => ({ ...c, startBeat: c.startBeat + d, ...("lane" in c ? { lane: c.lane + dl } : {}) });
 				if (copying) {
@@ -589,6 +591,7 @@ function Lanes({ width }: { width: number }) {
 			if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
 			if (!moved) {
 				moved = true;
+				copyLocked = zone === "move" && (e.shiftKey || ev.shiftKey);
 				if (zone === "move") store.set({ selection: [...moving] });
 				store.beginDrag();
 				document.body.classList.add(zone === "move" ? "dragging-move" : "dragging-trim");
@@ -708,7 +711,33 @@ function Lanes({ width }: { width: number }) {
 		window.addEventListener("keydown", key, true);
 	};
 
-	// Click on empty space moves the playhead; dragging draws a box that selects clips and tempo changes.
+	// With exactly one clip selected, a click on an empty spot of a clip lane puts a copy of
+	// it there, trimmed the same way, and selects the copy (so more clicks keep stamping).
+	// The copy's left edge goes where the click was, snapped like a move: by its bar line for
+	// a Rekordbox track. False when the click was not for this.
+	const stampCopy = (clickBeat: number, clientY: number, e: { altKey: boolean }): boolean => {
+		const s = store.get();
+		if (s.selection.length !== 1) return false;
+		const clip = s.doc.clips.find((c) => c.id === s.selection[0]);
+		const row = rowAt(clientY);
+		if (!clip || row === TEMPO_ROW) return false;
+		const track = s.doc.tracks.find((t) => t.id === clip.trackId);
+		const bar = track ? firstBarBeat(track) : null;
+		const lead = bar !== null ? bar - clip.offsetBeat : 0; // clip start to its grid anchor
+		let start = snap(clickBeat + lead, e) - lead;
+		if (start < 0) {
+			const step = bar !== null ? snapStep(e) : 0;
+			start = step ? Math.ceil(lead / step - 1e-9) * step - lead : 0;
+		}
+		const copy: Clip = { ...clip, id: newId("c"), lane: row, startBeat: start };
+		store.commit({ ...s.doc, clips: [...s.doc.clips, copy] });
+		store.set({ selection: [copy.id] });
+		return true;
+	};
+
+	// Click on empty space moves the playhead (or, with one clip selected, stamps a copy of
+	// it there; see stampCopy); ⌘-click only clears the selection; dragging draws a box that
+	// selects clips and tempo changes.
 	const onBackgroundDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
 		store.set({ menu: null });
@@ -747,6 +776,12 @@ function Lanes({ width }: { width: number }) {
 			window.removeEventListener("pointerup", up);
 			if (boxRef.current) boxRef.current.style.display = "none";
 			if (!moved) {
+				// ⌘-click: only clears the selection; no copy, and the playhead stays put.
+				if (e.metaKey) {
+					store.set({ selection: [] });
+					return;
+				}
+				if (!e.shiftKey && stampCopy(startBeat, sy, e)) return;
 				if (!e.shiftKey) store.set({ selection: [] });
 				engine.seek(Math.max(0, snap(startBeat, e)));
 			}
@@ -933,7 +968,13 @@ export function Timeline() {
 								className={`mute-btn${laneMuted[i] ? " muted" : ""}${soloLane === i ? " solo" : ""}`}
 								data-testid={`mute-${i}`}
 								aria-label={laneMuted[i] ? `Unmute lane ${i + 1}` : `Mute lane ${i + 1}`}
-								onClick={(e) => (e.metaKey ? toggleSolo(i) : toggleMute(i))}
+								onClick={(e) => (e.metaKey || e.ctrlKey ? toggleSolo(i) : toggleMute(i))}
+								onContextMenu={(e) => {
+									if (!e.ctrlKey) return;
+									e.preventDefault();
+									e.stopPropagation();
+									toggleSolo(i);
+								}}
 							/>
 						</div>
 					))}

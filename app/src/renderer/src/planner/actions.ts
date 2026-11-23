@@ -482,22 +482,20 @@ export function zoomAround(factor: number, anchorPx?: number): void {
 	store.set({ pxPerBeat: next, scrollX: clampScroll(beat * next - anchor, next) });
 }
 
-// A plain click toggles one lane's mute and ends any solo. ⌘-click solos the lane;
-// ⌘-click on the soloed lane again brings back the mutes from before the solo.
+// A plain click toggles one lane's mute and ends any solo. ⌘/ctrl-click solos the lane,
+// unless it is already the only unmuted lane: then every lane is unmuted.
 export function toggleMute(lane: number): void {
 	const s = store.get();
 	const laneMuted = s.laneMuted.map((m, i) => (i === lane ? !m : m));
-	store.set({ laneMuted, soloLane: null, preSolo: null });
+	store.set({ laneMuted, soloLane: null });
 	engine.applyMutes();
 }
 
 export function toggleSolo(lane: number): void {
 	const s = store.get();
-	if (s.soloLane === lane) {
-		store.set({ laneMuted: s.preSolo ?? s.laneMuted.map(() => false), soloLane: null, preSolo: null });
-	} else {
-		store.set({ laneMuted: s.laneMuted.map((_, i) => i !== lane), soloLane: lane, preSolo: s.preSolo ?? s.laneMuted });
-	}
+	const onlyThisOn = !s.laneMuted[lane] && s.laneMuted.every((m, i) => i === lane || m);
+	if (onlyThisOn) store.set({ laneMuted: s.laneMuted.map(() => false), soloLane: null });
+	else store.set({ laneMuted: s.laneMuted.map((_, i) => i !== lane), soloLane: lane });
 	engine.applyMutes();
 }
 

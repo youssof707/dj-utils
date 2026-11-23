@@ -1,6 +1,6 @@
 // Preview for the track editor: plays the sections in their new order (or, with two tracks
-// open, one of them as it is) from the tracks' audio as the set has it (stretched to the set's tempo), so an arrangement can be heard
-// before it is exported. The export itself never uses this audio; it reads the source file.
+// open, one of them as it is) at the editor's tempo (the first track's own, unless changed),
+// so an arrangement can be heard before it is exported. The export itself never uses this audio; it reads the source file.
 
 import { trackBeats } from "@shared/planner";
 import { leadBeat, place, secondOffset, srcOf, totalBeats } from "@shared/trackEdit";
@@ -83,12 +83,12 @@ export async function playEditPreview(): Promise<void> {
 		}
 		total = totalBeats(lead, e.sections);
 	}
-	// Each track's audio as the set has it.
+	// Each track's audio at the editor's tempo.
 	const tracks = [e.track, e.second];
 	const paths: (string | null)[] = [null, null];
 	for (const src of new Set(runs.map((r) => r.src))) {
 		const t = tracks[src];
-		const media = t ? mediaFor(t, s.doc.bpm) : null;
+		const media = t ? mediaFor(t, e.bpm) : null;
 		if (media?.state !== "ready") {
 			store.set({ trackEdit: { ...e, error: "The track's audio is not ready to play yet" } });
 			return;
@@ -111,7 +111,7 @@ export async function playEditPreview(): Promise<void> {
 		out = new GainNode(ctx, { gain: 0.6 });
 		out.connect(ctx.destination);
 	}
-	secPerBeat = 60 / s.doc.bpm;
+	secPerBeat = 60 / e.bpm;
 	fromBeat = e.cursorBeat >= total - 1e-6 ? 0 : Math.max(0, e.cursorBeat);
 	t0 = ctx.currentTime + 0.08;
 	const clock = (beat: number): number => t0 + (beat - fromBeat) * secPerBeat;

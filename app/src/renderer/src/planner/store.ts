@@ -43,6 +43,7 @@ export type TrackEditUi = EditSnap & {
 	lane: EditLane; // the lane clicked last: the cursor, the selection, cuts and play are its
 	selection: string[]; // ids of sections of the result, or of pieces of a track's lane
 	cursorBeat: number; // where a cut goes and where the preview starts, in beats along the ruler
+	bpm: number; // the tempo the editor plays at: the first track's own, until it is changed by hand
 	pxPerBeat: number; // 0: zoomed so that the whole edit fits the panel
 	scrollX: number;
 	width: number; // of the panel, as measured
@@ -72,7 +73,6 @@ export type State = {
 	playing: boolean;
 	laneMuted: boolean[]; // playback only; never saved with the set
 	soloLane: number | null;
-	preSolo: boolean[] | null; // mutes to restore when the solo is lifted
 	metronome: boolean; // playback only; never saved with the set
 	showCues: boolean; // cue points drawn on the timeline's clips; for this session only
 	screen: "home" | "editor" | "settings"; // the list of sets, one set open, or the settings
@@ -125,7 +125,6 @@ let state: State = {
 	cueBeat: 0,
 	playing: false,
 	laneMuted: Array.from({ length: LANES }, () => false),
-	preSolo: null,
 	soloLane: null,
 	metronome: false,
 	showCues: true,

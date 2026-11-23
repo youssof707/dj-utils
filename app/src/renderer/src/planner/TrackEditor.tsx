@@ -9,13 +9,13 @@ import { PEAK_BUCKET, SAMPLE_RATE, trackBeats } from "@shared/planner";
 import { barPhase, insertSections, leadBeat, place, slideSections, srcOf, type EditSection, type Placed } from "@shared/trackEdit";
 import { cueSpot } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
-import { openFileInEditor } from "./actions";
+import { openFileInEditor, parseBpm } from "./actions";
 import { useLibraryDrop } from "./libraryDrag";
 import { mediaFor } from "./media";
 import { fmtLength } from "./Panels";
 import { store, useStore, type EditLane, type TrackEditUi } from "./store";
 import { hueVars, LaneGrid, NO_KEY, trackHue } from "./Timeline";
-import { closeTrackEdit, editAddSelected, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editInsert, editMove, editPieces, editPx, editRedo, editRemoveTrack, editResize, editScroll, editSectionsOf, editSelect, editSetCursor, editSlide, editStep, editTotal, editUndo, editZoom, exportTrackEdit, laneOffset, laneTrack } from "./trackEdit";
+import { closeTrackEdit, editAddSelected, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editInsert, editMove, editPieces, editPx, editRedo, editRemoveTrack, editResize, editSetBpm, editScroll, editSectionsOf, editSelect, editSetCursor, editSlide, editStep, editTotal, editUndo, editZoom, exportTrackEdit, laneOffset, laneTrack } from "./trackEdit";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
 const FROM_EDITOR = "application/x-dj-from-editor";
@@ -37,7 +37,7 @@ function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue,
 		if (!cv || !visible) return;
 		sizeCanvas(cv, Math.max(1, Math.ceil(visR - visL)), cv.clientHeight || 60);
 		if (!peaks) return;
-		// The waveform comes from the track as the set plays it, stretched to the set's tempo.
+		// The waveform comes from the track as the editor plays it, stretched to the editor's tempo.
 		const framesPerBeat = (60 / projectBpm) * SAMPLE_RATE;
 		const at = { startBucket: ((startBeat + (visL - left) / pxPerBeat) * framesPerBeat) / PEAK_BUCKET, bucketsPerPx: framesPerBeat / pxPerBeat / PEAK_BUCKET };
 		// The whole signal faintly, so breaks and drops can be told apart, with the kicks over it.
@@ -157,8 +157,63 @@ function laneHues(e: TrackEditUi, keys: Record<string, string>): [number, number
 
 const bpmText = (bpm: number): string => String(Number(bpm.toFixed(2)));
 
+// The tempo the editor plays at. It starts at the first track's own; typing another plays the
+// tracks at that tempo, and ↺ brings back the first track's.
+function EditBpmField({ bpm, original }: { bpm: number; original: number }) {
+	const [text, setText] = useState(bpmText(bpm));
+	const [bad, setBad] = useState(false);
+	useEffect(() => {
+		setText(bpmText(bpm));
+		setBad(false);
+	}, [bpm]);
+	const commit = (): void => {
+		const v = parseBpm(text);
+		if (v === null) {
+			setBad(true);
+			return;
+		}
+		setBad(false);
+		editSetBpm(v);
+		setText(bpmText(v));
+	};
+	const changed = Math.abs(bpm - original) > 1e-9;
+	return (
+		<label className={`bpm-field edit-bpm${bad ? " bad" : ""}`}>
+			<input
+				data-testid="edit-bpm"
+				aria-label="Editor BPM"
+				value={text}
+				inputMode="decimal"
+				onChange={(ev) => setText(ev.target.value)}
+				onKeyDown={(ev) => {
+					ev.stopPropagation();
+					if (ev.key === "Enter") {
+						commit();
+						if (parseBpm(text) !== null) ev.currentTarget.blur();
+					} else if (ev.key === "Escape") {
+						setText(bpmText(bpm));
+						setBad(false);
+						ev.currentTarget.blur();
+					}
+				}}
+				onBlur={() => {
+					if (parseBpm(text) === null) {
+						setText(bpmText(bpm));
+						setBad(false);
+					} else commit();
+				}}
+			/>
+			<span>BPM</span>
+			{changed && (
+				<button className="ghost icon" data-testid="edit-bpm-reset" aria-label="Back to the track's own BPM" onClick={() => editSetBpm(original)}>
+					↺
+				</button>
+			)}
+		</label>
+	);
+}
+
 function Editor({ e }: { e: TrackEditUi }) {
-	const doc = useStore((s) => s.doc);
 	const focus = useStore((s) => s.editFocus);
 	useStore((s) => s.mediaRev);
 	const cues0 = useStore((s) => s.cues[e.track.sourcePath]);
@@ -206,8 +261,8 @@ function Editor({ e }: { e: TrackEditUi }) {
 	const shown = useMemo(() => (incoming ? place(lead, incoming.sections) : sliding ? place(lead, sliding) : placed), [lead, incoming, sliding, placed]);
 	const total = editTotal(e);
 	const view: View = { pxPerBeat: editPx(e), scrollX: e.scrollX, width: e.width };
-	const media = mediaFor(track, doc.bpm);
-	const media1 = e.second ? mediaFor(e.second, doc.bpm) : null;
+	const media = mediaFor(track, e.bpm);
+	const media1 = e.second ? mediaFor(e.second, e.bpm) : null;
 	const peaks0 = media?.state === "ready" ? media.peaks : null;
 	const peaks1 = media1?.state === "ready" ? media1.peaks : null;
 	const maxes0 = useMemo((): [number, number] => [peakMax(peaks0, 0), peakMax(peaks0, 1)], [peaks0]);
@@ -443,10 +498,9 @@ function Editor({ e }: { e: TrackEditUi }) {
 					<span className="edit-name" data-testid="edit-name">
 						{track.name}
 					</span>
-					<span className="muted">
-						{bpmText(track.bpm)} BPM · {fmtLength((total * 60) / track.bpm)}
-					</span>
+					<span className="muted">{fmtLength((total * 60) / e.bpm)}</span>
 				</div>
+				<EditBpmField bpm={e.bpm} original={track.bpm} />
 				<button className="ghost" data-testid="edit-cut" disabled={!editCanCut(e)} onClick={editCut}>
 					Cut
 				</button>
@@ -523,7 +577,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 								<span className="edit-lane-key">{"AB"[so.i]}</span>
 								<div className="edit-lane-text">
 									<span className="edit-lane-name">{so.track.name}</span>
-									<span className="muted">{Math.abs(so.track.bpm - track.bpm) < 1e-9 ? `${bpmText(so.track.bpm)} BPM` : `${bpmText(so.track.bpm)} → ${bpmText(track.bpm)} BPM`}</span>
+									<span className="muted">{Math.abs(so.track.bpm - e.bpm) < 1e-9 ? `${bpmText(so.track.bpm)} BPM` : `${bpmText(so.track.bpm)} → ${bpmText(e.bpm)} BPM`}</span>
 								</div>
 								<button className="ghost icon" data-testid={`edit-remove-${so.i}`} onPointerDown={(ev) => ev.stopPropagation()} onClick={() => editRemoveTrack(so.i)}>
 									✕
@@ -535,7 +589,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 							<div className="edit-lane-text">
 								<span className="edit-lane-name">Edit</span>
 								<span className="muted">
-									{bpmText(track.bpm)} BPM · {fmtLength((total * 60) / track.bpm)}
+									{bpmText(e.bpm)} BPM · {fmtLength((total * 60) / e.bpm)}
 								</span>
 							</div>
 						</div>
@@ -546,7 +600,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 						sources.map((so) => (
 							<div key={so.i} className={`edit-row source${e.lane === so.i ? " active" : ""}`} data-testid={`edit-source-${so.i}`} onPointerDown={onSourceDown(so)} onContextMenu={onSourceMenu(so)} onDoubleClick={editAddSelected}>
 								{grid}
-								{so.lead > 0 && <Block className="edit-section lead" testId="edit-piece-lead" outBeat={so.off} lengthBeat={so.lead} startBeat={0} view={view} peaks={so.peaks} maxes={so.maxes} marks={so.marks} hue={so.hue} projectBpm={doc.bpm} />}
+								{so.lead > 0 && <Block className="edit-section lead" testId="edit-piece-lead" outBeat={so.off} lengthBeat={so.lead} startBeat={0} view={view} peaks={so.peaks} maxes={so.maxes} marks={so.marks} hue={so.hue} projectBpm={e.bpm} />}
 								{so.pieces.map((p) => (
 									<Block
 										key={p.id}
@@ -562,7 +616,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 										maxes={so.maxes}
 										marks={so.marks}
 										hue={so.hue}
-										projectBpm={doc.bpm}
+										projectBpm={e.bpm}
 									/>
 								))}
 								{/* A line under every stretch of the track that is in the edit already. */}
@@ -576,7 +630,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 						))}
 					<div className={`edit-row out${onEdit ? " active" : ""}`} data-testid="edit-row" ref={outRef} onPointerDown={onDown} onContextMenu={onOutMenu}>
 						{grid}
-						{ownLead && <Block className="edit-section lead" testId="edit-lead" outBeat={0} lengthBeat={lead} startBeat={0} view={view} peaks={peaks0} maxes={maxes0} marks={marks0} hue={hues[0]} projectBpm={doc.bpm} />}
+						{ownLead && <Block className="edit-section lead" testId="edit-lead" outBeat={0} lengthBeat={lead} startBeat={0} view={view} peaks={peaks0} maxes={maxes0} marks={marks0} hue={hues[0]} projectBpm={e.bpm} />}
 						{shown.map((p, i) => {
 							const so = sources[srcOf(p.section)] ?? sources[0];
 							const selected = onEdit && e.selection.includes(p.section.id);
@@ -595,7 +649,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 									maxes={so.maxes}
 									marks={so.marks}
 									hue={so.hue}
-									projectBpm={doc.bpm}
+									projectBpm={e.bpm}
 								/>
 							);
 						})}

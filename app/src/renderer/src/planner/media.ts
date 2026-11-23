@@ -131,10 +131,13 @@ export function reconcileMedia(doc: PlannerDoc): void {
 	// document for undo, but its audio is let go (and cleaned up a little later).
 	const used = new Set(doc.clips.map((c) => c.trackId));
 	const base = doc.tracks.filter((t) => used.has(t.id)).map((t) => requestFor(t, doc.bpm));
-	// The track open in the editor, which may not be in the set at all (a file dropped there).
+	// The tracks open in the editor, which may not be in the set at all (a file dropped there),
+	// at the editor's own tempo.
 	const edit = store.get().trackEdit;
 	for (const editing of edit ? [edit.track, edit.second] : []) {
-		if (editing && !base.some((r) => stretchKey(r) === stretchKey(requestFor(editing, doc.bpm)))) base.push(requestFor(editing, doc.bpm));
+		if (!editing) continue;
+		const req = requestFor(editing, edit!.bpm);
+		if (!base.some((r) => stretchKey(r) === stretchKey(req))) base.push(req);
 	}
 	void window.api.keepRenderings([...base.map(stretchKey), ...extra.map((n) => n.key)]);
 	let started = false;

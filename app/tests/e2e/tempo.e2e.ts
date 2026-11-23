@@ -233,6 +233,15 @@ describe("tempo changes in playback", () => {
 		await mute([]);
 	});
 
+	it("shows the tempo at the playhead, through the ramp too", async () => {
+		const shown = (): Promise<string | null> => h.page.getByTestId("position-bpm").textContent();
+		for (const beat of [0, 20, 40]) {
+			await seek(beat);
+			await expect.poll(shown).toBe(String(Math.round(map.bpmAtBeat(beat) * 10) / 10));
+		}
+		expect(await shown()).toBe("140");
+	});
+
 	it("stops by itself at the end, on the tempo curve", async () => {
 		const end: number = await state(h.page, "s => Math.max(...s.doc.clips.map(c => c.startBeat + c.lengthBeat))");
 		await seek(end - 4);

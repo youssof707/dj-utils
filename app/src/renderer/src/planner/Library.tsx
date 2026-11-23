@@ -1,6 +1,7 @@
 // The library panel: Rekordbox's tracks and playlists, to search, sort and add to the set. Read-only.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { RekordboxLibrary, RekordboxPlaylist, RekordboxTrack } from "@shared/planner";
+import { snapBpm } from "@shared/tempo";
 import { importPaths } from "./actions";
 import { startLibraryDrag } from "./libraryDrag";
 import { libraryPreviewAt, playLibraryPreview, stopLibraryPreview, toggleLibraryPreview, useLibraryPreview } from "./libraryPreview";
@@ -36,7 +37,7 @@ function plain(text: string): string {
 }
 
 function fmtBpm(bpm: number): string {
-	return bpm > 0 ? String(Math.round(bpm * 10) / 10) : "";
+	return bpm > 0 ? String(Math.round(snapBpm(bpm) * 10) / 10) : "";
 }
 
 // A line of the list: a track and its number, which is its place in the chosen playlist, or
@@ -47,7 +48,7 @@ type Row = { track: RekordboxTrack; no: number; text: string };
 function sorted(rows: Row[], sort: LibrarySort): Row[] {
 	const way = sort.down ? -1 : 1;
 	if (sort.by === "number") return sort.down ? [...rows].reverse() : rows;
-	const value = (r: Row): number | null => (sort.by === "key" ? r.track.keyOrder : r.track.bpm > 0 ? r.track.bpm : null);
+	const value = (r: Row): number | null => (sort.by === "key" ? r.track.keyOrder : r.track.bpm > 0 ? snapBpm(r.track.bpm) : null);
 	return [...rows].sort((a, b) => {
 		const x = value(a);
 		const y = value(b);

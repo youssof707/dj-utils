@@ -4,6 +4,12 @@
 
 export type Pt = { beat: number; bpm: number };
 
+// Rekordbox and file tags often say 149.9 for a 150 track: within 0.1 of a whole, it is that whole.
+export function snapBpm(bpm: number): number {
+	const whole = Math.round(bpm);
+	return Math.abs(bpm - whole) <= 0.1 + 1e-9 ? whole : bpm;
+}
+
 export function sortPoints<T extends Pt>(points: T[]): T[] {
 	return [...points].sort((a, b) => a.beat - b.beat);
 }

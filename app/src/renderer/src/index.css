@@ -381,6 +381,15 @@ button.play.on {
 	text-align: right;
 	color: var(--muted);
 }
+.position-bpm {
+	font-size: 16px;
+	font-weight: 600;
+	min-width: 5ch;
+	margin-left: 8px;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	color: var(--text);
+}
 .spacer {
 	flex: 1;
 }
@@ -517,6 +526,20 @@ button.play.on {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	max-width: 320px;
+}
+/* The editor's tempo: a smaller copy of the project BPM field. */
+.bpm-field.edit-bpm {
+	height: 28px;
+	padding-right: 8px;
+	margin-right: 6px;
+}
+.bpm-field.edit-bpm input {
+	width: 58px;
+	padding-left: 8px;
+	font-size: 13px;
+}
+.bpm-field.edit-bpm button {
+	margin-left: 4px;
 }
 .edit-status {
 	flex: 1;

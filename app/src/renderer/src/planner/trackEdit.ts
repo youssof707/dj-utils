@@ -132,7 +132,7 @@ export function openTrackEditWith(track: PlannerTrack, sections?: EditSection[])
 		stopEditPreview();
 		store.set({
 			editFocus: true,
-			trackEdit: { track, second: null, sections: sections ?? initialSections(track, newId("e")), cuts: [[], []], past: [], future: [], lane: "out", selection: [], cursorBeat: leadBeat(track), pxPerBeat: 0, scrollX: 0, width: 800, playing: false, exporting: false, exported: null, error: null },
+			trackEdit: { track, second: null, sections: sections ?? initialSections(track, newId("e")), cuts: [[], []], past: [], future: [], lane: "out", selection: [], cursorBeat: leadBeat(track), bpm: track.bpm, pxPerBeat: 0, scrollX: 0, width: 800, playing: false, exporting: false, exported: null, error: null },
 		});
 		// A track that is not in the set gets its audio (waveform and preview) all the same.
 		reconcileMedia(store.get().doc);
@@ -367,6 +367,16 @@ export function editRedo(): void {
 		return;
 	}
 	restore(step, [...e.past, snapOf(e)], e.future.slice(1));
+}
+
+// Sets the tempo the editor plays at. The tracks' audio is made again at that tempo; the
+// preview stops until it is ready. The export is not affected.
+export function editSetBpm(bpm: number): void {
+	const e = ed();
+	if (!e || Math.abs(e.bpm - bpm) < 1e-9) return;
+	stopEditPreview();
+	patch({ bpm });
+	reconcileMedia(store.get().doc);
 }
 
 export function editZoom(factor: number, anchorPx?: number): void {

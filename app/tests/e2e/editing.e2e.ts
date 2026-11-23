@@ -83,6 +83,30 @@ describe("editing and playback", () => {
 		await h.page.keyboard.press("Meta+z");
 	});
 
+	it("moving a clip far from the playhead during playback leaves the sounding audio alone", async () => {
+		await h.page.evaluate(() => (window as any).planner.engine.seek(0));
+		await h.page.keyboard.press("Space");
+		await h.page.waitForTimeout(1500);
+		// the voices sounding now, by piece id
+		const grab = (): Promise<void> => h.page.evaluate(() => {
+			const w = window as any;
+			w.voices = new Map(w.planner.engine.sources);
+		});
+		const same = (): Promise<boolean> => h.page.evaluate(() => {
+			const w = window as any;
+			const now: Map<string, any> = w.planner.engine.sources;
+			return [...w.voices].filter(([id]) => !id.startsWith(w.moved)).every(([id, v]) => now.get(id) === v);
+		});
+		await grab();
+		// move clip c (lane 2) 200 beats later, well out of earshot
+		await state(h.page, "s => { const c = s.doc.clips[2]; window.moved = c.id; window.planner.store.commit({ ...s.doc, clips: s.doc.clips.map((x) => x.id === c.id ? { ...x, startBeat: x.startBeat + 200 } : x) }); return 0; }");
+		await h.page.waitForTimeout(300);
+		expect(await state(h.page, "s => s.playing")).toBe(true);
+		expect(await same()).toBe(true);
+		await h.page.keyboard.press("Space");
+		await h.page.keyboard.press("Meta+z");
+	});
+
 	it("seeks during playback and a late clip joins in sync", async () => {
 		const ruler = (await h.page.getByTestId("ruler").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
@@ -190,14 +214,11 @@ describe("editing and playback", () => {
 		await h.page.mouse.move(first.x + 80 + 10 * ppb, first.y + 40, { steps: 6 });
 		// mid-drag: the originals stay, two copies follow the mouse
 		expect(await clips()).toHaveLength(before.length + 2);
-		// letting go of Shift turns it back into a move
+		// letting go of Shift before the drop keeps it a copy, as the drag started with Shift
 		await h.page.keyboard.up("Shift");
 		let cur = await clips();
-		expect(cur).toHaveLength(before.length);
-		expect(cur[0].startBeat).toBeCloseTo(before[0].startBeat + 10, 0);
-		await h.page.keyboard.down("Shift");
+		expect(cur).toHaveLength(before.length + 2);
 		await h.page.mouse.up();
-		await h.page.keyboard.up("Shift");
 		cur = await clips();
 		expect(cur.slice(0, before.length)).toEqual(before);
 		const copies = cur.slice(before.length);
@@ -216,6 +237,42 @@ describe("editing and playback", () => {
 		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([before[1].id]);
 		expect(await clips()).toEqual(before);
 		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
+	});
+
+	it("with one trimmed clip selected, a click on empty space puts a copy of it there", async () => {
+		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const sx: number = await state(h.page, "s => s.scrollX");
+		const laneH = lanes.height / 4;
+		const before = await clips();
+		// trim the first clip so the copy has something to keep
+		const trimmed = { ...before[0], offsetBeat: before[0].offsetBeat + 4, lengthBeat: 24, fadeInBeat: 2 };
+		await state(h.page, `s => { const d = s.doc; window.planner.store.commit({ ...d, clips: d.clips.map(c => c.id === ${JSON.stringify(trimmed.id)} ? ${JSON.stringify(trimmed)} : c) }); window.planner.store.set({ selection: [${JSON.stringify(trimmed.id)}] }); return 0; }`);
+		const playheadBefore = await playhead();
+		// an empty spot in lane 3, at beat 64
+		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
+		const cur = await clips();
+		expect(cur).toHaveLength(before.length + 1);
+		const copy = cur[cur.length - 1];
+		expect({ ...copy, id: trimmed.id }).toEqual({ ...trimmed, lane: 3, startBeat: 64 });
+		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([copy.id]);
+		expect(await playhead()).toBe(playheadBefore);
+		// one undo takes the copy away; with nothing selected a click only moves the playhead
+		await h.page.keyboard.press("Meta+z");
+		expect(await clips()).toHaveLength(before.length);
+		// ⌘-click on empty space only clears the selection: no copy, playhead stays
+		await state(h.page, `s => { window.planner.store.set({ selection: [${JSON.stringify(trimmed.id)}] }); return 0; }`);
+		await h.page.keyboard.down("Meta");
+		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
+		await h.page.keyboard.up("Meta");
+		expect(await clips()).toHaveLength(before.length);
+		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([]);
+		expect(await playhead()).toBe(playheadBefore);
+		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
+		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
+		expect(await clips()).toHaveLength(before.length);
+		await state(h.page, `s => { const d = s.doc; window.planner.store.commit({ ...d, clips: d.clips.map(c => c.id === ${JSON.stringify(before[0].id)} ? ${JSON.stringify(before[0])} : c) }); return 0; }`);
+		expect(await clips()).toEqual(before);
 	});
 
 	it("cannot drag a group past the start or outside the lanes", async () => {
@@ -308,6 +365,30 @@ describe("editing and playback", () => {
 			expect(await flags(key)).toEqual([false, false]);
 		}
 		expect((await clips()).length).toBe(all.length);
+	});
+
+	it("⌘-click on a lane's mute button solos it; on the only unmuted lane it unmutes every lane", async () => {
+		const muted = (): Promise<boolean[]> => state(h.page, "s => s.laneMuted");
+		const solo = (i: number): Promise<void> => h.page.getByTestId(`mute-${i}`).click({ modifiers: ["Meta"] });
+		const n = (await muted()).length;
+		const only = (i: number): boolean[] => Array.from({ length: n }, (_, j) => j !== i);
+		const none = Array.from({ length: n }, () => false);
+		await solo(0);
+		expect(await muted()).toEqual(only(0));
+		await solo(0);
+		expect(await muted()).toEqual(none);
+		// some lanes muted by hand, others still on: solos, and unsolo still unmutes all
+		await h.page.getByTestId("mute-1").click();
+		await solo(0);
+		expect(await muted()).toEqual(only(0));
+		await solo(0);
+		expect(await muted()).toEqual(none);
+		// a muted lane solos, even while another lane is soloed
+		await solo(0);
+		await solo(2);
+		expect(await muted()).toEqual(only(2));
+		await solo(2);
+		expect(await muted()).toEqual(none);
 	});
 
 	it("hold S and click cuts on the nearest visible line", async () => {

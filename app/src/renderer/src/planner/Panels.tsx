@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cueName, sameMoment } from "@shared/cues";
 import type { PlannerDoc } from "@shared/planner";
-import { TempoMap, isFlat } from "@shared/tempo";
+import { TempoMap, isFlat, snapBpm } from "@shared/tempo";
 import { alignPoint, alignSelectionToGrid, cancelExport, confirmImport, contentBeats, tempoPoints, duplicateSelection, deleteSelection, toggleMetronome, deleteSet, duplicateSet, goHome, openExport, parseBpm, parseWholeBpm, relocateTrack, requestProjectBpm, renameSet, runExport, setProjectBpm, setTrackBpm, skipImport, splitAt, flagAllOn, flagTargets, toggleClipsFlag, zoomAround, zoomToFit } from "./actions";
 import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
@@ -60,10 +60,12 @@ export function NameEdit({ name, testId, placeholder, onDone }: { name: string; 
 function Position() {
 	const barRef = useRef<HTMLSpanElement>(null);
 	const clockRef = useRef<HTMLSpanElement>(null);
+	const bpmRef = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
 		let raf = 0;
 		let lastBar = "";
 		let lastClock = "";
+		let lastBpm = "";
 		// The time is where the playhead is heard, tempo changes included.
 		let mapDoc: PlannerDoc | null = null;
 		let map: TempoMap | null = null;
@@ -85,6 +87,12 @@ function Position() {
 				clockRef.current.textContent = clock;
 				lastClock = clock;
 			}
+			// The tempo at the playhead, ramps included: one decimal, whole numbers without it.
+			const bpm = String(Math.round(map.bpmAtBeat(beat) * 10) / 10);
+			if (bpm !== lastBpm && bpmRef.current) {
+				bpmRef.current.textContent = bpm;
+				lastBpm = bpm;
+			}
 		};
 		raf = requestAnimationFrame(frame);
 		return () => cancelAnimationFrame(raf);
@@ -94,6 +102,8 @@ function Position() {
 			<span className="position-label">Bar</span>
 			<span className="position-bar" ref={barRef} />
 			<span className="position-clock" ref={clockRef} />
+			<span className="position-bpm" data-testid="position-bpm" ref={bpmRef} />
+			<span className="position-label">BPM</span>
 		</div>
 	);
 }
@@ -436,7 +446,7 @@ export function Modals() {
 					key={item.probe.path + queue.length}
 					title="What is this track's BPM?"
 					detail={item.probe.name}
-					initial={item.probe.rekordboxBpm ? String(item.probe.rekordboxBpm) : item.probe.tagBpm ? String(item.probe.tagBpm) : ""}
+					initial={item.probe.rekordboxBpm ? String(snapBpm(item.probe.rekordboxBpm)) : item.probe.tagBpm ? String(snapBpm(item.probe.tagBpm)) : ""}
 					note={`${item.edit ? `It opens in the track editor, previewed at ${doc.bpm} BPM; an export uses the original file.` : `It will be stretched to ${doc.bpm} BPM.`} ${item.probe.rekordboxBpm ? "Suggested from Rekordbox, which analysed a different version of this file, so the track is not lined up by its grid." : item.probe.tagBpm ? "Suggested from the file's tag." : "Decimals are fine."}${more > 0 ? ` ${more} more to go.` : ""}`}
 					confirmLabel={item.edit ? "Open in editor" : "Add track"}
 					cancelLabel={item.edit ? "Cancel" : "Skip"}

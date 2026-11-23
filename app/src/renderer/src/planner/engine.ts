@@ -6,8 +6,8 @@
 
 import { fadeGain } from "@shared/fades";
 import { clipPieces } from "@shared/pieces";
-import { JOIN_FADE_SEC, LANES, LOW_CUT_EDGE_SEC, LOW_CUT_END_HZ, LOW_CUT_HZ, LOW_CUT_QS, SAMPLE_RATE } from "@shared/planner";
-import type { TempoMap } from "@shared/tempo";
+import { JOIN_FADE_SEC, LANES, LOW_CUT_EDGE_SEC, LOW_CUT_END_HZ, LOW_CUT_HZ, LOW_CUT_QS, SAMPLE_RATE, type PlannerDoc } from "@shared/planner";
+import { blocksToPoints, type TempoMap } from "@shared/tempo";
 import { lostMedia, pieceSource, tempoMap } from "./media";
 import { store } from "./store";
 
@@ -38,9 +38,12 @@ type Item = {
 // `filters` take the bass out, before `gain`, when the clip's bass is muted.
 type Voice = { src: AudioBufferSourceNode; filters: BiquadFilterNode[]; gain: GainNode; fade: GainNode | null; sig: string; endAt: number };
 
-const sigOf = (it: Item): string => `${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}|${it.fades ? `${it.fades.start}|${it.fades.inEnd}|${it.fades.outStart}|${it.fades.end}` : ""}|${it.lowCut}`;
+const sigOf = (it: Item): string => `${it.lane}|${it.cachePath}|${it.start}|${it.dur}|${it.offset}|${it.rateA}|${it.rateB}|${it.lead}|${it.fadeOut}|${it.fades ? `${it.fades.start}|${it.fades.inEnd}|${it.fades.outStart}|${it.fades.end}` : ""}|${it.lowCut}`;
 
 const FADE_IN_STEPS = 24; // straight pieces the fade-in curve is drawn with in playback
+// The tempo curve as text: when it is the same, an edit leaves every other piece's timing as it was.
+const tempoSig = (doc: PlannerDoc): string => JSON.stringify([doc.bpm, blocksToPoints(doc.tempos, doc.bpm)]);
+
 const SWAP_SEC = 0.03; // crossfade when a better rendering replaces one that is sounding
 const LOOKAHEAD = 20; // seconds ahead of the playhead that get loaded and scheduled
 const KEEP_BEHIND = 5;
@@ -125,6 +128,7 @@ class Engine {
 	private loading = new Map<string, Promise<AudioBuffer | null>>();
 	private sources = new Map<string, Voice>();
 	private map: TempoMap = tempoMap(store.get().doc); // the tempo curve of the schedule now playing
+	private mapSig = ""; // tempoSig of the doc that `map` was made from
 	private items: Item[] = [];
 	private token = 0;
 	private t0 = 0; // audio-clock time at which `startSec` is heard
@@ -323,6 +327,7 @@ class Engine {
 		await Promise.all([ctx.resume(), ...first.map((it) => this.load(it.cachePath))]);
 		if (token !== this.token) return;
 		this.map = map;
+		this.mapSig = tempoSig(store.get().doc);
 		this.startSec = from;
 		this.t0 = ctx.currentTime + 0.08;
 		this.running = true;
@@ -436,6 +441,24 @@ class Engine {
 		v.fade?.disconnect();
 	}
 
+	// Takes a voice out over SWAP_SEC from `at` instead of cutting it, so there is no click.
+	private fadeOut(v: Voice, at: number): void {
+		try {
+			v.gain.gain.cancelAndHoldAtTime(at);
+			v.gain.gain.linearRampToValueAtTime(0, at + SWAP_SEC);
+			v.src.stop(at + SWAP_SEC);
+		} catch {
+			this.drop(v);
+			return;
+		}
+		v.src.onended = () => {
+			v.src.disconnect();
+			for (const flt of v.filters) flt.disconnect();
+			v.gain.disconnect();
+			v.fade?.disconnect();
+		};
+	}
+
 	private silence(): void {
 		clearInterval(this.timer);
 		this.timer = undefined;
@@ -494,8 +517,13 @@ class Engine {
 		}
 	}
 
-	// The document or the available audio changed. Rebuild from where we are.
+	// The document changed. With the tempo curve as it was, only the pieces the edit touched
+	// change, so music elsewhere plays on untouched; a tempo change rebuilds from where we are.
 	refresh(): void {
+		if (store.get().playing && this.running && this.ctx && tempoSig(store.get().doc) === this.mapSig) {
+			this.patch();
+			return;
+		}
 		if (store.get().playing) {
 			const beat = this.running ? this.positionBeat() : store.get().playheadBeat;
 			this.token++;
@@ -519,7 +547,14 @@ class Engine {
 			this.refresh();
 			return;
 		}
-		const ctx = this.ctx;
+		this.patch();
+	}
+
+	// Brings the schedule up to date while playing, on the same tempo curve: pieces that are
+	// gone fade out, pieces that changed are crossfaded over at the same place in the music,
+	// new ones start as the playhead reaches them, and everything else plays on.
+	private patch(): void {
+		const ctx = this.ctx!;
 		const token = this.token;
 		this.items = this.buildItems();
 		this.endSec = this.items.reduce((m, it) => Math.max(m, it.start + it.dur), 0);
@@ -528,7 +563,7 @@ class Engine {
 			const it = byId.get(id);
 			if (it && sigOf(it) === old.sig) continue;
 			if (!it) {
-				this.drop(old);
+				this.fadeOut(old, ctx.currentTime + 0.01);
 				this.sources.delete(id);
 				continue;
 			}
@@ -538,17 +573,9 @@ class Engine {
 				if (!buf || token !== this.token || this.sources.get(id) !== old || this.items.find((x) => x.id === id) !== it) return;
 				const at = ctx.currentTime + 0.05;
 				const v = this.launch(it, buf, at, true);
-				if (!v) return;
-				old.gain.gain.cancelAndHoldAtTime(at);
-				old.gain.gain.linearRampToValueAtTime(0, at + SWAP_SEC);
-				old.src.stop(at + SWAP_SEC);
-				old.src.onended = () => {
-					old.src.disconnect();
-					for (const flt of old.filters) flt.disconnect();
-					old.gain.disconnect();
-					old.fade?.disconnect();
-				};
-				this.sources.set(id, v);
+				this.fadeOut(old, at);
+				if (v) this.sources.set(id, v);
+				else this.sources.delete(id);
 			});
 		}
 		this.tick(token);
