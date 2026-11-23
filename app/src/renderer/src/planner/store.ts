@@ -96,6 +96,7 @@ export type State = {
 	libraryOpen: boolean;
 	libraryPlaylist: string | null; // the Rekordbox playlist the library shows; null for all tracks
 	librarySort: LibrarySort;
+	starred: string[]; // the library tracks starred for the open set, by file; saved with it
 	trackKeys: Record<string, string>; // Rekordbox's key for each file in its library, by path
 	loaded: boolean;
 };
@@ -124,8 +125,8 @@ let state: State = {
 	cueBeat: 0,
 	playing: false,
 	laneMuted: Array.from({ length: LANES }, () => false),
-	soloLane: null,
 	preSolo: null,
+	soloLane: null,
 	metronome: false,
 	showCues: true,
 	screen: "home",
@@ -149,6 +150,7 @@ let state: State = {
 	libraryOpen: false,
 	libraryPlaylist: null,
 	librarySort: { by: "number", down: false },
+	starred: [],
 	trackKeys: {},
 	loaded: false,
 };
@@ -230,7 +232,7 @@ export const store = {
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, trackEdit: null, editFocus: false });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, trackEdit: null, editFocus: false, starred: [] });
 	},
 };
 

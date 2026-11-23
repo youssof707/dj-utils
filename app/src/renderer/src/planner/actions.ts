@@ -518,7 +518,7 @@ export function zoomToFit(): void {
 // is nothing to save, name a file for, or pick a folder for.
 
 function viewOf(s: State): SetView {
-	return { pxPerBeat: s.pxPerBeat, scrollX: s.scrollX, playheadBeat: s.playing ? engine.positionBeat() : s.playheadBeat };
+	return { pxPerBeat: s.pxPerBeat, scrollX: s.scrollX, playheadBeat: s.playing ? engine.positionBeat() : s.playheadBeat, starred: s.starred };
 }
 
 // What is stored for the open set, to tell when there is something new to write.
@@ -529,7 +529,7 @@ let stored = { gen: -1, text: "" };
 function unsaved(s: State): { id: string; name: string | null; view: SetView; doc: PlannerDoc; text: string } | null {
 	if (!s.loaded || s.screen !== "editor" || !s.setId) return null;
 	const doc = compactDoc(s.doc);
-	if (stored.gen !== s.setGen && s.setName === null && doc.clips.length === 0 && doc.tempos.length === 0) return null;
+	if (stored.gen !== s.setGen && s.setName === null && doc.clips.length === 0 && doc.tempos.length === 0 && s.starred.length === 0) return null;
 	const view = viewOf(s);
 	const text = JSON.stringify([s.setName, view, doc]);
 	if (stored.gen === s.setGen && stored.text === text) return null;
@@ -619,7 +619,7 @@ export async function openSet(id: string): Promise<void> {
 		closeSet();
 		store.load(f.doc, f.id, f.name);
 		stored = { gen: store.get().setGen, text: "" };
-		store.set({ screen: "editor", pxPerBeat: f.view.pxPerBeat, scrollX: f.view.scrollX, playheadBeat: f.view.playheadBeat, cueBeat: f.view.playheadBeat });
+		store.set({ screen: "editor", pxPerBeat: f.view.pxPerBeat, scrollX: f.view.scrollX, playheadBeat: f.view.playheadBeat, cueBeat: f.view.playheadBeat, starred: f.view.starred ?? [] });
 	} catch (e) {
 		toast(`Could not open the set: ${errorText(e)}`);
 		void refreshSets();

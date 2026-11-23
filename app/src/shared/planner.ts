@@ -141,7 +141,8 @@ export type Settings = { exportDir: string };
 
 // A set as the app stores it. The app keeps every set itself; there are no set files to
 // save or open. `view` is where the timeline was left.
-export type SetView = { pxPerBeat: number; scrollX: number; playheadBeat: number };
+// `starred`: the library tracks starred for this set, by file, in the order they were starred.
+export type SetView = { pxPerBeat: number; scrollX: number; playheadBeat: number; starred?: string[] };
 export type SetFile = { id: string; name: string; createdAt: number; updatedAt: number; openedAt: number; view: SetView; doc: PlannerDoc };
 export type SetInfo = { id: string; name: string; updatedAt: number; tracks: number; lengthSec: number };
 

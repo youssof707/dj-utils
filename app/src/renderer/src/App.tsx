@@ -468,7 +468,11 @@ export default function App() {
 			) : (
 				<>
 					<TopBar />
-					<Split top={<div className="body">{libraryOpen && <Library />}<Timeline /></div>} bottom={<TrackEditor />} />
+					{/* the library runs the full height beside both the timeline and the track editor */}
+					<div className="workspace">
+						{libraryOpen && <Library />}
+						<Split top={<div className="body"><Timeline /></div>} bottom={<TrackEditor />} />
+					</div>
 					<Modals />
 					<ClipMenu />
 					<Toast />
@@ -476,7 +480,7 @@ export default function App() {
 				</>
 			)}
 			<Updater />
-			<VersionChip />
+			{!(screen === "editor" && libraryOpen) && <VersionChip />}
 		</div>
 	);
 }

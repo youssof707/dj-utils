@@ -59,7 +59,13 @@ afterAll(async () => {
 });
 
 const titles = (): Promise<string[]> => h.page.locator("[data-testid=library-row] .library-title").allTextContents();
-const numbers = (): Promise<string[]> => h.page.locator("[data-testid=library-row] .library-no > span").allTextContents();
+const numbers = (): Promise<string[]> => h.page.getByTestId("library-row").evaluateAll((rows) => rows.map((r) => (r as HTMLElement).dataset.no ?? ""));
+// Picks an order from the menu; picking the one already chosen turns it round with the arrow.
+const sortBy = async (by: "number" | "bpm" | "key"): Promise<void> => {
+	const menu = h.page.getByTestId("library-sort");
+	if ((await menu.inputValue()) === by) await h.page.getByTestId("library-sort-dir").click();
+	else await menu.selectOption(by);
+};
 const count = (): Promise<string | null> => h.page.getByTestId("library-count").textContent();
 const options = (): Promise<string[]> => h.page.getByTestId("playlist-option").allTextContents();
 
@@ -69,8 +75,8 @@ describe("the Rekordbox library panel", () => {
 		expect(await numbers()).toEqual(["1", "2", "3", "4", "5"]);
 		expect(await count()).toBe("5 tracks");
 		const rows = h.page.getByTestId("library-row");
-		expect(await rows.nth(0).textContent()).toBe("1▶BelfastOrbital1288A");
-		expect(await rows.nth(1).textContent()).toBe("2▶HalcyonOrbital126.52B");
+		expect(await rows.nth(0).textContent()).toBe("▶BelfastOrbital8A128");
+		expect(await rows.nth(1).textContent()).toBe("▶HalcyonOrbital2B126.5");
 		await shot(h.page, "library-01-all");
 	});
 
@@ -92,23 +98,23 @@ describe("the Rekordbox library panel", () => {
 		expect(await count()).toBe("5 tracks");
 	});
 
-	it("sorts by BPM, key and number, and turns the order round on a second click", async () => {
-		await h.page.getByTestId("library-sort-bpm").click();
+	it("sorts by BPM, key and number from the menu, and the arrow turns the order round", async () => {
+		await sortBy("bpm");
 		expect(await titles()).toEqual(["Café Noir", "Xtal", "Halcyon", "Belfast", "Windowlicker"]);
-		await h.page.getByTestId("library-sort-bpm").click();
+		await sortBy("bpm");
 		// the track with no BPM stays last
 		expect(await titles()).toEqual(["Belfast", "Halcyon", "Xtal", "Café Noir", "Windowlicker"]);
-		await h.page.getByTestId("library-sort-key").click();
+		await sortBy("key");
 		// 1A, 2B, 8A, 12A, then no key
 		expect(await titles()).toEqual(["Xtal", "Halcyon", "Belfast", "Café Noir", "Windowlicker"]);
 		await shot(h.page, "library-02-by-key");
-		await h.page.getByTestId("library-sort-key").click();
+		await sortBy("key");
 		expect(await titles()).toEqual(["Café Noir", "Belfast", "Halcyon", "Xtal", "Windowlicker"]);
-		await h.page.getByTestId("library-sort-number").click();
+		await sortBy("number");
 		expect(await numbers()).toEqual(["1", "2", "3", "4", "5"]);
-		await h.page.getByTestId("library-sort-number").click();
+		await sortBy("number");
 		expect(await numbers()).toEqual(["5", "4", "3", "2", "1"]);
-		await h.page.getByTestId("library-sort-number").click();
+		await sortBy("number");
 	});
 
 	it("filters by a playlist found by searching, in the playlist's order", async () => {
@@ -131,7 +137,7 @@ describe("the Rekordbox library panel", () => {
 		expect(await numbers()).toEqual(["4"]);
 		expect(await count()).toBe("1 of 4");
 		await h.page.getByTestId("library-search").fill("");
-		await h.page.getByTestId("library-sort-bpm").click();
+		await sortBy("bpm");
 		expect(await titles()).toEqual(["Café Noir", "Xtal", "Belfast", "Belfast"]);
 		expect(await numbers()).toEqual(["1", "4", "3", "5"]);
 		await shot(h.page, "library-04-playlist");
@@ -143,7 +149,7 @@ describe("the Rekordbox library panel", () => {
 		await h.page.getByTestId("library-toggle").click();
 		await h.page.getByTestId("library-list").waitFor();
 		expect(await titles()).toEqual(["Café Noir", "Xtal", "Belfast", "Belfast"]);
-		await h.page.getByTestId("library-sort-number").click();
+		await sortBy("number");
 	});
 
 	it("moves through the playlists with the arrow keys, and Escape leaves things as they were", async () => {

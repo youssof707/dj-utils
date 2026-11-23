@@ -424,8 +424,14 @@ button.play.on {
 	border-radius: 8px;
 }
 
+.workspace {
+	flex: 1;
+	min-height: 0;
+	display: flex;
+}
 .split {
 	flex: 1;
+	min-width: 0;
 	min-height: 0;
 	display: flex;
 	flex-direction: column;
@@ -802,6 +808,7 @@ button.play.on {
 	pointer-events: none;
 }
 .library {
+	position: relative;
 	width: 340px;
 	flex: none;
 	display: flex;
@@ -814,6 +821,22 @@ button.play.on {
 .library > * {
 	margin-left: 12px;
 	margin-right: 12px;
+}
+/* Drag handle on the panel's right edge; an invisible grab area over the border. */
+.library > .library-resize {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	right: -4px;
+	width: 8px;
+	margin: 0;
+	z-index: 10;
+	cursor: col-resize;
+	touch-action: none;
+}
+.library > .library-resize:hover,
+.library > .library-resize:active {
+	background: linear-gradient(to right, transparent 3px, var(--line-strong) 3px, var(--line-strong) 5px, transparent 5px);
 }
 .library-head {
 	display: flex;
@@ -830,8 +853,61 @@ button.play.on {
 	text-transform: uppercase;
 	color: var(--muted);
 }
-.library input.search {
+/* search, then the sort order and its direction, on one line */
+.library-tools {
+	display: flex;
+	gap: 6px;
 	margin-bottom: 8px;
+}
+.library-tools input.search {
+	flex: 1;
+	min-width: 0;
+	width: auto;
+}
+/* the sort order and its direction, joined into one box that matches the search field */
+.library-sort {
+	flex: none;
+	display: flex;
+	align-items: stretch;
+	background: #0b0c0f;
+	border: 1px solid var(--line-strong);
+	border-radius: 6px;
+	overflow: hidden;
+}
+.library-sort:focus-within {
+	border-color: var(--accent);
+}
+.library-sort select {
+	appearance: none;
+	-webkit-appearance: none;
+	font: inherit;
+	color: var(--text);
+	background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M1 1l3 3 3-3' fill='none' stroke='%238a90a0' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 8px center;
+	border: 0;
+	outline: none;
+	padding: 0 22px 0 9px;
+	cursor: pointer;
+}
+.library-sort select:hover,
+.library-sort button:hover {
+	background-color: var(--panel-2);
+}
+.library-sort button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 8px;
+	border-radius: 0;
+	border-left: 1px solid var(--line-strong);
+	background: transparent;
+	color: var(--muted);
+}
+.library-sort button:hover {
+	color: var(--text);
+}
+.library-sort button:focus-visible {
+	outline: none;
+	color: var(--accent);
 }
 .library-playlist {
 	position: relative;
@@ -891,50 +967,12 @@ button.play.on {
 	background: var(--accent);
 	color: #fff;
 }
-.library-sort {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin-bottom: 4px;
-	font-size: 11px;
-	color: var(--muted);
-}
-.library-sort > span {
-	flex: 1;
-}
-.library-sort button {
-	flex: none;
-	padding: 2px 0;
-	background: transparent;
-	color: var(--muted);
-	font-size: 11px;
-	text-align: right;
-	white-space: nowrap;
-}
-.library-sort button:hover,
-.library-sort button.on {
-	color: var(--text);
-}
-.library-sort button.no {
-	text-align: left;
-}
-.library-no,
-.library-sort button.no {
-	width: 34px;
-}
-.library-sort button.bpm {
-	width: 40px;
-}
-.library-sort button.key {
-	width: 36px;
-}
-.library-no {
-	flex: none;
-	font-size: 11px;
-	font-variant-numeric: tabular-nums;
-	color: var(--muted);
-}
+/* play or stop, in the row's left margin, while it is hovered or playing */
 .library-play {
+	position: absolute;
+	left: 8px;
+	top: 0;
+	bottom: 6px;
 	display: none;
 	padding: 0;
 	background: transparent;
@@ -942,13 +980,9 @@ button.play.on {
 	font-size: 11px;
 	line-height: 1;
 }
-.library-row:hover .library-no > span,
-.library-row.playing .library-no > span {
-	display: none;
-}
 .library-row:hover .library-play,
 .library-row.playing .library-play {
-	display: inline;
+	display: block;
 }
 .library-row.playing .library-play {
 	color: var(--accent);
@@ -956,19 +990,19 @@ button.play.on {
 /* the preview bar: from the title to the key, along the foot of the row */
 .library-bar {
 	position: absolute;
-	left: 54px;
-	right: 12px;
+	left: 28px;
+	right: 16px;
 	bottom: 0;
-	height: 9px;
+	height: 14px;
 	cursor: pointer;
 }
 .library-bar-line {
 	position: absolute;
 	left: 0;
 	right: 0;
-	bottom: 3px;
-	height: 3px;
-	border-radius: 2px;
+	bottom: 4px;
+	height: 5px;
+	border-radius: 3px;
 	background: var(--line);
 	overflow: hidden;
 	visibility: hidden;
@@ -1004,11 +1038,81 @@ button.play.on {
 	right: 0;
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 0 12px;
+	gap: 14px;
+	padding: 0 16px 6px 28px;
 }
 .library-row:hover {
 	background: var(--panel-2);
+}
+/* the Starred list stacks its rows instead of placing each one */
+.library-row.stacked {
+	position: relative;
+}
+/* the star at the right: shown on hover, and always once starred; it keeps its place either
+   way, so the key and BPM never shift */
+.library-star {
+	flex: none;
+	display: flex;
+	align-items: center;
+	margin: 0 -4px 0 -6px;
+	padding: 4px;
+	background: transparent;
+	color: var(--muted);
+	visibility: hidden;
+}
+.library-row:hover .library-star,
+.library-star.on {
+	visibility: visible;
+}
+.library-star:hover {
+	color: var(--text);
+	background: transparent;
+}
+.library-star.on {
+	color: #f2c94c;
+}
+/* the tracks starred for this set, under the library's list */
+/* a darker tray of its own, lifted over the list above by a shadow, so the two never read as one */
+.library > .library-starred {
+	flex: none;
+	position: relative;
+	margin: 0;
+	background: var(--bg);
+	border-top: 1px solid var(--line-strong);
+	box-shadow: 0 -10px 18px rgba(0, 0, 0, 0.45);
+	display: flex;
+	flex-direction: column;
+	max-height: 35%;
+	min-height: 0;
+}
+.library .library-starred h2 {
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 0 12px 0 16px;
+	height: 34px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	color: var(--text);
+}
+.library-starred h2 > svg {
+	color: #f2c94c;
+}
+.library-starred-count {
+	padding: 1px 6px;
+	border-radius: 8px;
+	background: var(--panel-2);
+	color: var(--muted);
+	font-size: 10px;
+	letter-spacing: 0;
+}
+.library-starred .library-row:hover {
+	background: var(--panel);
+}
+.library-starred-list {
+	min-height: 0;
+	overflow-y: auto;
 }
 .library-ghost {
 	position: fixed;
@@ -1020,6 +1124,9 @@ button.play.on {
 .library-names {
 	flex: 1;
 	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
 }
 .library-title,
 .library-artist {
@@ -1032,21 +1139,30 @@ button.play.on {
 	color: var(--muted);
 	min-height: 14px;
 }
-.library-bpm,
-.library-key {
+.library-artist.none {
+	opacity: 0.45;
+	font-style: italic;
+}
+/* key over BPM, in one column at the right */
+.library-meta {
 	flex: none;
-	font-size: 12px;
+	min-width: 36px;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 3px;
 	font-variant-numeric: tabular-nums;
-	color: var(--muted);
-	text-align: right;
-}
-.library-bpm {
-	width: 40px;
 }
 .library-key {
-	width: 36px;
+	font-size: 12px;
 	font-weight: 700;
 	color: hsl(var(--hue) calc(75% * var(--sat, 1)) 65%);
+	min-height: 15px;
+}
+.library-bpm {
+	font-size: 10px;
+	color: var(--muted);
+	min-height: 13px;
 }
 
 .timeline {
@@ -1690,4 +1806,14 @@ button.play.on {
 	color: var(--muted);
 	opacity: 0.6;
 	user-select: none;
+}
+/* at the foot of the library, under its list instead of over it */
+.library > .library-foot {
+	flex: none;
+	margin: 0;
+	padding: 6px 14px 8px;
+	border-top: 1px solid var(--line);
+}
+.library-foot .version-chip {
+	position: static;
 }
