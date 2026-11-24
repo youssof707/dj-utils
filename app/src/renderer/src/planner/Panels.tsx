@@ -8,7 +8,8 @@ import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
-import { openTrackEdit } from "./trackEdit";
+import { openAutoEdit, openTrackEdit } from "./trackEdit";
+import { tracksToEdit } from "@shared/cdj";
 
 function fmtClock(sec: number): string {
 	const m = Math.floor(sec / 60);
@@ -552,6 +553,7 @@ export function ClipMenu() {
 	const doc = useStore((s) => s.doc);
 	const cues = useStore((s) => s.cues);
 	const cueEdit = useStore((s) => s.cueEdit);
+	const playlistMode = useStore((s) => s.playlistMode);
 	useEffect(() => {
 		if (!menu) return;
 		const close = (): void => store.set({ menu: null });
@@ -567,6 +569,8 @@ export function ClipMenu() {
 	const spot = menu.cue;
 	if (!clip && !spot) return null;
 	const track = clip && doc.tracks.find((t) => t.id === clip.trackId);
+	// Playlist mode: a track a CDJ could not play straight through can be edited automatically.
+	const toEdit = !!track && playlistMode && tracksToEdit(doc).has(track.id);
 	const item = (label: string, fn: () => void, opts: { disabled?: boolean; hint?: string; testId?: string; key?: string } = {}): ReactNode => (
 		<button
 			key={opts.key ?? label}
@@ -597,6 +601,7 @@ export function ClipMenu() {
 				{item("Align to grid", alignSelectionToGrid, { disabled: !track || alignPoint(track) === null, testId: "menu-align" })}
 				{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
 				<hr />
+				{track && toEdit && item("Edit automatically", () => openAutoEdit(track.id), { testId: "menu-auto-edit" })}
 				{track && item("Edit", () => openTrackEdit(track.id), { testId: "menu-edit" })}
 				{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}
 				{track && media?.state === "error" && item("Try again", () => retryMedia(track, doc.bpm))}
@@ -620,7 +625,7 @@ export function ClipMenu() {
 			</>
 		);
 	};
-	const count = (clip ? 9 : 0) + (spot ? 2 + spot.hits.length : 0);
+	const count = (clip ? 9 + (toEdit ? 1 : 0) : 0) + (spot ? 2 + spot.hits.length : 0);
 	const x = Math.min(menu.x, window.innerWidth - 230);
 	const y = Math.max(0, Math.min(menu.y, window.innerHeight - 20 - count * 31));
 	return (

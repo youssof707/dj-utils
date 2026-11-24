@@ -3,8 +3,12 @@
 
 import { useSyncExternalStore } from "react";
 import { emptyDoc, LANES, type Cue, type CueRow, type ExportResult, type PlannerDoc, type PlannerTrack, type ProbeResult, type SetInfo, type Settings } from "@shared/planner";
+import type { AutoLink } from "@shared/cdj";
 import type { EditSection } from "@shared/trackEdit";
 import { normalizeDoc } from "@shared/renderings";
+
+// Playlist mode stays on or off across launches.
+export const PLAYLIST_KEY = "planner.playlistMode";
 
 // A dropped file on its way to the timeline: either waiting for its BPM to be typed
 // (`probe`), or with everything known already (`track`) and only waiting its turn behind one
@@ -51,6 +55,9 @@ export type TrackEditUi = EditSnap & {
 	exporting: boolean;
 	exported: string | null; // the file the edit as it stands was last exported to
 	error: string | null;
+	// Made by "Edit automatically" or Cmd+E: exporting swaps the file in for these clips (see
+	// swapInEdit in @shared/cdj).
+	auto?: { links: AutoLink[] };
 };
 
 export type State = {
@@ -135,7 +142,7 @@ let state: State = {
 	laneMuted: Array.from({ length: LANES }, () => false),
 	soloLane: null,
 	showCues: true,
-	playlistMode: false,
+	playlistMode: localStorage.getItem(PLAYLIST_KEY) === "1",
 	screen: "home",
 	settings: null,
 	trackEdit: null,
@@ -169,6 +176,11 @@ const listeners = new Set<() => void>();
 let dragBase: PlannerDoc | null = null;
 
 // Makes a cue step happen in Rekordbox, or with `back` undoes it (set by ./cues).
+// What a document change did outside the document (an automatic edit's file), undone and
+// done again along with it. Keyed by the document as it was after the change.
+type SideEffect = { undo: () => void; redo: () => void };
+const sideEffects = new WeakMap<PlannerDoc, SideEffect>();
+
 let cueRunner: (step: CueStep, back: boolean) => void = () => {};
 export function setCueRunner(run: (step: CueStep, back: boolean) => void): void {
 	cueRunner = run;
@@ -196,6 +208,11 @@ export const store = {
 	commit(doc: PlannerDoc): void {
 		if (doc === state.doc) return;
 		store.set(prune({ ...state, doc, past: [...state.past, state.doc].slice(-HISTORY), future: [], rev: state.rev + 1 }));
+	},
+	// A finished edit that also changed something outside the document.
+	commitWith(doc: PlannerDoc, effect: SideEffect): void {
+		store.commit(doc);
+		if (state.doc === doc) sideEffects.set(doc, effect);
 	},
 	// Drags change the document many times; only the end result is one undo step.
 	beginDrag(): void {
@@ -227,7 +244,9 @@ export const store = {
 			runCueStep(doc, true);
 			return;
 		}
+		const effect = sideEffects.get(state.doc);
 		store.set(prune({ ...state, doc, past: state.past.slice(0, -1), future: [state.doc, ...state.future], rev: state.rev + 1 }));
+		effect?.undo();
 	},
 	redo(): void {
 		if (dragBase || state.future.length === 0) return;
@@ -238,6 +257,7 @@ export const store = {
 			return;
 		}
 		store.set(prune({ ...state, doc, past: [...state.past, state.doc], future: state.future.slice(1), rev: state.rev + 1 }));
+		sideEffects.get(doc)?.redo();
 	},
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {

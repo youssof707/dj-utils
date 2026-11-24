@@ -58,21 +58,38 @@ export function initialSections(t: PlannerTrack, id: string): EditSection[] {
 // Clips' ends are moved to the track's beat lines; a clip that starts before the one before
 // it has ended follows straight on, since sections cannot overlap.
 export function sectionsFromClips(t: PlannerTrack, clips: { startBeat: number; offsetBeat: number; lengthBeat: number }[], newId: () => string): EditSection[] {
-	const lead = leadBeat(t);
-	const total = trackBeats(t);
-	const grid = (beat: number): number => lead + Math.round(beat - lead);
+	return clipSections(t, clips, newId).sections;
+}
+
+// The same, with which section each clip became (clips too short to keep have none). With
+// two tracks, `src` says which one a clip is of (0 when left out), and each clip keeps to its
+// own track's beat lines.
+export function clipSections<C extends { startBeat: number; offsetBeat: number; lengthBeat: number }>(t: PlannerTrack | PlannerTrack[], clips: C[], newId: () => string, src: (c: C) => number = () => 0): { sections: EditSection[]; links: { clip: C; sectionId: string }[] } {
+	const tracks = Array.isArray(t) ? t : [t];
+	const links: { clip: C; sectionId: string }[] = [];
 	const out: EditSection[] = [];
 	let end = 0; // on the timeline: where the clips so far stop
 	for (const c of [...clips].sort((a, b) => a.startBeat - b.startBeat)) {
+		const i = src(c);
+		const track = tracks[i];
+		if (!track) continue;
+		const lead = leadBeat(track);
+		const total = trackBeats(track);
+		const grid = (beat: number): number => lead + Math.round(beat - lead);
 		const stop = c.offsetBeat + c.lengthBeat;
 		const from = Math.max(lead, grid(c.offsetBeat));
 		const to = stop >= total - EPS ? total : Math.min(total, grid(stop));
 		if (to - from <= EPS) continue;
 		const gap = out.length === 0 ? 0 : Math.max(0, Math.round(c.startBeat - end));
 		end = Math.max(out.length === 0 ? -Infinity : end, c.startBeat + c.lengthBeat);
-		out.push(gap > 0 ? { id: newId(), startBeat: from, lengthBeat: to - from, gapBeat: gap } : { id: newId(), startBeat: from, lengthBeat: to - from });
+		const id = newId();
+		const section: EditSection = { id, startBeat: from, lengthBeat: to - from };
+		if (gap > 0) section.gapBeat = gap;
+		if (i > 0) section.src = i;
+		out.push(section);
+		links.push({ clip: c, sectionId: id });
 	}
-	return out;
+	return { sections: out, links };
 }
 
 // Cuts are on beat lines, so every section is a whole number of beats long except the one

@@ -47,7 +47,9 @@ function audioOf(file: string): { sampleRate: number; bits: number; channels: nu
 
 beforeAll(async () => {
 	h = await launch();
-	source = path.join(h.workDir, "parent.wav");
+	// The drags here are worked out on the whole width of the window: no library panel.
+	await h.page.evaluate(() => (window as any).planner.store.set({ libraryOpen: false }));
+	source =path.join(h.workDir, "parent.wav");
 	exportDir = path.join(h.workDir, "edits");
 	writeBarTrack(source, BPM, 60, { firstSec: DOWNBEAT });
 	await importTrack(h.page, source, BPM, 0, 0);
@@ -331,12 +333,13 @@ describe("track editor", () => {
 			store.set({ selection: [a.id, b.id, other.id], editFocus: false });
 			return { other: other.id };
 		}, LEAD);
-		// Clips of two files: nothing happens, and no export dialog either.
-		const before = await sections();
+		// Clips of two files: both open, the other file as the second track, and no export dialog.
 		await h.page.keyboard.press("Meta+e");
-		expect(await sections()).toEqual(before);
+		await expect.poll(() => state(h.page, "s => !!s.trackEdit?.second")).toBe(true);
+		const both = await state(h.page, "s => ({ srcs: s.trackEdit.sections.map(x => x.src ?? 0), links: s.trackEdit.auto.links.map(l => l.clipId) })");
+		expect([...new Set(both.srcs)].sort()).toEqual([0, 1]);
+		expect(both.links.sort()).toEqual(["ce-a", "ce-b", ids.other].sort());
 		expect(await state(h.page, "s => s.exportUi")).toBeFalsy();
-		expect(ids.other).toBeTruthy();
 		// Clips of one file open it, arranged the same way.
 		await h.page.evaluate(() => (window as any).planner.store.set({ selection: ["ce-a", "ce-b"], editFocus: false }));
 		await h.page.keyboard.press("Meta+e");
@@ -347,13 +350,32 @@ describe("track editor", () => {
 			[0, 4, 4],
 		]);
 		expect(await state(h.page, "s => s.editFocus")).toBe(true);
+		// Exported, the edit takes the two clips' place as one clip, playing straight through; the
+		// editor closes, and one undo on the timeline puts the clips back and takes the file away.
+		const parentId = await state<string>(h.page, "s => s.doc.tracks.find((t) => t.name === 'parent').id");
+		const clipsBefore = await state<unknown[]>(h.page, "s => s.doc.clips");
+		await h.page.getByTestId("edit-export").click();
+		await h.page.waitForFunction(() => (window as any).planner.store.get().trackEdit === null, undefined, { timeout: 60000 });
+		const swapped = await state<{ clips: any[]; tracks: any[] }>(h.page, "s => s.doc");
+		const a = swapped.clips.find((c) => c.id === "ce-a");
+		const edit = swapped.tracks.find((t) => t.id === a.trackId);
+		expect(edit.sourcePath.startsWith(path.join(exportDir, "parent (edit"))).toBe(true);
+		// One clip now, from where the first started to where the second ended.
+		expect(swapped.clips.some((c) => c.id === "ce-b")).toBe(false);
+		expect([a.lane, a.startBeat, a.lengthBeat]).toEqual([3, 400, 16]);
+		expect(swapped.tracks.some((t) => t.id === parentId)).toBe(true); // its other clips still use it
+		expect(swapped.clips.filter((c) => c.trackId === parentId).length).toBeGreaterThan(0);
+		expect(fs.existsSync(edit.sourcePath)).toBe(true);
+		await h.page.evaluate(() => (window as any).planner.store.set({ editFocus: false }));
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(() => fs.existsSync(edit.sourcePath)).toBe(false);
+		expect(await state(h.page, "s => s.doc.clips")).toEqual(clipsBefore);
 		// Put the set back as it was.
-		await h.page.evaluate(() => {
-			const { store } = (window as any).planner;
-			store.set({ editFocus: false });
-			store.undo();
-		});
+		await h.page.evaluate(() => (window as any).planner.store.undo());
 		expect(await state<number>(h.page, "s => s.doc.clips.filter((c) => c.id.startsWith('ce-')).length")).toBe(0);
+		// The parent open again, for the tests that follow.
+		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), parentId);
+		await h.page.getByTestId("edit-section").first().waitFor();
 	});
 
 	it.skipIf(!realMp3)("exports a real MP3 as one clean decode of it: 24 bits, its own rate, every sample", async () => {

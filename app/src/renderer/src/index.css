@@ -51,6 +51,14 @@ body.playlist-mode .track-editor,
 body.playlist-mode .track-editor * {
 	--sat: 0 !important;
 }
+/* A track a CDJ could not just play through (shared/cdj.ts): red, in place of the grey. */
+body.playlist-mode .clip.to-edit {
+	--hue: 2 !important;
+	--sat: 1.6 !important;
+}
+body.playlist-mode .clip.to-edit:not(.selected) {
+	background: hsl(2 70% 40% / 0.22);
+}
 body.cue-tool .clip,
 body.cue-tool .clip *,
 body.cue-tool .edit-row,
@@ -453,6 +461,16 @@ button.play.on {
 	align-items: center;
 	gap: 6px;
 	min-width: 0;
+}
+.to-edit-badge {
+	justify-self: end;
+	padding: 3px 9px;
+	border-radius: 10px;
+	background: rgba(255, 90, 77, 0.14);
+	color: var(--danger);
+	font-size: 12px;
+	font-weight: 600;
+	white-space: nowrap;
 }
 .cue-tools {
 	display: flex;

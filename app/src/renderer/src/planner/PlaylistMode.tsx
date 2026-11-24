@@ -5,9 +5,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { PlannerDoc, PlaylistStatus } from "@shared/planner";
 import { cueLetter } from "@shared/cues";
 import { HOT_CUES } from "@shared/planner";
+import { tracksToEdit } from "@shared/cdj";
 import { flushAutoSave } from "./actions";
 import { toggleCueTool } from "./cues";
-import { errorText, store, toast, useStore } from "./store";
+import { errorText, PLAYLIST_KEY, store, toast, useStore } from "./store";
 import { plain } from "./text";
 
 // The set's files, each once, in the order the set first plays them.
@@ -191,7 +192,10 @@ export function PlaylistToggle() {
 			data-testid="playlist-mode"
 			aria-label="Playlist mode"
 			aria-pressed={on}
-			onClick={() => store.set(on ? { playlistMode: false, cueTool: null } : { playlistMode: true })}
+			onClick={() => {
+				localStorage.setItem(PLAYLIST_KEY, on ? "0" : "1");
+				store.set(on ? { playlistMode: false, cueTool: null } : { playlistMode: true });
+			}}
 		>
 			{/* a playlist: three lines, the last one short, beside a note */}
 			<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
@@ -209,6 +213,7 @@ export function PlaylistBar() {
 	const doc = useStore((s) => s.doc);
 	const paths = useMemo(() => setOrder(doc), [doc]);
 	const order = paths.join("\n");
+	const toEdit = useMemo(() => tracksToEdit(doc).size, [doc]);
 	const [status, setStatus] = useState<PlaylistStatus | null | undefined>(undefined);
 	const [syncing, setSyncing] = useState(false);
 	const asked = useRef(0);
@@ -277,6 +282,11 @@ export function PlaylistBar() {
 				)}
 			</div>
 			<CueButtons />
+			{toEdit > 0 && (
+				<span className="to-edit-badge" data-testid="to-edit">
+					{toEdit} to edit
+				</span>
+			)}
 		</div>
 	);
 }

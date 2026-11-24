@@ -1,11 +1,12 @@
 // Everything the user can do in the track editor, as plain functions over the store.
 
-import { addCut, barPhase, cutAt, duplicateSections, initialSections, insertSections, leadBeat, moveSections, piecesOf, place, removeSections, secondOffset, sectionsFromClips, slideSections, snapBeat, srcOf, totalBeats, type EditSection } from "@shared/trackEdit";
+import { addCut, barPhase, cutAt, duplicateSections, initialSections, insertSections, leadBeat, moveSections, piecesOf, place, removeSections, secondOffset, slideSections, snapBeat, srcOf, totalBeats, type EditSection } from "@shared/trackEdit";
 import { trackBeats, type PlannerTrack } from "@shared/planner";
+import { autoEdit, clipsEdit, cuesForEdit, swapInEdit, type AutoLink } from "@shared/cdj";
 import { BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT } from "./actions";
 import { playEditPreview, stopEditPreview } from "./editPlayer";
 import { reconcileMedia } from "./media";
-import { errorText, isCueStep, newId, runCueStep, store, type CueStep, type EditLane, type EditSnap, type TrackEditUi } from "./store";
+import { errorText, isCueStep, newId, runCueStep, store, toast, type CueStep, type EditLane, type EditSnap, type TrackEditUi } from "./store";
 
 const HISTORY = 200;
 const PAD = 12; // px left free at the right edge when the whole edit is fitted to the panel
@@ -179,22 +180,78 @@ export function editRemoveTrack(lane: 0 | 1): void {
 }
 
 // Sends the clips selected on the timeline to the editor, cut up and spaced as they are
-// there. False when no clip is selected. Clips of more than one file are left alone, and
-// muted clips count as empty space.
+// there, as an automatic edit: exporting it swaps the new file in for them. Clips of two files
+// open both in the editor, the one heard first as the first track. False when no clip is
+// selected. Clips of more than two files are left alone, and muted clips count as empty space.
 export function editSelectedClips(): boolean {
 	const s = store.get();
 	const chosen = new Set(s.selection);
-	const clips = s.doc.clips.filter((c) => chosen.has(c.id));
+	const clips = s.doc.clips.filter((c) => chosen.has(c.id)).sort((a, b) => a.startBeat - b.startBeat);
 	if (clips.length === 0) return false;
-	const track = s.doc.tracks.find((t) => t.id === clips[0].trackId);
-	if (!track) return true;
+	const tracks: PlannerTrack[] = [];
+	const src = new Map<string, number>();
 	for (const c of clips) {
-		const t = c.trackId === track.id ? track : s.doc.tracks.find((x) => x.id === c.trackId);
-		if (!t || !sameTrack(t, track)) return true;
+		const t = s.doc.tracks.find((x) => x.id === c.trackId);
+		if (!t) return true;
+		let i = tracks.findIndex((x) => sameTrack(x, t));
+		if (i < 0) {
+			if (tracks.length === 2) {
+				toast("Cmd+E takes the clips of two tracks at most.");
+				return true;
+			}
+			i = tracks.push(t) - 1;
+		}
+		src.set(c.id, i);
 	}
-	const sections = sectionsFromClips(track, clips.filter((c) => !c.muted), () => newId("e"));
-	if (sections.length > 0) openTrackEditWith(track, sections);
+	openAuto(tracks, clipsEdit(tracks, clips, () => newId("e"), (c) => src.get(c.id) ?? 0));
 	return true;
+}
+
+// "Edit automatically" (playlist mode): the track's clips, in the set's order and with its
+// gaps as silence, become the edit. Exporting it then swaps the new file in for them.
+export function openAutoEdit(trackId: string): void {
+	const s = store.get();
+	const track = s.doc.tracks.find((t) => t.id === trackId);
+	if (track) openAuto([track], autoEdit(s.doc, track, () => newId("e")));
+}
+
+// Opens an automatic edit on its own, in place of whatever the editor had open.
+function openAuto(tracks: PlannerTrack[], { sections, links }: { sections: EditSection[]; links: AutoLink[] }): void {
+	if (sections.length === 0) return;
+	if (store.get().trackEdit) closeTrackEdit();
+	const [track, second] = tracks;
+	const own = second ? sections.filter((x) => srcOf(x) === 0) : sections;
+	// The first track's own sections go in first, so the editor opens on it as usual; then the
+	// whole edit, with the second track beside it.
+	openTrackEditWith(track, own.length > 0 ? own : initialSections(track, newId("e")));
+	if (second) patch({ second, sections, cuts: [[], []], past: [], future: [] });
+	patch({ auto: { links } });
+}
+
+// After an automatic edit is exported to `file`: its clips play the new file instead, and the
+// cues they showed are to be written onto it once Rekordbox has it. One undo step on the
+// timeline, which also takes the file away again. The editor closes: its work is done.
+async function swapAutoEdit(e: TrackEditUi, file: string, placed: ReturnType<typeof place<EditSection>>): Promise<void> {
+	const auto = e.auto;
+	if (!auto) return;
+	const probe = await window.api.probe(file);
+	const grid = probe.rekordbox;
+	const edit: PlannerTrack = { id: newId("t"), sourcePath: file, name: probe.name, bpm: grid?.bpm ?? e.track.bpm, durationSec: probe.durationSec, ...(grid ? { downbeatSec: grid.downbeatSec } : {}) };
+	const s = store.get();
+	const { doc, moved } = swapInEdit(s.doc, edit, auto.links, placed);
+	if (moved.length === 0) return;
+	// Each old track's cues, the one heard first first, so a hot cue letter goes to the first.
+	const cues: { sec: number; kind: number }[] = [];
+	const letters = new Set<number>();
+	const order = [...new Set([...moved].sort((a, b) => a.from.startBeat - b.from.startBeat).map((m) => m.from.trackId))];
+	for (const id of order) {
+		const old = s.doc.tracks.find((t) => t.id === id);
+		if (old) cues.push(...cuesForEdit(s.cues[old.sourcePath] ?? [], old, edit, moved.filter((m) => m.from.trackId === id), letters));
+	}
+	await window.api.editCues(file, cues.sort((a, b) => a.sec - b.sec));
+	const failed = (err: unknown): void => toast(errorText(err));
+	store.commitWith(doc, { undo: () => void window.api.withdrawEdit(file).catch(failed), redo: () => void window.api.restoreEdit(file).catch(failed) });
+	closeTrackEdit();
 }
 
 export function closeTrackEdit(): void {
@@ -427,6 +484,14 @@ export async function exportTrackEdit(): Promise<string | null> {
 	const same = (): boolean => ed()?.track === e.track;
 	try {
 		const r = await window.api.exportEdit({ sourcePath: e.track.sourcePath, name: e.track.name, bpm: e.track.bpm, downbeatSec: e.track.downbeatSec, leadBeat: lead, sections, ...(second ? { second } : {}) });
+		if (e.auto && same()) {
+			try {
+				await swapAutoEdit(e, r.path, place(lead, e.sections));
+			} catch (err) {
+				toast(`The edit was exported but not swapped in: ${errorText(err)}`);
+			}
+			if (!ed()) return r.path;
+		}
 		// Only the edit as it was exported counts as exported.
 		if (same()) patch({ exporting: false, exported: ed()!.sections === e.sections ? r.path : null });
 		return r.path;

@@ -8,7 +8,7 @@ import { testDir } from "../testdata";
 import { SAMPLE_RATE as SR } from "../../src/shared/planner";
 import type { AnlzBeat } from "../../src/main/rekordbox";
 import { datFile, gridBeats, waveformOf, writeAnalysis } from "../anlz";
-import { cueRows, makeMasterDb, storedDat } from "../rekordboxDb";
+import { cueRows, makeMasterDb, queryDb, storedDat } from "../rekordboxDb";
 import { onsets, readAll, writeBarTrack, writeClickTrack } from "../signals";
 import { exportTo, importTrack, launch, setFile, shot, state, stored, waitReady, type Harness } from "./harness";
 
@@ -120,8 +120,10 @@ beforeAll(async () => {
 		],
 	);
 
-	h = await launch(undefined, work, { DJ_REKORDBOX_DIR: root, DJ_REKORDBOX_DB: db });
+	h = await launchReal();
 });
+// The app on the test library and its database.
+const launchReal = (): Promise<Harness> => launch(undefined, work, { DJ_REKORDBOX_DIR: root, DJ_REKORDBOX_DB: db });
 const extraDirs: string[] = [];
 afterAll(async () => {
 	await h?.close();
@@ -502,7 +504,7 @@ describe("rekordbox", () => {
 		await h.page.keyboard.press("Meta+z");
 		await h.page.evaluate(() => (window as any).planner.engine.seek(30.37));
 		await el.click({ position: { x: 20, y: 30 } });
-		await h.page.keyboard.press("s");
+		await h.page.keyboard.press("Meta+s");
 		let cs = await clips();
 		expect(cs.length).toBe(2);
 		const right = h.page.locator(`[data-clip-id="${cs[1].id}"]`);
@@ -672,6 +674,9 @@ describe("rekordbox", () => {
 		expect(await drop(f.a, 0, 0)).toBe("asked");
 		await h.page.getByTestId("bpm-cancel").click();
 		expect(JSON.parse(fs.readFileSync(path.join(data, "rekordbox-cache.json"), "utf8")).root).toBe(junk);
+		// back on the test library for the tests that follow
+		await h.close();
+		h = await launchReal();
 	});
 });
 
@@ -822,5 +827,191 @@ describe("cue points", () => {
 		expect(await h.page.getByTestId("menu-cue-memory").isDisabled()).toBe(true);
 		expect(await h.page.getByTestId("menu-cue-hot").isDisabled()).toBe(true);
 		await h.page.keyboard.press("Escape");
+	});
+});
+
+describe("playlist mode", () => {
+	const allCues = (): { ms: number; kind: number }[] => cueRows(db, A_ID).map((r) => ({ ms: r["InMsec"] as number, kind: r["Kind"] as number }));
+	const pending = (): Record<string, { sec: number; kind: number }[]> => {
+		try {
+			return JSON.parse(fs.readFileSync(path.join(h.dataDir, "pending-cues.json"), "utf8"));
+		} catch {
+			return {};
+		}
+	};
+	const exportDir = (): string => path.join(work, "auto-edits");
+	const editFile = (): string => path.join(exportDir(), "Bar Track A (edit).wav");
+	const toEdit = (): Promise<string[]> => h.page.locator('[data-testid="clip"][data-to-edit="true"]').evaluateAll((els) => els.map((el) => el.getAttribute("data-clip-id") ?? ""));
+	const bodyHas = (c: string): Promise<boolean> => h.page.evaluate((k) => document.body.classList.contains(k), c);
+
+	it("shows a second toolbar with its toggle, greys the clips, and marks the track that needs an edit", async () => {
+		await newSet();
+		await h.page.evaluate((dir) => (window as any).api.setSettings({ exportDir: dir }), exportDir());
+		expect(await drop(f.a, 0, 0)).toBe("placed");
+		expect(await drop(f.full, 1, 0)).toBe("placed");
+		await waitReady(h.page);
+		// Track A twice: the second clip starts 2.5 beats (over a second) away from where the
+		// track would be by then. Full Path once, which is always fine.
+		await h.page.evaluate(() => {
+			const { store } = (window as any).planner;
+			const doc = store.get().doc;
+			const a = doc.tracks.find((t: any) => t.name === "Bar Track A").id;
+			const others = doc.clips.filter((c: any) => c.trackId !== a);
+			store.commit({
+				...doc,
+				clips: [...others, { id: "pa-1", trackId: a, lane: 0, startBeat: 0, offsetBeat: 0, lengthBeat: 16 }, { id: "pa-2", trackId: a, lane: 0, startBeat: 20, offsetBeat: 22.5, lengthBeat: 16 }],
+			});
+		});
+		await waitReady(h.page);
+		expect(await h.page.getByTestId("toolbar").count()).toBe(0);
+		expect(await toEdit()).toEqual([]); // not marked outside playlist mode
+
+		await h.page.getByTestId("playlist-mode").click();
+		expect(await h.page.getByTestId("playlist-mode").getAttribute("aria-pressed")).toBe("true");
+		await h.page.getByTestId("toolbar").waitFor();
+		expect(await h.page.getByTestId("cue-tools").locator("button").count()).toBe(9);
+		expect(await bodyHas("playlist-mode")).toBe(true);
+		expect((await toEdit()).sort()).toEqual(["pa-1", "pa-2"]);
+		expect(await h.page.getByTestId("to-edit").textContent()).toBe("1 to edit");
+		const sat = (sel: string): Promise<string> => h.page.locator(sel).first().evaluate((el) => getComputedStyle(el).getPropertyValue("--sat").trim());
+		expect(await sat('[data-testid="clip"]:not([data-to-edit])')).toBe("0");
+		expect(Number(await sat('[data-testid="clip"][data-to-edit]'))).toBeGreaterThan(0);
+		await shot(h.page, "playlist-01-toolbar");
+
+		// a muted clip does not count
+		await h.page.evaluate(() => {
+			const { store } = (window as any).planner;
+			const doc = store.get().doc;
+			store.commit({ ...doc, clips: doc.clips.map((c: any) => (c.id === "pa-2" ? { ...c, muted: true } : c)) });
+		});
+		await expect.poll(toEdit).toEqual([]);
+		expect(await h.page.getByTestId("to-edit").count()).toBe(0);
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(async () => (await toEdit()).length).toBe(2);
+
+		// off again: no toolbar, colours back
+		await h.page.getByTestId("playlist-mode").click();
+		expect(await h.page.getByTestId("toolbar").count()).toBe(0);
+		expect(await bodyHas("playlist-mode")).toBe(false);
+		expect(await toEdit()).toEqual([]);
+		await h.page.getByTestId("playlist-mode").click();
+		await h.page.getByTestId("toolbar").waitFor();
+	});
+
+	it("places cues with the cue buttons, toggled on and off, and undoes them", async () => {
+		const ppb: number = await state(h.page, "s => s.pxPerBeat");
+		const before = allCues();
+		const memory = h.page.getByTestId("cue-tool-memory");
+		await memory.click();
+		expect(await memory.getAttribute("aria-pressed")).toBe("true");
+		expect(await bodyHas("cue-tool")).toBe(true);
+		const clip = h.page.locator('[data-testid="clip"][data-clip-id="pa-1"]');
+		const box = (await clip.boundingBox())!;
+		await h.page.mouse.click(box.x + 4 * ppb, box.y + box.height / 2);
+		await expect.poll(() => allCues().length).toBe(before.length + 1);
+		const added = allCues().find((c) => !before.some((b) => b.ms === c.ms && b.kind === c.kind))!;
+		expect(added.kind).toBe(0);
+		expect(Math.abs(added.ms - aBeatMs(4) + 250)).toBeLessThan(BEAT_SEC * 1000); // near beat 4 of the clip
+		expect((await clips()).find((c) => c.id === "pa-1").startBeat).toBe(0); // the clip did not move
+
+		// another letter takes over from memory; clicking it again turns it off
+		const b = h.page.getByTestId("cue-tool-B");
+		await b.click();
+		expect(await memory.getAttribute("aria-pressed")).toBe("false");
+		expect(await b.getAttribute("aria-pressed")).toBe("true");
+		await h.page.mouse.click(box.x + 10 * ppb, box.y + box.height / 2);
+		await expect.poll(() => allCues().filter((c) => c.kind === 2).length).toBe(1);
+		await b.click();
+		expect(await b.getAttribute("aria-pressed")).toBe("false");
+		expect(await bodyHas("cue-tool")).toBe(false);
+		// with no tool on, a click selects again
+		await h.page.mouse.click(box.x + 6 * ppb, box.y + box.height / 2);
+		expect(allCues().length).toBe(before.length + 2);
+		expect(await state(h.page, "s => s.selection")).toEqual(["pa-1"]);
+
+		// Escape turns the tool off
+		await memory.click();
+		await h.page.keyboard.press("Escape");
+		expect(await memory.getAttribute("aria-pressed")).toBe("false");
+		expect(await state(h.page, "s => s.cueTool")).toBeNull();
+
+		await h.page.keyboard.press("Meta+z");
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(allCues).toEqual(before);
+	});
+
+	it("edits a red track automatically: the export takes its place, with its cues waiting for Rekordbox, and undo takes it away", async () => {
+		const old = await clips();
+		const oldA = (await tracks()).find((t) => t.name === "Bar Track A");
+		const cuesA: { sec: number; kind: number }[] = await state(h.page, `s => s.cues[${JSON.stringify(f.a)}]`);
+		const pa2 = h.page.locator('[data-testid="clip"][data-clip-id="pa-2"]');
+		await pa2.click({ button: "right", position: { x: 20, y: 30 } });
+		await h.page.getByTestId("menu-auto-edit").click();
+		await h.page.getByTestId("track-editor").waitFor();
+		const secs = await state<any[]>(h.page, "s => s.trackEdit.sections");
+		expect(secs).toHaveLength(2);
+		await shot(h.page, "playlist-02-auto-edit");
+
+		// the Full Path clip has no such item
+		await h.page.locator('[data-testid="clip"]:not([data-to-edit])').first().click({ button: "right", position: { x: 20, y: 30 } });
+		expect(await h.page.getByTestId("menu-auto-edit").count()).toBe(0);
+		await h.page.keyboard.press("Escape");
+
+		await h.page.getByTestId("edit-export").click();
+		await h.page.waitForFunction(() => (window as any).planner.store.get().trackEdit === null, undefined, { timeout: 60000 });
+		expect(fs.existsSync(editFile())).toBe(true);
+		const ts = await tracks();
+		const edit = ts.find((t) => t.sourcePath === editFile());
+		expect(edit).toBeTruthy();
+		expect(ts.some((t) => t.id === oldA.id)).toBe(false);
+		const now = await clips();
+		expect(now.filter((c) => c.id.startsWith("pa-")).every((c) => c.trackId === edit.id)).toBe(true);
+		expect(now.find((c) => c.id === "pa-2").startBeat).toBe(20); // the timeline is as it was
+		await expect.poll(toEdit).toEqual([]);
+		expect(await h.page.getByTestId("to-edit").count()).toBe(0);
+		await waitReady(h.page);
+		await shot(h.page, "playlist-03-swapped");
+
+		// the cues each clip showed, at the same places in the new file
+		const want: { sec: number; kind: number }[] = [];
+		for (const id of ["pa-1", "pa-2"]) {
+			const from = old.find((c) => c.id === id);
+			const to = now.find((c) => c.id === id);
+			for (const c of cuesA) {
+				const beat = (c.sec * oldA.bpm) / 60;
+				if (beat >= from.offsetBeat && beat < from.offsetBeat + from.lengthBeat) want.push({ sec: ((to.offsetBeat + beat - from.offsetBeat) * 60) / edit.bpm, kind: c.kind });
+			}
+		}
+		expect(want.length).toBeGreaterThan(1);
+		const got = pending()[editFile()];
+		expect(got.map((c) => c.kind)).toEqual(want.map((c) => c.kind));
+		got.forEach((c, i) => expect(c.sec).toBeCloseTo(want[i].sec, 3));
+
+		// undo: the old track back, red again, and the file and its cues gone; redo: back
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(() => fs.existsSync(editFile())).toBe(false);
+		expect(pending()[editFile()]).toBeUndefined();
+		expect((await clips()).filter((c) => c.id.startsWith("pa-")).every((c) => c.trackId === oldA.id)).toBe(true);
+		await expect.poll(async () => (await toEdit()).length).toBe(2);
+		await h.page.keyboard.press("Meta+Shift+z");
+		await expect.poll(() => fs.existsSync(editFile())).toBe(true);
+		expect(pending()[editFile()]).toEqual(got);
+		await expect.poll(toEdit).toEqual([]);
+
+		// Rekordbox imports the file: the cues are written the next time the app looks
+		const dat = writeAnalysis(root, "?/Bar Track A (edit).wav", gridBeats(128, 0.25, 3, beatCount(40, 128, 0.25)), waveformOf(editFile()));
+		queryDb(db, `insert into djmdContent (ID, UUID, AnalysisDataPath) values ('200', 'uuid-edit', '${storedDat(dat)}');`);
+		await h.page.waitForTimeout(2100); // past the rescan throttle
+		await h.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+		await expect.poll(() => cueRows(db, "200").length, { timeout: 15000 }).toBe(want.length);
+		const rows = cueRows(db, "200").map((r) => ({ ms: r["InMsec"] as number, kind: r["Kind"] as number }));
+		const wantMs = [...want].sort((x, y) => x.sec - y.sec || x.kind - y.kind);
+		rows.forEach((r, i) => {
+			expect(r.kind).toBe(wantMs[i].kind);
+			expect(Math.abs(r.ms - wantMs[i].sec * 1000)).toBeLessThan(31);
+		});
+		expect(pending()[editFile()]).toBeUndefined();
+		await expect.poll(() => state<number>(h.page, `s => (s.cues[${JSON.stringify(editFile())}] ?? []).length`)).toBe(want.length);
+		await shot(h.page, "playlist-04-cues-written");
 	});
 });

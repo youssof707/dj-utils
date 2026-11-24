@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { firstBarBeat, LANES, PEAK_BUCKET, SAMPLE_RATE, trackBeats, type Clip, type Cue, type PlannerDoc, type PlannerTrack, type TempoBlock } from "@shared/planner";
 import { cueMarks } from "@shared/cues";
+import { tracksToEdit } from "@shared/cdj";
 import { fadeGain, fitFades } from "@shared/fades";
 import { blocksToPoints, bpmAt } from "@shared/tempo";
 import { addTempo, toggleTempo, BEAT_GRID_MIN_PX, gridStepBeats, clampScroll, contentBeats, deleteSelection, importPaths, MIN_CLIP_BEATS, NEW_TEMPO_BEATS, parseWholeBpm, setTempoBpm, splitAt, tempoPoints, toggleClipsFlag, toggleMute, toggleSolo, zoomAround } from "./actions";
@@ -291,7 +292,7 @@ function TempoEditor({ block }: { block: TempoBlock }) {
 
 // ---- clips --------------------------------------------------------------------------
 
-type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; tempoPct: number | null; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void; onFade: (e: ReactPointerEvent, clip: Clip, side: FadeSide) => void };
+type ClipProps = { clip: Clip; track: PlannerTrack | undefined; media: Media | undefined; tempoPct: number | null; cues: Cue[] | undefined; pxPerBeat: number; scrollX: number; width: number; bpm: number; selected: boolean; toEdit: boolean; laneH: number; onDown: (e: ReactPointerEvent, clip: Clip) => void; onFade: (e: ReactPointerEvent, clip: Clip, side: FadeSide) => void };
 
 type FadeSide = "in" | "out";
 const FADE_DOT = 10; // px
@@ -302,7 +303,7 @@ const fadeDotInset = (fadePx: number, clipPx: number, selected: boolean): number
 	return Math.min(Math.max(fadePx, line), clipPx - line) - FADE_DOT / 2;
 };
 
-function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, width, bpm, selected, laneH, onDown, onFade }: ClipProps) {
+function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, width, bpm, selected, toEdit, laneH, onDown, onFade }: ClipProps) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const left = clip.startBeat * pxPerBeat - scrollX;
 	const w = Math.max(2, clip.lengthBeat * pxPerBeat);
@@ -351,12 +352,13 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 	return (
 		<>
 			<div
-				className={`clip ${status}${selected ? " selected" : ""}${clip.muted ? " muted" : ""}${clip.lowCut ? " lowcut" : ""}`}
+				className={`clip ${status}${selected ? " selected" : ""}${clip.muted ? " muted" : ""}${clip.lowCut ? " lowcut" : ""}${toEdit ? " to-edit" : ""}`}
 				style={style}
 				data-testid="clip"
 				data-clip-id={clip.id}
 				data-muted={clip.muted ? "true" : undefined}
 				data-lowcut={clip.lowCut ? "true" : undefined}
+				data-to-edit={toEdit ? "true" : undefined}
 				data-status={status}
 				onPointerDown={(e) => onDown(e, clip)}
 				onContextMenu={(e) => {
@@ -454,6 +456,9 @@ function Lanes({ width }: { width: number }) {
 	const boxRef = useRef<HTMLDivElement>(null);
 	const tracks = useMemo(() => new Map(doc.tracks.map((t) => [t.id, t])), [doc.tracks]);
 	const starts = useMemo(() => rampStarts(doc), [doc]);
+	// In playlist mode the tracks that a CDJ could not just play through show red.
+	const playlistMode = useStore((s) => s.playlistMode);
+	const toEdit = useMemo(() => (playlistMode ? tracksToEdit(doc) : new Set<string>()), [playlistMode, doc]);
 
 	const beatAt = (clientX: number): number => {
 		const r = ref.current!.getBoundingClientRect();
@@ -854,7 +859,7 @@ function Lanes({ width }: { width: number }) {
 							.filter((c) => c.lane === lane)
 							.map((c) => {
 								const t = tracks.get(c.trackId);
-								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} tempoPct={clipTempoProgress(doc, c, t)} cues={t && cues[t.sourcePath]} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} laneH={laneH} onDown={onClipDown} onFade={onFadeDown} />;
+								return <ClipView key={c.id} clip={c} track={t} media={mediaFor(t, doc.bpm)} tempoPct={clipTempoProgress(doc, c, t)} cues={t && cues[t.sourcePath]} pxPerBeat={pxPerBeat} scrollX={scrollX} width={width} bpm={doc.bpm} selected={selection.includes(c.id)} toEdit={toEdit.has(c.trackId)} laneH={laneH} onDown={onClipDown} onFade={onFadeDown} />;
 							})}
 					</div>
 				))}

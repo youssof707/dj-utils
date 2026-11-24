@@ -333,9 +333,13 @@ const cuesOf = (m: RekordboxMatch): Cue[] => (cueLibrary.cues[datKey(m.dat)] ?? 
 // The file's memory cues and hot cues, on our own decode of it.
 async function rekordboxCues(sourcePath: string): Promise<CueInfo> {
 	if (!rekordboxDb) return { cues: [], canEdit: false };
-	const m = await rekordboxMatch(sourcePath, false);
+	// An edit with cues waiting looks for Rekordbox's analysis again: it is imported there
+	// after the app has started.
+	const m = await rekordboxMatch(sourcePath, sourcePath in pendingCues);
 	if (!m) return { cues: [], canEdit: false };
 	await loadCues();
+	const written = await writeWaitingCues(sourcePath, m);
+	if (written) return written;
 	return { cues: cuesOf(m), canEdit: datKey(m.dat) in cueLibrary.contents && fs.existsSync(sqlcipherPath()) };
 }
 
@@ -396,6 +400,84 @@ function deleteCues(sourcePath: string, remove: string[]): Promise<CueChange> {
 
 function applyCues(sourcePath: string, remove: string[], insert: CueRow[]): Promise<CueChange> {
 	return changeCues(sourcePath, () => ({ remove: ids(remove), clear: [], insert: Array.isArray(insert) ? insert : [] }));
+}
+
+// ---- automatic edits ------------------------------------------------------------------
+// An automatic edit (playlist mode) takes its track's place in the set, and the cues the
+// track had on the timeline go onto the new file. Rekordbox has no row for the file until it
+// is imported there, so the cues wait in pending-cues.json and are written the first time the
+// file's cues are looked up and Rekordbox has it. Undo takes the file away into `heldDir`,
+// redo puts it back; held files left from an earlier run are deleted at start.
+type PendingCue = { sec: number; kind: number };
+let pendingFile = "";
+let heldDir = "";
+let pendingCues: Record<string, PendingCue[]> = {};
+const editsMade = new Set<string>(); // edits exported in this run: the only files taken away
+const held = new Map<string, { file: string; cues: PendingCue[] | undefined }>();
+
+function savePending(): void {
+	try {
+		writeAtomic(pendingFile, JSON.stringify(pendingCues));
+	} catch (e) {
+		console.error("Waiting cues could not be saved:", e);
+	}
+}
+
+function setEditCues(file: string, cues: unknown): void {
+	if (!editsMade.has(file)) throw new Error("That is not an edit made here");
+	const list = Array.isArray(cues) ? cues.filter((c): c is PendingCue => !!c && Number.isFinite(c.sec) && c.sec >= 0 && Number.isInteger(c.kind) && c.kind >= 0 && c.kind <= HOT_CUES) : [];
+	if (list.length) pendingCues[file] = list;
+	else delete pendingCues[file];
+	savePending();
+}
+
+// A move that also works from one disk to another.
+function moveFile(from: string, to: string): void {
+	try {
+		fs.renameSync(from, to);
+	} catch (e) {
+		if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
+		fs.copyFileSync(from, to);
+		fs.rmSync(from);
+	}
+}
+
+function withdrawEdit(file: string): void {
+	if (!editsMade.has(file) || held.has(file)) throw new Error("That is not an edit made here");
+	fs.mkdirSync(heldDir, { recursive: true });
+	const to = path.join(heldDir, `${Date.now()}-${randomBytes(4).toString("hex")}${path.extname(file)}`);
+	if (fs.existsSync(file)) moveFile(file, to);
+	held.set(file, { file: to, cues: pendingCues[file] });
+	delete pendingCues[file];
+	savePending();
+}
+
+function restoreEdit(file: string): void {
+	const h = held.get(file);
+	if (!h) throw new Error("That edit is gone");
+	if (fs.existsSync(file)) throw new Error("Another file has that name now");
+	if (fs.existsSync(h.file)) moveFile(h.file, file);
+	held.delete(file);
+	if (h.cues) pendingCues[file] = h.cues;
+	savePending();
+}
+
+// Writes the cues waiting for the file once Rekordbox has it. Null while it has to wait.
+async function writeWaitingCues(sourcePath: string, m: RekordboxMatch): Promise<CueInfo | null> {
+	const waiting = pendingCues[sourcePath];
+	if (!waiting || !(datKey(m.dat) in cueLibrary.contents) || !fs.existsSync(sqlcipherPath())) return null;
+	delete pendingCues[sourcePath];
+	savePending();
+	try {
+		const kinds = [...new Set(waiting.filter((c) => c.kind > 0).map((c) => c.kind))];
+		const done = await changeCues(sourcePath, (content, toMs) => ({ remove: [], clear: kinds, insert: waiting.map((c) => newCueRow(content, toMs(c.sec), c.kind)) }));
+		return { cues: done.cues, canEdit: true };
+	} catch (e) {
+		console.error("Waiting cues could not be written:", e);
+		pendingCues[sourcePath] = waiting; // tried again next time
+		savePending();
+		return null;
+	}
 }
 
 // Rekordbox's tracks and playlists, read again when Rekordbox has written to its database.
@@ -587,6 +669,7 @@ async function exportEdit(req: EditExportRequest): Promise<EditExportResult> {
 		const outPath = editPath(dir, req.name);
 		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, leadBeat: req.leadBeat, sections: req.sections, second: req.second };
 		const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
+		editsMade.add(outPath);
 		return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };
 	} finally {
 		editExporting = false;
@@ -1192,6 +1275,14 @@ export function setupPlanner(): void {
 	rekordboxCache = path.join(base, "rekordbox-cache.json");
 	matchesFile = path.join(base, "rekordbox-matches.json");
 	loadSavedMatches();
+	pendingFile = path.join(base, "pending-cues.json");
+	heldDir = path.join(base, "withdrawn-edits");
+	try {
+		pendingCues = JSON.parse(fs.readFileSync(pendingFile, "utf8")) as Record<string, PendingCue[]>;
+	} catch {
+		pendingCues = {};
+	}
+	fs.rmSync(heldDir, { recursive: true, force: true });
 	rekordboxDb = findRekordboxDb();
 	void scanRekordbox();
 	void loadCues();
@@ -1199,6 +1290,9 @@ export function setupPlanner(): void {
 	ipcMain.handle("planner:probe", (_e, p: string) => probe(p));
 	ipcMain.handle("planner:rekordbox", (_e, p: string) => trackGrid(p));
 	ipcMain.handle("planner:cues", (_e, p: string) => rekordboxCues(p));
+	ipcMain.handle("planner:edit-cues", (_e, p: string, cues: unknown) => setEditCues(p, cues));
+	ipcMain.handle("planner:edit-withdraw", (_e, p: string) => withdrawEdit(p));
+	ipcMain.handle("planner:edit-restore", (_e, p: string) => restoreEdit(p));
 	ipcMain.handle("planner:cue-add", (_e, p: string, sec: number, kind: number) => addCue(p, sec, kind));
 	ipcMain.handle("planner:cue-delete", (_e, p: string, remove: string[]) => deleteCues(p, remove));
 	ipcMain.handle("planner:cue-apply", (_e, p: string, remove: string[], insert: CueRow[]) => applyCues(p, remove, insert));

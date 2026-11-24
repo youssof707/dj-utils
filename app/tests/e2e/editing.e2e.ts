@@ -11,6 +11,8 @@ const playhead = async (): Promise<number> => Number(await h.page.getByTestId("p
 
 beforeAll(async () => {
 	h = await launch();
+	// The positions here are worked out on the whole width of the window: no library panel.
+	await h.page.evaluate(() => (window as any).planner.store.set({ libraryOpen: false }));
 	const a = path.join(h.workDir, "a.wav");
 	const b = path.join(h.workDir, "b.wav");
 	const c = path.join(h.workDir, "c.wav");
@@ -81,6 +83,7 @@ describe("editing and playback", () => {
 		expect(g.n).toBeGreaterThan(6);
 		expect(g.worstMs).toBeLessThan(3);
 		await h.page.keyboard.press("Meta+z");
+		await h.page.keyboard.press("Space"); // stopped, as the next test expects
 	});
 
 	it("moving a clip far from the playhead during playback leaves the sounding audio alone", async () => {
