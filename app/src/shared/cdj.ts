@@ -40,9 +40,10 @@ export function autoEdit(doc: PlannerDoc, track: PlannerTrack, newId: () => stri
 }
 
 // The same for any clips of one or two tracks (Cmd+E on a selection): `tracks[i]` is the
-// editor's track i, and `src` which of them a clip is of. Muted clips are left out.
+// editor's track i, and `src` which of them a clip is of. The file is only ever the tracks'
+// own audio: muted clips are in it like the rest, and no clip's bass cut or volume fades are.
 export function clipsEdit(tracks: PlannerTrack | PlannerTrack[], clips: Clip[], newId: () => string, src?: (c: Clip) => number): { sections: EditSection[]; links: AutoLink[] } {
-	const { sections, links } = clipSections(tracks, clips.filter((c) => !c.muted), newId, src);
+	const { sections, links } = clipSections(tracks, clips, newId, src);
 	return { sections, links: links.map((l) => ({ clipId: l.clip.id, sectionId: l.sectionId })) };
 }
 
@@ -69,7 +70,8 @@ export function swapInEdit(doc: PlannerDoc, edit: PlannerTrack, links: AutoLink[
 
 // The swapped-in clips become one clip that plays the edit straight through, uncut: it sits
 // where the clip heard first in the edit sits, on its lane, and runs to the edit's end (`end`,
-// in the edit's beats). It keeps that clip's fade in and bass cut, and the last one's fade out.
+// in the edit's beats). It keeps that clip's fade in and bass cut, and the last one's fade out,
+// on the timeline (the file has none of them); it is muted only if every clip was.
 function joinSwapped(clips: Clip[], swapped: Clip[], end: number): Clip[] {
 	const ids = new Set(swapped.map((c) => c.id));
 	const byEdit = [...swapped].sort((a, b) => a.offsetBeat - b.offsetBeat || a.startBeat - b.startBeat);
@@ -78,6 +80,8 @@ function joinSwapped(clips: Clip[], swapped: Clip[], end: number): Clip[] {
 	const one: Clip = { ...first, lengthBeat: Math.max(first.lengthBeat, end - first.offsetBeat) };
 	delete one.fadeOutBeat;
 	if (last.fadeOutBeat) one.fadeOutBeat = last.fadeOutBeat;
+	delete one.muted;
+	if (swapped.every((c) => c.muted)) one.muted = true;
 	return clips.flatMap((c) => (!ids.has(c.id) ? [c] : c.id === first.id ? [one] : []));
 }
 

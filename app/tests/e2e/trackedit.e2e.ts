@@ -347,6 +347,44 @@ describe("track editor", () => {
 		await h.page.getByTestId("edit-section").first().waitFor();
 	});
 
+	it("Cmd+Shift+E makes two runs of clips into edits in the background, one clip each straight away", async () => {
+		const parentId = await state<string>(h.page, "s => s.doc.tracks.find((t) => t.name === 'parent').id");
+		const clipsBefore = await h.page.evaluate((lead) => {
+			const { store } = (window as any).planner;
+			const doc = store.get().doc;
+			const parent = doc.tracks.find((t: any) => t.name === "parent");
+			const mk = (id: string, startBeat: number, offsetBeat: number, lengthBeat: number): object => ({ id, trackId: parent.id, lane: 3, startBeat, offsetBeat, lengthBeat });
+			store.commit({ ...doc, clips: [...doc.clips, mk("qe-a", 400, lead + 8, 8), mk("qe-b", 412, lead, 4), mk("qe-c", 500, lead, 8), mk("qe-d", 508, lead + 16, 8)] });
+			store.set({ selection: ["qe-a", "qe-b"], editFocus: false });
+			return store.get().doc.clips;
+		}, LEAD);
+		const editorBefore = await sections();
+		await h.page.keyboard.press("Meta+Shift+e");
+		// One clip of the new file at once, before its export is done; the editor is left alone.
+		await expect.poll(() => state(h.page, "s => s.doc.clips.some((c) => c.id === 'qe-b')")).toBe(false);
+		await h.page.evaluate(() => (window as any).planner.store.set({ selection: ["qe-c", "qe-d"] }));
+		await h.page.keyboard.press("Meta+Shift+e");
+		await expect.poll(() => state(h.page, "s => s.doc.clips.some((c) => c.id === 'qe-d')")).toBe(false);
+		expect(await sections()).toEqual(editorBefore);
+		const doc = await state<{ clips: any[]; tracks: any[] }>(h.page, "s => s.doc");
+		const a = doc.clips.find((c) => c.id === "qe-a");
+		const c = doc.clips.find((x) => x.id === "qe-c");
+		expect([a.lane, a.startBeat, a.lengthBeat]).toEqual([3, 400, 16]);
+		const files = [a, c].map((x) => doc.tracks.find((t) => t.id === x.trackId).sourcePath);
+		expect(new Set(files).size).toBe(2); // each its own file
+		for (const f of files) expect(f.startsWith(path.join(exportDir, "parent (edit"))).toBe(true);
+		await expect.poll(() => files.every((f) => fs.existsSync(f)), { timeout: 60000 }).toBe(true);
+		await shot(h.page, "trackedit-quick-edits");
+		// Undone, the clips come back and the files go.
+		await h.page.evaluate(() => (window as any).planner.store.set({ editFocus: false }));
+		await h.page.keyboard.press("Meta+z");
+		await h.page.keyboard.press("Meta+z");
+		await expect.poll(() => files.some((f) => fs.existsSync(f))).toBe(false);
+		expect(await state(h.page, "s => s.doc.clips")).toEqual(clipsBefore);
+		await h.page.evaluate(() => (window as any).planner.store.undo());
+		expect(await state<boolean>(h.page, `s => s.doc.tracks.some((t) => t.id === ${JSON.stringify(parentId)})`)).toBe(true);
+	});
+
 	it.skipIf(!realMp3)("exports a real MP3 as one clean decode of it: 24 bits, its own rate, every sample", async () => {
 		const file = realMp3!;
 		await importTrack(h.page, file, 140, 2, 0);

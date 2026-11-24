@@ -9,7 +9,7 @@ import { cueSpot, placeCue } from "./cues";
 import { useLibraryDrop } from "./libraryDrag";
 import { refreshTrackKeys } from "./trackKeys";
 import { engine } from "./engine";
-import { clipTempoProgress, mediaFor, type Media } from "./media";
+import { clipTempoProgress, isExporting, mediaFor, type Media } from "./media";
 import { newId, store, useStore } from "./store";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
@@ -379,7 +379,7 @@ function ClipView({ clip, track, media, tempoPct, cues, pxPerBeat, scrollX, widt
 				</div>
 				{status === "working" && media?.state === "working" && (
 					<div className="clip-status" style={{ paddingLeft: labelPad }}>
-						Stretching… {Math.round(media.pct * 100)}%
+						{track && isExporting(track.sourcePath) ? "Exporting…" : `Stretching… ${Math.round(media.pct * 100)}%`}
 					</div>
 				)}
 				{status === "working" && media?.state !== "working" && (

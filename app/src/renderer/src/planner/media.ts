@@ -61,12 +61,32 @@ function run(key: string, job: Promise<StretchResult>, withPeaks: boolean): void
 		.finally(bump);
 }
 
+// Edits being exported in the background (⌘⇧E): their files are not there yet, so their
+// audio is asked for once the export is done. A failed export fails the audio with it.
+const exporting = new Map<string, Promise<unknown>>();
+
+export function exportingTo(file: string, job: Promise<unknown>): void {
+	const done = job.finally(() => {
+		if (exporting.get(file) === done) exporting.delete(file);
+		bump();
+	});
+	exporting.set(file, done);
+	done.catch(() => {});
+}
+
+export const isExporting = (file: string): boolean => exporting.has(file);
+
+const afterExport = <T>(file: string, then: () => Promise<T>): Promise<T> => {
+	const job = exporting.get(file);
+	return job ? job.then(then) : then();
+};
+
 function start(req: StretchRequest): void {
 	const key = stretchKey(req);
 	let v = versions.get(audioKey(req));
 	if (!v) versions.set(audioKey(req), (v = new Map()));
 	v.set(req.projectBpm, key);
-	run(key, window.api.stretch(req), true);
+	run(key, afterExport(req.sourcePath, () => window.api.stretch(req)), true);
 }
 
 // ---- what each clip needs ---------------------------------------------------------------
@@ -116,7 +136,7 @@ function needs(doc: PlannerDoc): Need[] {
 	const out: Need[] = [];
 	for (const r of renderingsFor(doc, tempoMap(doc))) {
 		if (r.base) continue;
-		out.push({ key: r.key, beat: r.beat, start: r.ramp ? (): void => run(r.key, window.api.ramp(r.req), false) : (): void => start(r.req) });
+		out.push({ key: r.key, beat: r.beat, start: r.ramp ? (): void => run(r.key, afterExport(r.req.sourcePath, () => window.api.ramp(r.req)), false) : (): void => start(r.req) });
 	}
 	return out;
 }

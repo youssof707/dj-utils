@@ -1,11 +1,11 @@
 // Everything the user can do in the track editor, as plain functions over the store.
 
 import { appendAt, barPhase, cutAt, duplicateSections, leadBeat, moveSections, place, removeSections, snapBeat, srcOf, totalBeats, wholeTrack, type EditSection } from "@shared/trackEdit";
-import type { PlannerTrack } from "@shared/planner";
+import type { Clip, EditExportRequest, PlannerTrack } from "@shared/planner";
 import { autoEdit, clipsEdit, cuesForEdit, swapInEdit, type AutoLink } from "@shared/cdj";
-import { BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT } from "./actions";
+import { BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT, refreshCues } from "./actions";
 import { playEditPreview, stopEditPreview } from "./editPlayer";
-import { reconcileMedia } from "./media";
+import { exportingTo, reconcileMedia } from "./media";
 import { errorText, isCueStep, newId, runCueStep, store, toast, type CueStep, type EditReplace, type EditSnap, type TrackEditUi } from "./store";
 
 const HISTORY = 200;
@@ -117,26 +117,117 @@ export function openTrackEditWith(track: PlannerTrack): void {
 	commit({ tracks, sections: [...e.sections, ...added] }, { selection: added.map((s) => s.id), cursorBeat: at, scrollX: e.pxPerBeat > 0 && (x < 0 || x > e.width - 60) ? at * px - e.width / 3 : e.scrollX });
 }
 
-// Sends the clips selected on the timeline to the editor, cut up and spaced as they are
-// there, as an automatic edit: exporting it swaps the new file in for them. It takes the place
-// of what the editor had open, once the user agrees. False when no clip is selected. Muted
-// clips count as empty space.
-export function editSelectedClips(): boolean {
+// The clips selected on the timeline as an automatic edit, cut up and spaced as they are
+// there. Null when no clip is selected. Muted clips count as empty space.
+function selectedClipsEdit(): { tracks: PlannerTrack[]; sections: EditSection[]; links: AutoLink[] } | null {
 	const s = store.get();
 	const chosen = new Set(s.selection);
 	const clips = s.doc.clips.filter((c) => chosen.has(c.id)).sort((a, b) => a.startBeat - b.startBeat);
-	if (clips.length === 0) return false;
+	if (clips.length === 0) return null;
 	const tracks: PlannerTrack[] = [];
 	const src = new Map<string, number>();
 	for (const c of clips) {
 		const t = s.doc.tracks.find((x) => x.id === c.trackId);
-		if (!t) return true;
+		if (!t) return { tracks: [], sections: [], links: [] };
 		let i = tracks.findIndex((x) => sameTrack(x, t));
 		if (i < 0) i = tracks.push(t) - 1;
 		src.set(c.id, i);
 	}
-	askAuto(tracks, clipsEdit(tracks, clips, () => newId("e"), (c) => src.get(c.id) ?? 0));
+	return { tracks, ...clipsEdit(tracks, clips, () => newId("e"), (c) => src.get(c.id) ?? 0) };
+}
+
+// Sends the clips selected on the timeline to the editor as an automatic edit: exporting it
+// swaps the new file in for them. It takes the place of what the editor had open, once the
+// user agrees. False when no clip is selected.
+export function editSelectedClips(): boolean {
+	const picked = selectedClipsEdit();
+	if (!picked) return false;
+	askAuto(picked.tracks, picked);
 	return true;
+}
+
+// What the export of these sections is asked to make.
+function exportRequest(tracks: PlannerTrack[], sections: EditSection[]): EditExportRequest {
+	const main = tracks[0];
+	const others = tracks.slice(1).map((t) => ({ sourcePath: t.sourcePath, bpm: t.bpm }));
+	return {
+		sourcePath: main.sourcePath,
+		name: main.name,
+		bpm: main.bpm,
+		downbeatSec: main.downbeatSec,
+		sections: place(sections).map((p) => ({ startBeat: p.section.startBeat, lengthBeat: p.lengthBeat, atBeat: p.outBeat, ...(srcOf(p.section) > 0 ? { src: srcOf(p.section) } : {}) })),
+		...(others.length ? { others } : {}),
+	};
+}
+
+// The tracks' cues, where the edit plays them.
+function editCuesOf(tracks: PlannerTrack[], sections: EditSection[]): { sec: number; kind: number }[] {
+	const cues = store.get().cues;
+	return cuesForEdit(place(sections), tracks.map((t) => ({ bpm: t.bpm, cues: cues[t.sourcePath] ?? [] })), tracks[0].bpm);
+}
+
+// ⌘⇧E: the selected clips become their edit at once, without the editor. They turn into one
+// clip of the new file straight away, which loads once the export (in the background) is
+// done, so a run of edits can be made one after another. One undo step, as with the editor.
+// If the export fails the clips are put back as they were. False when no clip is selected.
+export function quickEditSelectedClips(): boolean {
+	const picked = selectedClipsEdit();
+	if (!picked) return false;
+	const { tracks, sections, links } = picked;
+	if (sections.length === 0) return true;
+	void (async () => {
+		const main = tracks[0];
+		let file: string;
+		try {
+			file = await window.api.reserveEdit(main.name);
+		} catch (err) {
+			toast(`Could not export: ${errorText(err)}`);
+			return;
+		}
+		const placed = place(sections);
+		const end = Math.max(...placed.map((p) => p.outBeat + p.lengthBeat));
+		const edit: PlannerTrack = {
+			id: newId("t"),
+			sourcePath: file,
+			name: file.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, ""),
+			bpm: main.bpm,
+			durationSec: (end * 60) / main.bpm,
+			...(main.downbeatSec !== undefined ? { downbeatSec: main.downbeatSec } : {}),
+		};
+		const cues = editCuesOf(tracks, sections);
+		const job = window.api.exportEdit({ ...exportRequest(tracks, sections), outPath: file }).then(async () => {
+			await window.api.editCues(file, cues).catch((err) => toast(`The cues could not be kept: ${errorText(err)}`));
+			refreshCues(true);
+		});
+		exportingTo(file, job);
+		const s = store.get();
+		const { doc, moved } = swapInEdit(s.doc, edit, links, placed);
+		if (moved.length === 0) return;
+		// undo and redo take the file away and put it back, once it is there
+		let turn: Promise<unknown> = job;
+		const later = (fn: () => Promise<void>): void => {
+			turn = turn.then(fn, () => {}).catch((err) => toast(errorText(err)));
+		};
+		store.commitWith(doc, { undo: () => later(() => window.api.withdrawEdit(file)), redo: () => later(() => window.api.restoreEdit(file)) });
+		job.catch((err) => {
+			toast(`Could not export ${main.name}: ${errorText(err)}`);
+			putBack(edit, moved);
+		});
+	})();
+	return true;
+}
+
+// A failed background export: its clip goes, and the clips it was made of come back.
+function putBack(edit: PlannerTrack, moved: { from: Clip; to: Clip }[]): void {
+	const doc = store.get().doc;
+	if (!doc.clips.some((c) => c.trackId === edit.id)) return; // undone already
+	const tracks = [...doc.tracks.filter((t) => t.id !== edit.id)];
+	for (const m of moved) {
+		const t = store.get().past.flatMap((d) => ("tracks" in d ? d.tracks : [])).find((x) => x.id === m.from.trackId);
+		if (t && !tracks.some((x) => x.id === t.id)) tracks.push(t);
+	}
+	const clips = [...doc.clips.filter((c) => c.trackId !== edit.id), ...moved.map((m) => m.from)];
+	store.commit({ ...doc, tracks, clips });
 }
 
 // "Edit automatically" (playlist mode): the track's clips, in the set's order and spacing,
@@ -350,20 +441,17 @@ export function editResize(width: number): void {
 export async function exportTrackEdit(): Promise<string | null> {
 	const e = ed();
 	if (!e || e.exporting) return null;
-	const sections = place(e.sections).map((p) => ({ startBeat: p.section.startBeat, lengthBeat: p.lengthBeat, atBeat: p.outBeat, ...(srcOf(p.section) > 0 ? { src: srcOf(p.section) } : {}) }));
-	if (sections.length === 0) {
+	if (e.sections.length === 0) {
 		patch({ error: "There is nothing to export" });
 		return null;
 	}
 	const main = editMain(e);
-	const others = e.tracks.slice(1).map((t) => ({ sourcePath: t.sourcePath, bpm: t.bpm }));
 	patch({ exporting: true, error: null });
 	const same = (): boolean => ed()?.tracks[0] === main;
 	try {
-		const r = await window.api.exportEdit({ sourcePath: main.sourcePath, name: main.name, bpm: main.bpm, downbeatSec: main.downbeatSec, sections, ...(others.length ? { others } : {}) });
+		const r = await window.api.exportEdit(exportRequest(e.tracks, e.sections));
 		// the tracks' cues go onto the new file once Rekordbox has it
-		const cues = store.get().cues;
-		await window.api.editCues(r.path, cuesForEdit(place(e.sections), e.tracks.map((t) => ({ bpm: t.bpm, cues: cues[t.sourcePath] ?? [] })), main.bpm)).catch((err) => toast(`The cues could not be kept: ${errorText(err)}`));
+		await window.api.editCues(r.path, editCuesOf(e.tracks, e.sections)).catch((err) => toast(`The cues could not be kept: ${errorText(err)}`));
 		if (e.auto && same()) {
 			try {
 				await swapAutoEdit(e, r.path);

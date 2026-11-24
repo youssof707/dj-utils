@@ -11,7 +11,7 @@ import { PlaylistBar } from "./planner/PlaylistMode";
 import { closeSettings, Settings } from "./planner/Settings";
 import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
-import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
+import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, quickEditSelectedClips, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
 import { place } from "@shared/trackEdit";
 import { TrackEditor } from "./planner/TrackEditor";
 import { Updater, updateModalOpen } from "./Updater";
@@ -95,6 +95,9 @@ function runAction(action: string): void {
 			// With clips selected on the timeline, ⌘E sends them to the track editor instead.
 			if (editorHasKeys() || !editSelectedClips()) openExport();
 			break;
+		case "quick-edit":
+			quickEditSelectedClips();
+			break;
 		case "undo":
 			store.undo();
 			break;
@@ -152,7 +155,7 @@ function shortcut(e: KeyboardEvent): string | null {
 		if (k === "o") return "sets";
 		if (k === "n") return "new";
 		if (k === "i") return "import";
-		if (k === "e") return "export";
+		if (k === "e") return e.shiftKey ? "quick-edit" : "export";
 		if (k === "=" || k === "+") return "zoom-in";
 		if (k === "-") return "zoom-out";
 		if (k === "0") return "zoom-fit";

@@ -287,7 +287,7 @@ async function rekordboxGrid(sourcePath: string): Promise<RekordboxGrid | null> 
 // Cue points come from Rekordbox's database, read again whenever Rekordbox has written to
 // it, so cues set a moment ago are there.
 let rekordboxDb: string | null = null;
-let cueLibrary: CueLibrary = { cues: {}, contents: {} };
+let cueLibrary: CueLibrary = { cues: {}, contents: {}, unanalysed: {} };
 let cueStamp = "";
 let cueLoad: Promise<void> | null = null;
 // Reading the cues and changing them take turns, so a read never brings back the cues as
@@ -330,13 +330,22 @@ const sqlcipherPath = (): string => (app.isPackaged ? path.join(process.resource
 
 const cuesOf = (m: RekordboxMatch): Cue[] => (cueLibrary.cues[datKey(m.dat)] ?? []).map((c) => ({ id: c.id, sec: c.ms / 1000 - m.shiftSec, kind: c.kind, ...(c.loop ? { loop: true } : {}) }));
 
+// The cues of a file Rekordbox has not analysed: the ones written with it when it was added
+// there, else the ones waiting for it. On the file's own clock (every edit is a WAV).
+async function unanalysedCues(sourcePath: string): Promise<Cue[]> {
+	await loadCues();
+	const written = cueLibrary.unanalysed[path.resolve(sourcePath).normalize("NFC")];
+	if (written?.length) return written.map((c) => ({ id: c.id, sec: c.ms / 1000, kind: c.kind, ...(c.loop ? { loop: true } : {}) }));
+	return (pendingCues[sourcePath] ?? []).map((c, i) => ({ id: `waiting-${i}`, sec: c.sec, kind: c.kind }));
+}
+
 // The file's memory cues and hot cues, on our own decode of it.
 async function rekordboxCues(sourcePath: string): Promise<CueInfo> {
 	if (!rekordboxDb) return { cues: [], canEdit: false };
 	// An edit with cues waiting looks for Rekordbox's analysis again: it is imported there
 	// after the app has started.
 	const m = await rekordboxMatch(sourcePath, sourcePath in pendingCues);
-	if (!m) return { cues: [], canEdit: false };
+	if (!m) return { cues: await unanalysedCues(sourcePath), canEdit: false };
 	await loadCues();
 	const written = await writeWaitingCues(sourcePath, m);
 	if (written) return written;
@@ -683,7 +692,9 @@ async function trackGrid(sourcePath: string): Promise<RekordboxGrid | null> {
 }
 
 // Where an edit of the track called `name` goes: "<name> (edit).wav" in the export folder,
-// numbered when that is taken.
+// numbered when that is taken, or held for an export still running.
+const editsReserved = new Set<string>();
+
 function editPath(dir: string, name: string): string {
 	const base =
 		name
@@ -692,27 +703,55 @@ function editPath(dir: string, name: string): string {
 			.trim() || "Track";
 	for (let n = 1; ; n++) {
 		const file = path.join(dir, `${base} (edit${n === 1 ? "" : ` ${n}`}).wav`);
-		if (!fs.existsSync(file)) return file;
+		if (!fs.existsSync(file) && !editsReserved.has(file)) return file;
 	}
 }
 
-let editExporting = false;
+// Holds the file an edit of `name` will go to, so a background export (⌘⇧E) can be put in
+// the set before it is done. The export then names it as its `outPath`.
+function reserveEdit(name: string): string {
+	const dir = exportDir();
+	fs.mkdirSync(dir, { recursive: true });
+	const file = editPath(dir, String(name ?? ""));
+	editsReserved.add(file);
+	return file;
+}
+
+// A few edit exports at a time; the rest wait their turn.
+const EDIT_EXPORTS_AT_ONCE = 2;
+let editExportsActive = 0;
+const editExportQueue: (() => void)[] = [];
+
+async function editExportTurn<T>(fn: () => Promise<T>): Promise<T> {
+	if (editExportsActive >= EDIT_EXPORTS_AT_ONCE) await new Promise<void>((go) => editExportQueue.push(go));
+	editExportsActive++;
+	try {
+		return await fn();
+	} finally {
+		editExportsActive--;
+		editExportQueue.shift()?.();
+	}
+}
 
 async function exportEdit(req: EditExportRequest): Promise<EditExportResult> {
-	if (editExporting) throw new Error("An export is already running");
-	if (!AUDIO_EXT.includes(path.extname(req.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.sourcePath)) throw new Error("The source file is missing");
-	for (const o of req.others ?? []) if (!AUDIO_EXT.includes(path.extname(o.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(o.sourcePath)) throw new Error(`${path.basename(o.sourcePath)} is missing`);
-	editExporting = true;
+	const reserved = typeof req.outPath === "string" && editsReserved.has(req.outPath) ? req.outPath : null;
+	if (req.outPath !== undefined && !reserved) throw new Error("That edit's file is not held for it");
 	try {
-		const dir = exportDir();
-		fs.mkdirSync(dir, { recursive: true });
-		const outPath = editPath(dir, req.name);
-		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, sections: req.sections, others: req.others };
-		const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
-		editsMade.add(outPath);
-		return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };
+		if (!AUDIO_EXT.includes(path.extname(req.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.sourcePath)) throw new Error("The source file is missing");
+		for (const o of req.others ?? []) if (!AUDIO_EXT.includes(path.extname(o.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(o.sourcePath)) throw new Error(`${path.basename(o.sourcePath)} is missing`);
+		return await editExportTurn(async () => {
+			const outPath = reserved ?? reserveEdit(req.name);
+			try {
+				const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, sections: req.sections, others: req.others };
+				const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
+				editsMade.add(outPath);
+				return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };
+			} finally {
+				editsReserved.delete(outPath);
+			}
+		});
 	} finally {
-		editExporting = false;
+		if (reserved) editsReserved.delete(reserved);
 	}
 }
 
@@ -1386,6 +1425,7 @@ export function setupPlanner(): void {
 		}
 	});
 	ipcMain.handle("planner:export-edit", (_e, req: EditExportRequest) => exportEdit(req));
+	ipcMain.handle("planner:reserve-edit", (_e, name: string) => reserveEdit(name));
 	ipcMain.handle("planner:export-cancel", async () => {
 		const w = exportWorker;
 		if (!w) return;
@@ -1533,6 +1573,7 @@ export function buildMenu(): void {
 				{ type: "separator" },
 				{ label: "Import Audio…", accelerator: "CmdOrCtrl+I", click: act("import") },
 				{ label: "Export WAV…", accelerator: "CmdOrCtrl+E", click: act("export") },
+				{ label: "Export Selected Clips as Edit", accelerator: "Shift+CmdOrCtrl+E", click: act("quick-edit") },
 			],
 		},
 		{

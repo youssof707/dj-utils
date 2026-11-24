@@ -51,6 +51,8 @@ const api = {
 	cancelExport: (): Promise<void> => ipcRenderer.invoke("planner:export-cancel"),
 	// Writes an edited track into the export folder, as the source's own samples rearranged.
 	exportEdit: (req: EditExportRequest): Promise<EditExportResult> => ipcRenderer.invoke("planner:export-edit", req),
+	// Holds the file the next edit of the track called `name` goes to (see exportEdit's outPath).
+	reserveEdit: (name: string): Promise<string> => ipcRenderer.invoke("planner:reserve-edit", name),
 	// An automatic edit: the cues to write once Rekordbox has the file, and undo and redo of it.
 	editCues: (path: string, cues: { sec: number; kind: number }[]): Promise<void> => ipcRenderer.invoke("planner:edit-cues", path, cues),
 	withdrawEdit: (path: string): Promise<void> => ipcRenderer.invoke("planner:edit-withdraw", path),

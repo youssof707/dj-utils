@@ -388,7 +388,9 @@ export function matchTrack(decodedPath: string, candidates: LibraryEntry[]): Rek
 // are the hot cues A, B, C... `id` is its row in the database; a loop also has an end.
 export type LibraryCue = { id: string; ms: number; kind: number; loop: boolean };
 // Every track's cues, and the track's own row, by analysis file (see `datKey`).
-export type CueLibrary = { cues: Record<string, LibraryCue[]>; contents: Record<string, { id: string; uuid: string }> };
+// `cues` and `contents` by analysis; `unanalysed` the cues of tracks Rekordbox has not
+// analysed yet (edits added from here), by where the file is.
+export type CueLibrary = { cues: Record<string, LibraryCue[]>; contents: Record<string, { id: string; uuid: string }>; unanalysed: Record<string, LibraryCue[]> };
 
 // Rekordbox's database is SQLite encrypted with SQLCipher 4, with the same key on every
 // installation.
@@ -555,12 +557,18 @@ export function cuesAfter(cues: LibraryCue[], removed: CueRow[], added: CueRow[]
 
 // Every track's cue points in time order, and which row each analysed track is.
 export function readCues(dbPath: string): CueLibrary {
-	const [cueRows, contentRows] = queryDatabase(dbPath, [
+	const analysed = "coalesce(c.AnalysisDataPath, '') <> ''";
+	const [cueRows, contentRows, newRows] = queryDatabase(dbPath, [
 		'select c.AnalysisDataPath as dat, q.ID as "ID", q.InMsec as "InMsec", q.OutMsec as "OutMsec", q.Kind as "Kind" from djmdCue q join djmdContent c on c.ID = q.ContentID ' +
-			"where coalesce(q.rb_local_deleted, 0) = 0 and coalesce(c.rb_local_deleted, 0) = 0 and q.InMsec >= 0 and q.Kind >= 0 and c.AnalysisDataPath is not null order by q.InMsec, q.Kind",
-		"select c.AnalysisDataPath as dat, c.ID as id, c.UUID as uuid from djmdContent c where coalesce(c.rb_local_deleted, 0) = 0 and c.AnalysisDataPath is not null",
+			`where coalesce(q.rb_local_deleted, 0) = 0 and coalesce(c.rb_local_deleted, 0) = 0 and q.InMsec >= 0 and q.Kind >= 0 and ${analysed} order by q.InMsec, q.Kind`,
+		`select c.AnalysisDataPath as dat, c.ID as id, c.UUID as uuid from djmdContent c where coalesce(c.rb_local_deleted, 0) = 0 and ${analysed}`,
+		{
+			optional:
+				'select c.FolderPath as path, q.ID as "ID", q.InMsec as "InMsec", q.OutMsec as "OutMsec", q.Kind as "Kind" from djmdCue q join djmdContent c on c.ID = q.ContentID ' +
+				`where coalesce(q.rb_local_deleted, 0) = 0 and coalesce(c.rb_local_deleted, 0) = 0 and q.InMsec >= 0 and q.Kind >= 0 and not ${analysed} and c.FolderPath is not null order by q.InMsec, q.Kind`,
+		},
 	]);
-	const out: CueLibrary = { cues: {}, contents: {} };
+	const out: CueLibrary = { cues: {}, contents: {}, unanalysed: {} };
 	for (const row of cueRows) {
 		const cue = cueOfRow(row);
 		if (typeof row["dat"] === "string" && cue) (out.cues[datKey(row["dat"])] ??= []).push(cue);
@@ -568,6 +576,10 @@ export function readCues(dbPath: string): CueLibrary {
 	for (const row of contentRows) {
 		const id = text(row["id"]);
 		if (typeof row["dat"] === "string" && id) out.contents[datKey(row["dat"])] = { id, uuid: text(row["uuid"]) };
+	}
+	for (const row of newRows) {
+		const cue = cueOfRow(row);
+		if (typeof row["path"] === "string" && cue) (out.unanalysed[path.resolve(row["path"]).normalize("NFC")] ??= []).push(cue);
 	}
 	return out;
 }
