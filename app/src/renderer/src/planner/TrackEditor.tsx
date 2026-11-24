@@ -1,21 +1,19 @@
-// The track editor in the bottom part of the window: one track, cut into sections that can
-// be removed, copied and put in another order, then exported as a file. With a second track
-// opened next to it there are three lanes: each track laid out whole, to cut pieces from, and
-// under them the edit those pieces are put together in.
+// The track editor in the bottom part of the window: one lane, like a lane of the set, that
+// stretches of tracks are put on, cut up, moved and overlapped, then exported as one file.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { cueMarks, type CueMark } from "@shared/cues";
-import { PEAK_BUCKET, SAMPLE_RATE, trackBeats } from "@shared/planner";
-import { barPhase, insertSections, leadBeat, place, slideSections, srcOf, type EditSection, type Placed } from "@shared/trackEdit";
+import { PEAK_BUCKET, SAMPLE_RATE, trackBeats, type PlannerTrack } from "@shared/planner";
+import { barPhase, moveSections, overlapRows, place, srcOf, type EditSection } from "@shared/trackEdit";
 import { cueSpot, placeCue } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
 import { openFileInEditor, parseBpm } from "./actions";
 import { useLibraryDrop } from "./libraryDrag";
 import { mediaFor } from "./media";
 import { fmtLength } from "./Panels";
-import { store, useStore, type EditLane, type TrackEditUi } from "./store";
+import { store, useStore, type TrackEditUi } from "./store";
 import { hueVars, LaneGrid, NO_KEY, trackHue } from "./Timeline";
-import { closeTrackEdit, editAddSelected, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editInsert, editMove, editPieces, editPx, editRedo, editRemoveTrack, editResize, editSetBpm, editScroll, editSectionsOf, editSelect, editSetCursor, editSlide, editStep, editTotal, editUndo, editZoom, exportTrackEdit, laneOffset, laneTrack } from "./trackEdit";
+import { closeTrackEdit, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editMain, editMove, editPx, editRedo, editResize, editSetBpm, editScroll, editSelect, editSetCursor, editStep, editTotal, editUndo, editZoom, exportTrackEdit } from "./trackEdit";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
 const FROM_EDITOR = "application/x-dj-from-editor";
@@ -23,7 +21,7 @@ const FROM_EDITOR = "application/x-dj-from-editor";
 type View = { pxPerBeat: number; scrollX: number; width: number };
 
 // One stretch of a track, drawn where it lands along the ruler, in the track's colour.
-function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue, projectBpm, className, label, testId, id }: { outBeat: number; lengthBeat: number; startBeat: number; view: View; peaks: Uint8Array | null; maxes: [number, number]; marks: CueMark[]; hue: number; projectBpm: number; className: string; label?: string; testId: string; id?: string }) {
+function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue, projectBpm, className, label, testId, id, style }: { outBeat: number; lengthBeat: number; startBeat: number; view: View; peaks: Uint8Array | null; maxes: [number, number]; marks: CueMark[]; hue: number; projectBpm: number; className: string; label?: string; testId: string; id?: string; style?: CSSProperties }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const { pxPerBeat, scrollX, width } = view;
 	const left = outBeat * pxPerBeat - scrollX;
@@ -43,11 +41,11 @@ function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue,
 		// The whole signal faintly, so breaks and drops can be told apart, with the kicks over it.
 		drawBand(cv, peaks, { ...at, band: 0, max: maxes[0], fill: "rgba(255, 255, 255, 0.16)" });
 		drawBand(cv, peaks, { ...at, band: 1, max: maxes[1], fill: "rgba(255, 255, 255, 0.85)" });
-	}, [visible, visL, visR, left, pxPerBeat, peaks, maxes, startBeat, projectBpm]);
+	}, [visible, visL, visR, left, pxPerBeat, peaks, maxes, startBeat, projectBpm, style?.height]);
 
 	if (!visible) return null;
 	return (
-		<div className={className} style={{ left, width: w, ...hueVars(hue) } as CSSProperties} data-testid={testId} data-section-id={id}>
+		<div className={className} style={{ left, width: w, ...hueVars(hue), ...style } as CSSProperties} data-testid={testId} data-section-id={id}>
 			<canvas ref={ref} className="edit-wave" style={{ left: visL - left, width: Math.ceil(visR - visL) }} />
 			{label && w >= 64 && (
 				<div className="edit-section-label" style={{ paddingLeft: Math.max(0, -left) + 6 }}>
@@ -145,14 +143,25 @@ function EditPlayhead() {
 	return <div className="edit-playhead" ref={ref} data-testid="edit-playhead" />;
 }
 
-// The colours of the two tracks: each track's own (from its key), unless they are the same or
-// too close to tell apart.
-function laneHues(e: TrackEditUi, keys: Record<string, string>): [number, number] {
-	const a = trackHue(e.track, keys);
-	if (!e.second) return [a, a];
-	const b = trackHue(e.second, keys);
-	if (a === NO_KEY || b === NO_KEY) return a === b ? [a, 210] : [a, b];
-	return [a, Math.abs(((b - a + 540) % 360) - 180) < 50 ? (a + 150) % 360 : b];
+// The colours of the editor's tracks: each track's own (from its key), unless it is the same as
+// or too close to one before it, which would make them hard to tell apart.
+function trackHues(tracks: PlannerTrack[], keys: Record<string, string>): number[] {
+	const out: number[] = [];
+	const near = (a: number, b: number): boolean => (a === NO_KEY || b === NO_KEY ? a === b : Math.abs(((b - a + 540) % 360) - 180) < 50);
+	tracks.forEach((t, i) => {
+		let h = trackHue(t, keys);
+		for (let k = 0; out.some((o) => near(o, h)) && k < 12; k++) h = Math.round(210 + 137.5 * (i + k)) % 360;
+		out.push(h);
+	});
+	return out;
+}
+
+const maxCache = new WeakMap<Uint8Array, [number, number]>();
+function maxesOf(peaks: Uint8Array | null): [number, number] {
+	if (!peaks) return [255, 255];
+	let m = maxCache.get(peaks);
+	if (!m) maxCache.set(peaks, (m = [peakMax(peaks, 0), peakMax(peaks, 1)]));
+	return m;
 }
 
 const bpmText = (bpm: number): string => String(Number(bpm.toFixed(2)));
@@ -216,19 +225,10 @@ function EditBpmField({ bpm, original }: { bpm: number; original: number }) {
 function Editor({ e }: { e: TrackEditUi }) {
 	const focus = useStore((s) => s.editFocus);
 	useStore((s) => s.mediaRev);
-	const cues0 = useStore((s) => s.cues[e.track.sourcePath]);
-	const cues1 = useStore((s) => (e.second ? s.cues[e.second.sourcePath] : undefined));
-	const marks0 = useMemo(() => cueMarks(cues0, e.track), [cues0, e.track]);
-	const marks1 = useMemo(() => (e.second ? cueMarks(cues1, e.second) : []), [cues1, e.second]);
+	const allCues = useStore((s) => s.cues);
+	const keys = useStore((s) => s.trackKeys);
 	const lanesRef = useRef<HTMLDivElement>(null);
-	const outRef = useRef<HTMLDivElement>(null);
-	const [drop, setDrop] = useState<number | null>(null); // where a dragged section would land
-	const [lifted, setLifted] = useState(false); // the selected sections are being dragged
-	const [sliding, setSliding] = useState<EditSection[] | null>(null); // the sections as an ⌥-drag would leave them
-	// Pieces of a track on their way to the edit: the edit as it would be with them dropped
-	// here, or, while they are not over it, where the pointer is carrying them.
-	const [incoming, setIncoming] = useState<{ sections: EditSection[]; ids: string[] } | null>(null);
-	const [carry, setCarry] = useState<{ x: number; y: number; width: number; hue: number; label: string } | null>(null);
+	const [moving, setMoving] = useState<EditSection[] | null>(null); // the sections as a drag would leave them
 	const fileDrop = useFileDrop();
 	const editorRef = useRef<HTMLDivElement>(null);
 	useLibraryDrop(editorRef, (d) => void openFileInEditor(d.path));
@@ -253,98 +253,63 @@ function Editor({ e }: { e: TrackEditUi }) {
 		return () => el.removeEventListener("wheel", wheel);
 	}, []);
 
-	const track = e.track;
-	const multi = e.second !== null;
-	const lead = leadBeat(track);
-	const phase = barPhase(track);
-	const placed = useMemo(() => place(lead, e.sections), [lead, e.sections]);
-	const shown = useMemo(() => (incoming ? place(lead, incoming.sections) : sliding ? place(lead, sliding) : placed), [lead, incoming, sliding, placed]);
+	const main = editMain(e);
+	const phase = barPhase(main);
+	const shownSections = moving ?? e.sections;
+	const shown = useMemo(() => place(shownSections), [shownSections]);
+	const rows = useMemo(() => overlapRows(shownSections), [shownSections]);
 	const total = editTotal(e);
 	const view: View = { pxPerBeat: editPx(e), scrollX: e.scrollX, width: e.width };
-	const media = mediaFor(track, e.bpm);
-	const media1 = e.second ? mediaFor(e.second, e.bpm) : null;
-	const peaks0 = media?.state === "ready" ? media.peaks : null;
-	const peaks1 = media1?.state === "ready" ? media1.peaks : null;
-	const maxes0 = useMemo((): [number, number] => [peakMax(peaks0, 0), peakMax(peaks0, 1)], [peaks0]);
-	const maxes1 = useMemo((): [number, number] => [peakMax(peaks1, 0), peakMax(peaks1, 1)], [peaks1]);
-	const hues = laneHues(e, useStore((s) => s.trackKeys));
+	const hues = trackHues(e.tracks, keys);
 	// The tracks, each with what it takes to draw a stretch of it.
-	const sources = ([0, 1] as const).flatMap((i) => {
-		const t = laneTrack(e, i);
-		return t ? [{ i, track: t, off: laneOffset(e, i), lead: leadBeat(t), pieces: editPieces(e, i), peaks: i === 0 ? peaks0 : peaks1, maxes: i === 0 ? maxes0 : maxes1, marks: i === 0 ? marks0 : marks1, hue: hues[i] }] : [];
+	const sources = e.tracks.map((track, i) => {
+		const media = mediaFor(track, e.bpm);
+		const peaks = media?.state === "ready" ? media.peaks : null;
+		return { track, ready: media?.state === "ready", peaks, maxes: maxesOf(peaks), marks: cueMarks(allCues[track.sourcePath], track), hue: hues[i] };
 	});
-	type Source = (typeof sources)[number];
+	const sourceOf = (sec: EditSection) => sources[srcOf(sec)] ?? sources[0];
+	const multi = e.tracks.length > 1;
 	const x = (beat: number): number => beat * view.pxPerBeat - view.scrollX;
-	// The place along the ruler under the pointer, in beats. Every lane starts at the same edge.
+	// The place along the ruler under the pointer, in beats.
 	const beatAt = (clientX: number): number => (clientX - lanesRef.current!.getBoundingClientRect().left + (store.get().trackEdit?.scrollX ?? 0)) / view.pxPerBeat;
-
-	// Where a section dropped before the section at `index` lands, in beats of the edit.
-	const boundary = (index: number): number => {
-		const p = placed.find((q) => e.sections.indexOf(q.section) >= index);
-		return p ? p.outBeat : total;
+	// The section under the pointer: the one drawn there, on whichever row it is.
+	const sectionAt = (target: EventTarget): EditSection | undefined => {
+		const id = (target as HTMLElement).closest<HTMLElement>("[data-section-id]")?.dataset.sectionId;
+		return id ? e.sections.find((s) => s.id === id) : undefined;
 	};
 
-	// A press on the edit: a click moves the cursor and selects, a drag moves sections.
+	// A press on the lane: a click moves the cursor and selects, a drag moves sections along it.
 	const onDown = (ev: ReactPointerEvent): void => {
 		if (ev.button !== 0) return;
 		const row = ev.currentTarget as HTMLElement;
 		const at = beatAt(ev.clientX);
-		// A cue button is on: the cue goes on whichever track's stretch is under the pointer.
+		const hit = sectionAt(ev.target);
+		// A cue button is on: the cue goes on the track of the section under the pointer.
 		if (store.get().cueTool !== null) {
-			const p = placed.find((q) => at >= q.outBeat && at < q.outBeat + q.lengthBeat);
-			const so = p ? (sources[srcOf(p.section)] ?? sources[0]) : ownLead && at >= 0 && at < lead ? sources[0] : undefined;
-			if (so) placeCue(so.track, p ? p.section.startBeat + (at - p.outBeat) : at, view.pxPerBeat, true);
+			if (hit) placeCue(sourceOf(hit).track, hit.startBeat + (at - hit.atBeat), view.pxPerBeat, true);
 			return;
 		}
 		// S is held (set in App.tsx): a click cuts there, as on the timeline.
 		if (document.body.classList.contains("split-tool")) {
-			editCutAt(at, "out");
+			editCutAt(at);
 			return;
 		}
-		const hit: Placed<EditSection> | undefined = placed.find((p) => at >= p.outBeat && at < p.outBeat + p.lengthBeat);
-		const selection = e.lane === "out" ? e.selection : [];
-		const ids = hit ? (selection.includes(hit.section.id) ? selection : [hit.section.id]) : [];
+		const selection = e.selection;
+		const ids = hit ? (selection.includes(hit.id) ? selection : [hit.id]) : [];
 		const downX = ev.clientX;
 		let dragging = false;
-		let to: number | null = null;
-		let slideBy = 0; // with ⌥ held: beats the sections move in time instead
-		let slide = false;
+		let by = 0;
 		const step = editStep(e);
-		// The cut nearest the pointer is where the dragged sections go.
-		const indexAt = (clientX: number): number => {
-			const b = beatAt(clientX);
-			let best = e.sections.length;
-			let dist = Math.abs(b - total);
-			for (const p of placed) {
-				const d = Math.abs(b - p.outBeat);
-				if (d < dist) {
-					dist = d;
-					best = e.sections.indexOf(p.section);
-				}
-			}
-			return best;
-		};
 		row.setPointerCapture(ev.pointerId);
 		const move = (m: PointerEvent): void => {
 			if (!dragging && hit && Math.abs(m.clientX - downX) > 4) {
 				dragging = true;
 				document.body.classList.add("dragging-move");
-				editSelect(ids, "out");
-				setLifted(true);
+				editSelect(ids);
 			}
 			if (!dragging) return;
-			// ⌥ held: the sections move in time and leave silence behind; otherwise they go
-			// to the cut nearest the pointer.
-			slide = m.altKey;
-			if (slide) {
-				slideBy = Math.round((beatAt(m.clientX) - at) / step) * step;
-				setDrop(null);
-				setSliding(slideSections(e.sections, ids, slideBy));
-			} else {
-				to = indexAt(m.clientX);
-				setSliding(null);
-				setDrop(to);
-			}
+			by = Math.round((beatAt(m.clientX) - at) / step) * step;
+			setMoving(moveSections(e.sections, ids, by));
 		};
 		const end = (cancelled: boolean): void => {
 			row.removeEventListener("pointermove", move);
@@ -352,21 +317,17 @@ function Editor({ e }: { e: TrackEditUi }) {
 			row.removeEventListener("pointercancel", cancel);
 			window.removeEventListener("keydown", key, true);
 			document.body.classList.remove("dragging-move");
-			setDrop(null);
-			setLifted(false);
-			setSliding(null);
+			setMoving(null);
 			if (dragging) {
-				if (cancelled) return;
-				if (slide) editSlide(ids, slideBy);
-				else if (to !== null) editMove(ids, to);
+				if (!cancelled) editMove(ids, by);
 				return;
 			}
 			if (cancelled) return;
 			// A click: the cursor goes there, and the section under it is selected.
-			editSetCursor(at, "out");
-			if (!hit) editSelect([], "out");
-			else if (ev.shiftKey || ev.metaKey) editSelect(selection.includes(hit.section.id) ? selection.filter((id) => id !== hit.section.id) : [...selection, hit.section.id], "out");
-			else editSelect([hit.section.id], "out");
+			editSetCursor(at);
+			if (!hit) editSelect([]);
+			else if (ev.shiftKey || ev.metaKey) editSelect(selection.includes(hit.id) ? selection.filter((id) => id !== hit.id) : [...selection, hit.id]);
+			else editSelect([hit.id]);
 		};
 		const up = (): void => end(false);
 		const cancel = (): void => end(true);
@@ -383,147 +344,43 @@ function Editor({ e }: { e: TrackEditUi }) {
 		window.addEventListener("keydown", key, true);
 	};
 
-	// A press on a track's own lane: a click moves the cursor there and selects the piece under
-	// it; a drag carries the selected pieces down to the edit, which shows where they would
-	// land. The track's lane keeps them: a piece can be used as often as wanted.
-	const onSourceDown = (so: Source) => (ev: ReactPointerEvent): void => {
-		if (ev.button !== 0) return;
-		const row = ev.currentTarget as HTMLElement;
-		const at = beatAt(ev.clientX);
-		if (store.get().cueTool !== null) {
-			if (at - so.off <= trackBeats(so.track)) placeCue(so.track, at - so.off, view.pxPerBeat, true);
-			return;
-		}
-		if (document.body.classList.contains("split-tool")) {
-			editCutAt(at, so.i);
-			return;
-		}
-		const hit = so.pieces.find((p) => at - so.off >= p.startBeat && at - so.off < p.startBeat + p.lengthBeat);
-		const selection = e.lane === so.i ? e.selection : [];
-		const ids = hit ? (selection.includes(hit.id) ? selection : [hit.id]) : [];
-		const carried = so.pieces.filter((p) => ids.includes(p.id));
-		const grab = carried.length > 0 ? at - (so.off + carried[0].startBeat) : 0; // from the first piece's start to the pointer
-		const width = carried.reduce((n, p) => n + p.lengthBeat, 0) * view.pxPerBeat;
-		const step = editStep(e);
-		const downX = ev.clientX;
-		const downY = ev.clientY;
-		let dragging = false;
-		let added: EditSection[] = [];
-		let target: { pointer: number; start: number } | null = null; // where a drop would put them
-		row.setPointerCapture(ev.pointerId);
-		const move = (m: PointerEvent): void => {
-			if (!dragging && hit && Math.hypot(m.clientX - downX, m.clientY - downY) > 4) {
-				dragging = true;
-				document.body.classList.add("dragging-move");
-				editSelect(ids, so.i);
-				added = editSectionsOf(e, so.i, ids);
-			}
-			if (!dragging) return;
-			// Anywhere from the edit's lane down counts as over it.
-			if (m.clientY >= outRef.current!.getBoundingClientRect().top) {
-				const pointer = Math.max(lead, beatAt(m.clientX));
-				target = { pointer, start: lead + Math.round((pointer - grab - lead) / step) * step };
-				setCarry(null);
-				setIncoming({ sections: insertSections(lead, e.sections, added, target.pointer, target.start), ids: added.map((s) => s.id) });
-			} else {
-				target = null;
-				setIncoming(null);
-				setCarry({ x: m.clientX - grab * view.pxPerBeat, y: m.clientY, width, hue: so.hue, label: lengthText(carried.reduce((n, p) => n + p.lengthBeat, 0)) });
-			}
-		};
-		const end = (cancelled: boolean): void => {
-			row.removeEventListener("pointermove", move);
-			row.removeEventListener("pointerup", up);
-			row.removeEventListener("pointercancel", cancel);
-			window.removeEventListener("keydown", key, true);
-			document.body.classList.remove("dragging-move");
-			setIncoming(null);
-			setCarry(null);
-			if (dragging) {
-				if (!cancelled && target) editInsert(added, target.pointer, target.start);
-				return;
-			}
-			if (cancelled) return;
-			// A click: the cursor goes there, and the piece under it is selected.
-			editSetCursor(at, so.i);
-			if (!hit) editSelect([], so.i);
-			else if (ev.shiftKey || ev.metaKey) editSelect(selection.includes(hit.id) ? selection.filter((id) => id !== hit.id) : [...selection, hit.id], so.i);
-			else editSelect([hit.id], so.i);
-		};
-		const up = (): void => end(false);
-		const cancel = (): void => end(true);
-		const key = (k: KeyboardEvent): void => {
-			if (k.key !== "Escape" || !dragging) return;
-			k.preventDefault();
-			k.stopPropagation();
-			end(true);
-		};
-		row.addEventListener("pointermove", move);
-		row.addEventListener("pointerup", up);
-		row.addEventListener("pointercancel", cancel);
-		window.addEventListener("keydown", key, true);
-	};
-
-	// A right-click on a track opens the menu for the cues there, and for adding one on the
-	// nearest beat line of that track. `beat` is in beats into the track.
-	const cueMenu = (ev: ReactMouseEvent, so: Source | undefined, beat: number, within?: { from: number; to: number }): void => {
+	// A right-click on a section opens the menu for the cues there, and for adding one on the
+	// nearest beat line of its track.
+	const onMenu = (ev: ReactMouseEvent): void => {
 		ev.preventDefault();
-		if (!so || beat < 0 || beat > trackBeats(so.track)) return;
-		store.set({ menu: { x: ev.clientX, y: ev.clientY, cue: cueSpot(so.track, so.marks, beat, view.pxPerBeat, true, within) } });
+		const hit = sectionAt(ev.target);
+		if (!hit) return;
+		const so = sourceOf(hit);
+		const beat = hit.startBeat + (beatAt(ev.clientX) - hit.atBeat);
+		if (beat < 0 || beat > trackBeats(so.track)) return;
+		store.set({ menu: { x: ev.clientX, y: ev.clientY, cue: cueSpot(so.track, so.marks, beat, view.pxPerBeat, true, { from: hit.startBeat, to: hit.startBeat + hit.lengthBeat }) } });
 	};
-	const onSourceMenu = (so: Source) => (ev: ReactMouseEvent): void => cueMenu(ev, so, beatAt(ev.clientX) - so.off);
-	// On the edit, the place is in whichever stretch of a track is under the pointer.
-	const onOutMenu = (ev: ReactMouseEvent): void => {
-		const at = beatAt(ev.clientX);
-		const p = placed.find((q) => at >= q.outBeat && at < q.outBeat + q.lengthBeat);
-		if (p) cueMenu(ev, sources[srcOf(p.section)] ?? sources[0], p.section.startBeat + (at - p.outBeat), { from: p.section.startBeat, to: p.section.startBeat + p.lengthBeat });
-		else if (ownLead && at >= 0 && at < lead) cueMenu(ev, sources[0], at, { from: 0, to: lead });
-		else ev.preventDefault();
-	};
-
-	// The cursor and the preview's line, on the lane the keys act on.
-	const marksOn = (lane: EditLane) =>
-		e.lane === lane && (
-			<>
-				<div className="edit-cursor" data-testid="edit-cursor" data-beat={e.cursorBeat.toFixed(4)} style={{ transform: `translateX(${x(e.cursorBeat)}px)`, visibility: e.playing ? "hidden" : "visible" }} />
-				<EditPlayhead />
-			</>
-		);
 
 	// The zoom buttons keep the cursor where it is when it is in view (the middle otherwise).
 	const cursorX = x(e.cursorBeat);
 	const zoomAnchor = cursorX >= 0 && cursorX <= view.width ? cursorX : undefined;
 	const some = e.selection.length > 0;
-	const onEdit = e.lane === "out";
-	const grid = <LaneGrid width={view.width} pxPerBeat={view.pxPerBeat} scrollX={view.scrollX - phase * view.pxPerBeat} />;
-	// The edit opens with the first track's lead-in, unless its first section is the other track's.
-	const ownLead = lead > 0 && (shown.length === 0 || srcOf(shown[0].section) === 0);
 	const style = hueVars(hues[0]);
 	return (
-		<div className={`bottom-area track-editor${multi ? " multi" : ""}${focus ? " focused" : ""}${fileDrop.dropping ? " file-over" : ""}`} data-testid="track-editor" style={style} ref={editorRef} {...fileDrop.handlers}>
+		<div className={`bottom-area track-editor${focus ? " focused" : ""}${fileDrop.dropping ? " file-over" : ""}`} data-testid="track-editor" style={style} ref={editorRef} {...fileDrop.handlers}>
 			<div className="edit-head">
-				<button className="play" data-testid="edit-play" onClick={toggleEditPreview} disabled={media?.state !== "ready"}>
+				<button className="play" data-testid="edit-play" onClick={toggleEditPreview} disabled={!sources.every((so) => so.ready)}>
 					{e.playing ? "■" : "▶"}
 				</button>
 				<div className="edit-title">
 					<span className="edit-name" data-testid="edit-name">
-						{track.name}
+						{e.tracks.map((t) => t.name).join(" + ")}
 					</span>
 					<span className="muted">{fmtLength((total * 60) / e.bpm)}</span>
 				</div>
-				<EditBpmField bpm={e.bpm} original={track.bpm} />
+				<EditBpmField bpm={e.bpm} original={main.bpm} />
 				<button className="ghost" data-testid="edit-cut" disabled={!editCanCut(e)} onClick={editCut}>
 					Cut
 				</button>
-				{multi && (
-					<button className="ghost" data-testid="edit-add" disabled={onEdit || !some} onClick={editAddSelected}>
-						Add to edit
-					</button>
-				)}
-				<button className="ghost" data-testid="edit-duplicate" disabled={!onEdit || !some} onClick={editDuplicate}>
+				<button className="ghost" data-testid="edit-duplicate" disabled={!some} onClick={editDuplicate}>
 					Duplicate
 				</button>
-				<button className="ghost" data-testid="edit-delete" disabled={!onEdit || !some} onClick={editDelete}>
+				<button className="ghost" data-testid="edit-delete" disabled={!some} onClick={editDelete}>
 					Delete
 				</button>
 				<button className="ghost" data-testid="edit-undo" disabled={e.past.length === 0} onClick={editUndo}>
@@ -533,10 +390,10 @@ function Editor({ e }: { e: TrackEditUi }) {
 					Redo
 				</button>
 				<div className="zoom">
-					<button className="ghost icon" data-testid="edit-zoom-out" onClick={() => editZoom(1 / 1.5, zoomAnchor)}>
+					<button className="ghost icon" data-testid="edit-zoom-out" aria-label="Zoom out" onClick={() => editZoom(1 / 1.5, zoomAnchor)}>
 						−
 					</button>
-					<button className="ghost icon" data-testid="edit-zoom-in" onClick={() => editZoom(1.5, zoomAnchor)}>
+					<button className="ghost icon" data-testid="edit-zoom-in" aria-label="Zoom in" onClick={() => editZoom(1.5, zoomAnchor)}>
 						+
 					</button>
 					<button className="ghost" data-testid="edit-fit" onClick={editFit}>
@@ -572,86 +429,30 @@ function Editor({ e }: { e: TrackEditUi }) {
 						</>
 					)}
 				</div>
-				<button className="primary" data-testid="edit-export" disabled={e.exporting || placed.length === 0} onClick={() => void exportTrackEdit()}>
+				<button className="primary" data-testid="edit-export" disabled={e.exporting || shown.length === 0} onClick={() => void exportTrackEdit()}>
 					{e.exporting ? "Exporting…" : "Export edit"}
 				</button>
-				<button className="ghost icon" data-testid="edit-close" onClick={closeTrackEdit}>
+				<button className="ghost icon" data-testid="edit-close" aria-label="Close the editor" onClick={closeTrackEdit}>
 					✕
 				</button>
 			</div>
 			<div className="edit-body">
-				{multi && (
-					// What each lane is: the two tracks, then the edit made of their pieces.
-					<div className="edit-gutter">
-						{sources.map((so) => (
-							<div key={so.i} className={`edit-lane-head${e.lane === so.i ? " active" : ""}`} data-testid={`edit-lane-${so.i}`} style={hueVars(so.hue)} onPointerDown={() => editSelect([], so.i)}>
-								<span className="edit-lane-key">{"AB"[so.i]}</span>
-								<div className="edit-lane-text">
-									<span className="edit-lane-name">{so.track.name}</span>
-									<span className="muted">{Math.abs(so.track.bpm - e.bpm) < 1e-9 ? `${bpmText(so.track.bpm)} BPM` : `${bpmText(so.track.bpm)} → ${bpmText(e.bpm)} BPM`}</span>
-								</div>
-								<button className="ghost icon" data-testid={`edit-remove-${so.i}`} onPointerDown={(ev) => ev.stopPropagation()} onClick={() => editRemoveTrack(so.i)}>
-									✕
-								</button>
-							</div>
-						))}
-						<div className={`edit-lane-head out${onEdit ? " active" : ""}`} data-testid="edit-lane-out" onPointerDown={() => editSelect([], "out")}>
-							<span className="edit-lane-key">▸</span>
-							<div className="edit-lane-text">
-								<span className="edit-lane-name">Edit</span>
-								<span className="muted">
-									{bpmText(e.bpm)} BPM · {fmtLength((total * 60) / e.bpm)}
-								</span>
-							</div>
-						</div>
-					</div>
-				)}
 				<div className="edit-lanes" ref={lanesRef}>
-					{multi &&
-						sources.map((so) => (
-							<div key={so.i} className={`edit-row source${e.lane === so.i ? " active" : ""}`} data-testid={`edit-source-${so.i}`} onPointerDown={onSourceDown(so)} onContextMenu={onSourceMenu(so)} onDoubleClick={editAddSelected}>
-								{grid}
-								{so.lead > 0 && <Block className="edit-section lead" testId="edit-piece-lead" outBeat={so.off} lengthBeat={so.lead} startBeat={0} view={view} peaks={so.peaks} maxes={so.maxes} marks={so.marks} hue={so.hue} projectBpm={e.bpm} />}
-								{so.pieces.map((p) => (
-									<Block
-										key={p.id}
-										id={p.id}
-										className={`edit-section piece${e.lane === so.i && e.selection.includes(p.id) ? " selected" : ""}`}
-										testId="edit-piece"
-										label={lengthText(p.lengthBeat)}
-										outBeat={so.off + p.startBeat}
-										lengthBeat={p.lengthBeat}
-										startBeat={p.startBeat}
-										view={view}
-										peaks={so.peaks}
-										maxes={so.maxes}
-										marks={so.marks}
-										hue={so.hue}
-										projectBpm={e.bpm}
-									/>
-								))}
-								{/* A line under every stretch of the track that is in the edit already. */}
-								{placed
-									.filter((p) => srcOf(p.section) === so.i)
-									.map((p) => (
-										<div key={p.section.id} className="edit-used" style={{ left: x(so.off + p.section.startBeat), width: p.lengthBeat * view.pxPerBeat, ...hueVars(so.hue) } as CSSProperties} />
-									))}
-								{marksOn(so.i)}
-							</div>
-						))}
-					<div className={`edit-row out${onEdit ? " active" : ""}`} data-testid="edit-row" ref={outRef} onPointerDown={onDown} onContextMenu={onOutMenu}>
-						{grid}
-						{ownLead && <Block className="edit-section lead" testId="edit-lead" outBeat={0} lengthBeat={lead} startBeat={0} view={view} peaks={peaks0} maxes={maxes0} marks={marks0} hue={hues[0]} projectBpm={e.bpm} />}
+					<div className="edit-row out active" data-testid="edit-row" onPointerDown={onDown} onContextMenu={onMenu}>
+						<LaneGrid width={view.width} pxPerBeat={view.pxPerBeat} scrollX={view.scrollX - phase * view.pxPerBeat} />
 						{shown.map((p, i) => {
-							const so = sources[srcOf(p.section)] ?? sources[0];
-							const selected = onEdit && e.selection.includes(p.section.id);
+							const so = sourceOf(p.section);
+							const selected = e.selection.includes(p.section.id);
+							const r = rows.get(p.section.id);
+							// Where sections overlap, the lane splits into rows of the same height all along it.
+							const rowStyle: CSSProperties | undefined = r && r.rows > 1 ? { top: `calc(8px + (100% - 30px) * ${r.row / r.rows})`, bottom: "auto", height: `calc((100% - 30px) / ${r.rows} - 2px)` } : undefined;
 							return (
 								<Block
 									key={p.section.id}
 									id={p.section.id}
-									className={`edit-section${selected ? ` selected${lifted ? " lifted" : ""}` : ""}${incoming?.ids.includes(p.section.id) ? " incoming" : ""}`}
+									className={`edit-section${selected ? " selected" : ""}`}
 									testId="edit-section"
-									label={`${i + 1} · ${lengthText(p.lengthBeat)}`}
+									label={`${multi ? `${so.track.name} · ` : `${i + 1} · `}${lengthText(p.lengthBeat)}`}
 									outBeat={p.outBeat}
 									lengthBeat={p.lengthBeat}
 									startBeat={p.section.startBeat}
@@ -661,19 +462,15 @@ function Editor({ e }: { e: TrackEditUi }) {
 									marks={so.marks}
 									hue={so.hue}
 									projectBpm={e.bpm}
+									style={rowStyle}
 								/>
 							);
 						})}
-						{shown.length === 0 && <div className="edit-hint">{multi ? "Drag pieces of the tracks above down here." : "Everything is deleted. Undo to bring sections back."}</div>}
-						{drop !== null && <div className="edit-drop" style={{ transform: `translateX(${x(boundary(drop))}px)` }} />}
-						{marksOn("out")}
+						{shown.length === 0 && <div className="edit-hint">Everything is deleted. Undo to bring sections back.</div>}
+						<div className="edit-cursor" data-testid="edit-cursor" data-beat={e.cursorBeat.toFixed(4)} style={{ transform: `translateX(${x(e.cursorBeat)}px)`, visibility: e.playing || x(e.cursorBeat) < 1 ? "hidden" : "visible" }} />
+						<EditPlayhead />
 					</div>
 				</div>
-				{carry && (
-					<div className="edit-carry" style={{ left: carry.x, top: carry.y - 18, width: Math.max(24, carry.width), ...hueVars(carry.hue) } as CSSProperties}>
-						{carry.label}
-					</div>
-				)}
 			</div>
 		</div>
 	);
@@ -685,7 +482,7 @@ function Empty() {
 	useLibraryDrop(ref, (d) => void openFileInEditor(d.path));
 	return (
 		<div className={`bottom-area edit-empty${drop.dropping ? " file-over" : ""}`} data-testid="track-editor-empty" ref={ref} {...drop.handlers}>
-			Right-click a clip and choose Edit, or drop an audio file here, to cut a track up.
+			Right-click a clip and choose Add to editor, or drop an audio file here, to cut a track up.
 		</div>
 	);
 }

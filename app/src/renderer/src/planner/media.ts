@@ -134,8 +134,7 @@ export function reconcileMedia(doc: PlannerDoc): void {
 	// The tracks open in the editor, which may not be in the set at all (a file dropped there),
 	// at the editor's own tempo.
 	const edit = store.get().trackEdit;
-	for (const editing of edit ? [edit.track, edit.second] : []) {
-		if (!editing) continue;
+	for (const editing of edit?.tracks ?? []) {
 		const req = requestFor(editing, edit!.bpm);
 		if (!base.some((r) => stretchKey(r) === stretchKey(req))) base.push(req);
 	}

@@ -40,7 +40,7 @@ function remember(spot: CueSpot, gen: number): (c: CueChange) => void {
 		const s = store.get();
 		if (s.setGen !== gen) return;
 		if (!spot.edit) store.pushCueStep(step);
-		else if (s.trackEdit && (s.trackEdit.track.sourcePath === spot.path || s.trackEdit.second?.sourcePath === spot.path)) editPushCueStep(step);
+		else if (s.trackEdit && s.trackEdit.tracks.some((t) => t.sourcePath === spot.path)) editPushCueStep(step);
 	};
 }
 

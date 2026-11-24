@@ -18,7 +18,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SAMPLE_RATE, type CueRow, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, APP_TAG_GROUP, type RekordboxTag, type RekordboxTrack, type TagChange, type TagChangeResult } from "../shared/planner";
+import { HOT_CUES, SAMPLE_RATE, type CueRow, type RekordboxGrid, type RekordboxLibrary, type RekordboxPlaylist, APP_TAG_GROUP, type RekordboxTag, type RekordboxTrack, type TagChange, type TagChangeResult } from "../shared/planner";
 import { WavReader } from "./audio/wav";
 
 export type AnlzBeat = { no: number; tempo: number; ms: number }; // bar position 1-4, BPM x 100, time
@@ -892,6 +892,123 @@ export function fillPlaylist(bin: string, dbPath: string, playlistId: string, tr
 	);
 	notePlaylist(dbPath, playlistId, false);
 	return (printed<unknown[]>(out, "tracks") ?? []).map(String);
+}
+
+// ---- adding tracks to the collection --------------------------------------------------
+
+// A file to put in Rekordbox's collection, with what is known of it without decoding it.
+export type NewTrack = { path: string; size: number; seconds: number; bpm: number; sampleRate: number; bits: number; channels: number; cues?: { sec: number; kind: number }[] };
+
+// Rekordbox's number for each kind of file.
+const FILE_TYPES: Record<string, number> = { mp3: 1, m4a: 4, aac: 4, flac: 5, wav: 11, aif: 12, aiff: 12 };
+
+// The columns of djmdContent a new track fills in; the rest keep their defaults.
+const NEW_CONTENT_COLUMNS = ["ID", "FolderPath", "FileNameL", "FileNameS", "Title", "BPM", "Length", "TrackNo", "BitRate", "BitDepth", "Commnt", "FileType", "Rating", "ReleaseYear", "StockDate", "ColorID", "DJPlayCount", "ImagePath", "MasterDBID", "MasterSongID", "AnalysisDataPath", "SearchStr", "FileSize", "DiscNo", "SampleRate", "Analysed", "DateCreated", "ContentLink", "HotCueAutoLoad", "DeliveryControl", "AnalysisUpdated", "TrackInfoUpdated", "SamplerTrackInfo", "SamplerPlayOffset", "SamplerGain", "VideoAssociate", "LyricStatus", "ServiceID", "rb_file_id", "DeviceID", "UUID", "rb_data_status", "rb_local_data_status", "rb_local_deleted", "rb_local_synced", "rb_local_usn", "created_at", "updated_at"];
+
+// Puts these files in Rekordbox's collection the way Rekordbox does when a file is dragged
+// in, before it has analysed it: Rekordbox analyses them when they are first loaded. Each
+// gets its `cues` (on the file's own clock, which is Rekordbox's for a WAV). A file it
+// already has (by where it is) is not added again, nor given cues. Gives back each file's
+// track id.
+export function addTracks(bin: string, dbPath: string, tracks: NewTrack[]): Record<string, string> {
+	const at = sqlValue(stampNow());
+	const day = sqlValue(new Date().toISOString().slice(0, 10));
+	const live = "coalesce(rb_local_deleted, 0) = 0";
+	const lines = [
+		`PRAGMA key = '${DB_KEY}';`,
+		"PRAGMA cipher_compatibility = 4;",
+		"PRAGMA busy_timeout = 3000;",
+		"PRAGMA wal_autocheckpoint = 0;",
+		"create temp table dj_check (ok integer, constraint content_table_changed check (ok));",
+		`insert into dj_check select (select count(*) from pragma_table_info('djmdContent') where name in (${NEW_CONTENT_COLUMNS.map(sqlValue).join(", ")})) = ${NEW_CONTENT_COLUMNS.length};`,
+		"insert into dj_check select exists (select 1 from agentRegistry where registry_id = 'localUpdateCount');",
+		`insert into dj_check select (select group_concat(name, ',') from (select name from pragma_table_info('djmdCue') order by cid)) = ${sqlValue(CUE_COLUMNS.join(","))};`,
+		"BEGIN IMMEDIATE;",
+	];
+	const paths: string[] = [];
+	for (const t of tracks) {
+		if (paths.includes(t.path)) continue;
+		paths.push(t.path);
+		const ext = path.extname(t.path).slice(1).toLowerCase();
+		const name = path.basename(t.path);
+		const id = newRowId();
+		const uuid = crypto.randomUUID();
+		const where = `FolderPath = ${sqlValue(t.path)} and ${live}`;
+		const usn = "(select cast(int_1 as integer) + 1 from agentRegistry where registry_id = 'localUpdateCount')";
+		const values: Record<string, string> = {
+			ID: sqlValue(id),
+			FolderPath: sqlValue(t.path),
+			FileNameL: sqlValue(name),
+			FileNameS: "''",
+			Title: sqlValue(name.replace(/\.[^.]+$/, "")),
+			BPM: String(Math.round(t.bpm > 0 ? t.bpm * 100 : 0)),
+			Length: String(Math.round(t.seconds)),
+			TrackNo: "0",
+			BitRate: String(Math.round((t.sampleRate * t.bits * t.channels) / 1000)),
+			BitDepth: String(t.bits),
+			Commnt: "''",
+			FileType: String(FILE_TYPES[ext] ?? 0),
+			Rating: "0",
+			ReleaseYear: "0",
+			StockDate: day,
+			ColorID: "0",
+			DJPlayCount: "0",
+			ImagePath: "''",
+			MasterDBID: "(select DBID from djmdProperty limit 1)",
+			MasterSongID: sqlValue(id),
+			AnalysisDataPath: "''",
+			SearchStr: "''",
+			FileSize: String(t.size),
+			DiscNo: "0",
+			SampleRate: String(t.sampleRate),
+			Analysed: "0",
+			DateCreated: day,
+			ContentLink: `(select ContentLink from djmdContent where ${live} order by created_at desc limit 1)`,
+			HotCueAutoLoad: "'on'",
+			DeliveryControl: "'on'",
+			AnalysisUpdated: "0",
+			TrackInfoUpdated: "0",
+			SamplerTrackInfo: "0",
+			SamplerPlayOffset: "0",
+			SamplerGain: "0.0",
+			VideoAssociate: "0",
+			LyricStatus: "0",
+			ServiceID: "0",
+			rb_file_id: sqlValue(newRowId()),
+			DeviceID: `(select DeviceID from djmdContent where ${live} and DeviceID is not null order by created_at desc limit 1)`,
+			UUID: sqlValue(uuid),
+			rb_data_status: "0",
+			rb_local_data_status: "0",
+			rb_local_deleted: "0",
+			rb_local_synced: "0",
+			rb_local_usn: usn,
+			created_at: at,
+			updated_at: at,
+		};
+		lines.push(
+			`insert into djmdContent (${NEW_CONTENT_COLUMNS.map((c) => `"${c}"`).join(", ")}) select ${NEW_CONTENT_COLUMNS.map((c) => values[c]).join(", ")} ` +
+				`where not exists (select 1 from djmdContent where ${where}) and not exists (select 1 from djmdContent where ID = ${sqlValue(id)});`,
+			`update agentRegistry set int_1 = cast(int_1 as integer) + 1, updated_at = ${at} where registry_id = 'localUpdateCount' and changes() > 0;`,
+		);
+		// only onto the row made just now: its id is new
+		const made = `exists (select 1 from djmdContent where ID = ${sqlValue(id)} and UUID = ${sqlValue(uuid)})`;
+		for (const c of t.cues ?? []) {
+			if (!Number.isFinite(c.sec) || c.sec < 0 || !Number.isInteger(c.kind) || c.kind < 0 || c.kind > HOT_CUES) continue;
+			const row = newCueRow({ id, uuid }, Math.round(c.sec * 1000), c.kind);
+			lines.push(`insert into djmdCue (${CUE_COLUMNS.map((x) => `"${x}"`).join(", ")}) select ${CUE_COLUMNS.map((x) => sqlValue(row[x])).join(", ")} where ${made} and not exists (select 1 from djmdCue where ID = ${sqlValue(row["ID"])});`);
+		}
+	}
+	lines.push(`select 'DJ:ids:' || json_group_object(FolderPath, ID) from djmdContent where ${live} and FolderPath in (${paths.length ? paths.map(sqlValue).join(", ") : "NULL"});`, "COMMIT;");
+
+	const r = spawnSync(bin, ["-batch", "-bail", dbPath], { input: lines.join("\n"), encoding: "utf8", maxBuffer: 1 << 26 });
+	if (r.status !== 0) {
+		const said = (r.stderr || String(r.error ?? "")).trim();
+		if (/content_table_changed|no such table/.test(said)) throw new Error("This version of Rekordbox is not supported for adding tracks yet");
+		if (/locked|busy/i.test(said)) throw new Error("Rekordbox is busy with its library. Try again in a moment");
+		throw new Error(`Rekordbox's database could not be changed: ${said.split("\n").pop()}`);
+	}
+	const ids = printed<Record<string, unknown>>(r.stdout, "ids") ?? {};
+	return Object.fromEntries(Object.entries(ids).map(([p, id]) => [p, String(id)]));
 }
 
 // ---- tracks and playlists -----------------------------------------------------------

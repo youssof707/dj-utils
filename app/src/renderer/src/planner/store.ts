@@ -31,22 +31,17 @@ export type MenuUi = { x: number; y: number; clipId?: string; cue?: CueSpot } | 
 export type CueStep = { cue: true; path: string; added: CueRow[]; removed: CueRow[] };
 export const isCueStep = (step: object): step is CueStep => "cue" in step;
 
-// A lane of the track editor: the result ("out"), or with two tracks open the lane a track
-// is laid out whole in, to take pieces from (0 the first track, 1 the second).
-export type EditLane = "out" | 0 | 1;
-
-// What undo steps through in the track editor. `track` is the track as it was when it was
-// opened, and `second` the one opened next to it, if any; `sections` play one after the other
-// (see @shared/trackEdit), and `cuts` are the cut marks on each track's own lane, in its beats.
-export type EditSnap = { track: PlannerTrack; second: PlannerTrack | null; sections: EditSection[]; cuts: [number[], number[]] };
+// What undo steps through in the track editor. `tracks` are the tracks the edit takes from,
+// as they were when added (a section's `src` is an index into them); the first sets the
+// result's tempo and grid. `sections` sit on the editor's one lane (see @shared/trackEdit).
+export type EditSnap = { tracks: PlannerTrack[]; sections: EditSection[] };
 
 // The editor at the bottom of the window. The result plays at the first track's tempo.
 export type TrackEditUi = EditSnap & {
 	past: (EditSnap | CueStep)[];
 	future: (EditSnap | CueStep)[];
-	lane: EditLane; // the lane clicked last: the cursor, the selection, cuts and play are its
-	selection: string[]; // ids of sections of the result, or of pieces of a track's lane
-	cursorBeat: number; // where a cut goes and where the preview starts, in beats along the ruler
+	selection: string[]; // ids of sections
+	cursorBeat: number; // where a cut goes and where the preview starts, in beats of the result
 	bpm: number; // the tempo the editor plays at: the first track's own, until it is changed by hand
 	pxPerBeat: number; // 0: zoomed so that the whole edit fits the panel
 	scrollX: number;
@@ -59,6 +54,9 @@ export type TrackEditUi = EditSnap & {
 	// swapInEdit in @shared/cdj).
 	auto?: { links: AutoLink[] };
 };
+
+// An automatic edit waiting for the user to agree that it replaces the one in the editor.
+export type EditReplace = { tracks: PlannerTrack[]; sections: EditSection[]; links: AutoLink[] };
 
 export type State = {
 	doc: PlannerDoc;
@@ -87,6 +85,7 @@ export type State = {
 	settings: Settings | null; // null until first read
 	trackEdit: TrackEditUi | null;
 	editFocus: boolean; // the track editor was clicked last, so the keys act on it
+	editReplace: EditReplace | null;
 	sets: SetInfo[] | null; // what the list of sets shows; null until first read
 	setId: string | null; // the set that is open
 	setName: string | null; // null until the set is first stored, which names it
@@ -115,8 +114,8 @@ export type State = {
 // What the library is ordered by; `down` is largest first.
 export type LibrarySort = { by: "number" | "key" | "bpm"; down: boolean };
 // Which library tracks are shown: a BPM range (either end may be open) and Camelot keys (none: any).
-export type LibraryFilter = { bpmMin: number | null; bpmMax: number | null; keys: string[] };
-export const NO_FILTER: LibraryFilter = { bpmMin: null, bpmMax: null, keys: [] };
+export type LibraryFilter = { bpmMin: number | null; bpmMax: number | null; keys: string[]; tags: string[] };
+export const NO_FILTER: LibraryFilter = { bpmMin: null, bpmMax: null, keys: [], tags: [] };
 
 const HISTORY = 300;
 
@@ -147,6 +146,7 @@ let state: State = {
 	settings: null,
 	trackEdit: null,
 	editFocus: false,
+	editReplace: null,
 	sets: null,
 	setId: null,
 	setName: null,
@@ -262,7 +262,7 @@ export const store = {
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, cueTool: null, trackEdit: null, editFocus: false, starred: [] });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, cueTool: null, trackEdit: null, editFocus: false, editReplace: null, starred: [] });
 	},
 };
 

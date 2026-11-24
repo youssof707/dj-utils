@@ -15,7 +15,7 @@ import { parseWavHeader } from "./audio/wav";
 import type { Task } from "./audio/worker";
 import { dataRoot } from "./paths";
 import { exportDir } from "./settings";
-import { cuesAfter, databaseStamp, datKey, findAnalysisRoot, findDatabase, nameKey, newCueRow, parseAnlz, type CueChangeJob, type CueChangeResult, type CueLibrary, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
+import { cuesAfter, databaseStamp, type NewTrack, datKey, findAnalysisRoot, findDatabase, nameKey, newCueRow, parseAnlz, type CueChangeJob, type CueChangeResult, type CueLibrary, type LibraryEntry, type RekordboxMatch } from "./rekordbox";
 
 const AUDIO_EXT = ["mp3", "wav", "aif", "aiff", "flac", "m4a", "aac", "ogg", "caf", "mp4", "alac"];
 
@@ -528,12 +528,13 @@ async function setTrackTags(change: TagChange): Promise<TagChangeResult> {
 
 const pathKey = (p: string): string => path.resolve(p).normalize("NFC");
 
-// The Rekordbox track of each of these files, in order, without repeats, and the names of
-// the files Rekordbox does not have. A file is found by where it is, or else by its
-// analysis (a copy of a library file somewhere else).
-async function contentIdsOf(lib: RekordboxLibrary, paths: string[]): Promise<{ ids: string[]; missing: string[] }> {
+// The Rekordbox track of each of these files, in order, without repeats, and the files
+// Rekordbox does not have. A file is found by where it is, or else by its analysis (a copy
+// of a library file somewhere else).
+async function contentIdsOf(lib: RekordboxLibrary, paths: string[], known: Record<string, string> = {}): Promise<{ ids: string[]; missing: string[] }> {
 	const byPath = new Map<string, string>();
 	for (const t of lib.tracks) if (t.path && path.isAbsolute(t.path)) byPath.set(pathKey(t.path), t.id);
+	for (const [p, id] of Object.entries(known)) byPath.set(pathKey(p), id);
 	const ids: string[] = [];
 	const missing: string[] = [];
 	let cuesRead = false;
@@ -547,10 +548,35 @@ async function contentIdsOf(lib: RekordboxLibrary, paths: string[]): Promise<{ i
 				id = cueLibrary.contents[datKey(m.dat)]?.id;
 			}
 		}
-		if (!id) missing.push(path.basename(p).replace(/\.[^.]+$/, ""));
+		if (!id) missing.push(p);
 		else if (!ids.includes(id)) ids.push(id);
 	}
 	return { ids, missing };
+}
+
+const fileTitle = (p: string): string => path.basename(p).replace(/\.[^.]+$/, "");
+
+// What Rekordbox is told of a file it is given: its size, and for a WAV (every edit made
+// here) its length and format, and the grid an edit carries. Null when the file is gone.
+function newTrackOf(p: string): NewTrack | null {
+	let size: number;
+	try {
+		size = fs.statSync(p).size;
+	} catch {
+		return null;
+	}
+	const t: NewTrack = { path: p, size, seconds: 0, bpm: readGridTag(p)?.bpm ?? 0, sampleRate: 0, bits: 0, channels: 0 };
+	if (path.extname(p).toLowerCase() !== ".wav") return t;
+	let fd: number | null = null;
+	try {
+		fd = fs.openSync(p, "r");
+		const w = parseWavHeader(fd);
+		return { ...t, seconds: w.frames / w.sampleRate, sampleRate: w.sampleRate, bits: w.bits, channels: w.channels };
+	} catch {
+		return t;
+	} finally {
+		if (fd !== null) fs.closeSync(fd);
+	}
 }
 
 const cleanPaths = (v: unknown): string[] => [...new Set(Array.isArray(v) ? v.filter((p): p is string => typeof p === "string" && path.isAbsolute(p)) : [])];
@@ -575,9 +601,9 @@ async function playlistStatus(setId: string, paths: string[]): Promise<PlaylistS
 	return {
 		linked,
 		playlists: lib.playlists.map((p) => (owners.has(p.id) ? { ...p, takenBy: owners.get(p.id) } : p)),
-		tracks: ids.length,
-		missing,
-		synced: !!linked && linked.tracks.length === ids.length && linked.tracks.every((t, i) => t === ids[i]),
+		tracks: ids.length + missing.length,
+		missing: missing.map(fileTitle),
+		synced: !!linked && missing.length === 0 && linked.tracks.length === ids.length && linked.tracks.every((t, i) => t === ids[i]),
 		canWrite: fs.existsSync(sqlcipherPath()),
 	};
 }
@@ -620,17 +646,31 @@ async function createSetPlaylist(setId: string, name: string): Promise<void> {
 	linkPlaylist(setId, made.id);
 }
 
-// Makes the set's playlist hold exactly the set's tracks, in the order given.
-async function syncSetPlaylist(setId: string, paths: string[]): Promise<void> {
+// Makes the set's playlist hold exactly the set's tracks, in the order given. Files Rekordbox
+// does not have yet (edits made here) are put in its collection first. Gives back the names
+// of the files that could not be added, as they are gone.
+async function syncSetPlaylist(setId: string, paths: string[]): Promise<string[]> {
 	const own = storedSet(setId).playlist;
 	if (!own) throw new Error("Link a playlist first");
 	const lib = await rekordboxLibrary();
 	if (!lib?.playlists.some((p) => p.id === own)) throw new Error("This playlist is no longer in Rekordbox");
-	const { ids } = await contentIdsOf(lib, cleanPaths(paths));
+	const wanted = cleanPaths(paths);
+	const { missing } = await contentIdsOf(lib, wanted);
+	// an edit made here takes the cues waiting for it along
+	const adding = missing.map(newTrackOf).filter((t): t is NewTrack => t !== null).map((t) => (pendingCues[t.path] ? { ...t, cues: pendingCues[t.path] } : t));
+	const gone = missing.filter((p) => !adding.some((t) => t.path === p)).map(fileTitle);
 	await inCueTurn(async () => {
 		const { bin, dbPath } = writeBin();
+		const added = adding.length ? await runWorker<Record<string, string>>({ type: "rekordbox-tracks-add", job: { bin, dbPath, tracks: adding } }, () => {}) : {};
+		if (adding.some((t) => t.cues && added[t.path])) {
+			for (const t of adding) if (t.cues && added[t.path]) delete pendingCues[t.path];
+			savePending();
+		}
+		// the order again, with the new tracks where their files are in the set
+		const { ids } = await contentIdsOf(lib, wanted, added);
 		return runWorker<string[]>({ type: "rekordbox-playlist-fill", job: { bin, dbPath, playlistId: own, tracks: ids } }, () => {});
 	});
+	return gone;
 }
 
 // The file's beat grid: Rekordbox's when it has analysed the file, otherwise the one an
@@ -661,13 +701,13 @@ let editExporting = false;
 async function exportEdit(req: EditExportRequest): Promise<EditExportResult> {
 	if (editExporting) throw new Error("An export is already running");
 	if (!AUDIO_EXT.includes(path.extname(req.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.sourcePath)) throw new Error("The source file is missing");
-	if (req.second && (!AUDIO_EXT.includes(path.extname(req.second.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(req.second.sourcePath))) throw new Error("The second track's file is missing");
+	for (const o of req.others ?? []) if (!AUDIO_EXT.includes(path.extname(o.sourcePath).slice(1).toLowerCase()) || !fs.existsSync(o.sourcePath)) throw new Error(`${path.basename(o.sourcePath)} is missing`);
 	editExporting = true;
 	try {
 		const dir = exportDir();
 		fs.mkdirSync(dir, { recursive: true });
 		const outPath = editPath(dir, req.name);
-		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, leadBeat: req.leadBeat, sections: req.sections, second: req.second };
+		const job = { sourcePath: req.sourcePath, outPath, tmpDir: app.getPath("temp"), bpm: req.bpm, downbeatSec: req.downbeatSec, sections: req.sections, others: req.others };
 		const r = await runWorker<SpliceResult & { seconds: number }>({ type: "edit-export", job }, () => {});
 		editsMade.add(outPath);
 		return { path: outPath, seconds: r.seconds, sampleRate: r.sampleRate, bits: r.bits, channels: r.channels };

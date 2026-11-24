@@ -1,10 +1,10 @@
-// Making a Rekordbox playlist and syncing it to a set (createPlaylist, fillPlaylist and
+// Making a Rekordbox playlist and syncing it to a set (fillPlaylist and
 // notePlaylist in main/rekordbox.ts).
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { testDir } from "../testdata";
-import { createPlaylist, fillPlaylist } from "../../src/main/rekordbox";
+import { fillPlaylist } from "../../src/main/rekordbox";
 import { makeMasterDb, PLAYLIST_TABLE, queryDb, SONG_PLAYLIST_TABLE, SQLCIPHER } from "../rekordboxDb";
 
 const DAT = (n: number): string => `/PIONEER/USBANLZ/00${n}/00${n}aa-1f81-4747-b48a-e4dce25729c8/ANLZ0000.DAT`;
@@ -38,13 +38,6 @@ beforeEach(() => {
 const inList = (id: string): string[] => queryDb(db, `select ContentID from djmdSongPlaylist where PlaylistID = '${id}' order by TrackNo;`).map((r) => String(r["ContentID"]));
 
 describe("playlists", () => {
-	it("makes a playlist after the others and lists it in masterPlaylists6.xml", () => {
-		const p = createPlaylist(SQLCIPHER, db, "  Friday set ");
-		expect(p.name).toBe("Friday set");
-		expect(queryDb(db, `select Seq, Attribute, ParentID from djmdPlaylist where ID = '${p.id}';`)).toEqual([{ Seq: 3, Attribute: 0, ParentID: "root" }]);
-		expect(fs.readFileSync(xml, "utf8")).toContain(`<NODE Id="${Number(p.id).toString(16).toUpperCase()}" ParentId="0" Attribute="0"`);
-	});
-
 	it("wipes the playlist and fills it in the order given, leaving out unknown tracks", () => {
 		expect(fillPlaylist(SQLCIPHER, db, "42", ["200", "999", "100", "200"])).toEqual(["200", "100"]);
 		expect(inList("42")).toEqual(["200", "100"]);

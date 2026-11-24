@@ -242,40 +242,28 @@ describe("editing and playback", () => {
 		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
 	});
 
-	it("with one trimmed clip selected, a click on empty space puts a copy of it there", async () => {
+	it("with one clip selected, a click on empty space adds no copy; it clears the selection", async () => {
 		const lanes = (await h.page.getByTestId("lanes").boundingBox())!;
 		const ppb: number = await state(h.page, "s => s.pxPerBeat");
 		const sx: number = await state(h.page, "s => s.scrollX");
 		const laneH = lanes.height / 4;
 		const before = await clips();
-		// trim the first clip so the copy has something to keep
-		const trimmed = { ...before[0], offsetBeat: before[0].offsetBeat + 4, lengthBeat: 24, fadeInBeat: 2 };
-		await state(h.page, `s => { const d = s.doc; window.planner.store.commit({ ...d, clips: d.clips.map(c => c.id === ${JSON.stringify(trimmed.id)} ? ${JSON.stringify(trimmed)} : c) }); window.planner.store.set({ selection: [${JSON.stringify(trimmed.id)}] }); return 0; }`);
+		const select = `s => { window.planner.store.set({ selection: [${JSON.stringify(before[0].id)}] }); return 0; }`;
+		// ⌘-click on empty space only clears the selection: the playhead stays
+		await state(h.page, select);
 		const playheadBefore = await playhead();
-		// an empty spot in lane 3, at beat 64
-		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
-		const cur = await clips();
-		expect(cur).toHaveLength(before.length + 1);
-		const copy = cur[cur.length - 1];
-		expect({ ...copy, id: trimmed.id }).toEqual({ ...trimmed, lane: 3, startBeat: 64 });
-		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([copy.id]);
-		expect(await playhead()).toBe(playheadBefore);
-		// one undo takes the copy away; with nothing selected a click only moves the playhead
-		await h.page.keyboard.press("Meta+z");
-		expect(await clips()).toHaveLength(before.length);
-		// ⌘-click on empty space only clears the selection: no copy, playhead stays
-		await state(h.page, `s => { window.planner.store.set({ selection: [${JSON.stringify(trimmed.id)}] }); return 0; }`);
 		await h.page.keyboard.down("Meta");
 		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
 		await h.page.keyboard.up("Meta");
-		expect(await clips()).toHaveLength(before.length);
+		expect(await clips()).toEqual(before);
 		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([]);
 		expect(await playhead()).toBe(playheadBefore);
-		await state(h.page, "s => { window.planner.store.set({ selection: [] }); return 0; }");
+		// a plain click clears it too and moves the playhead
+		await state(h.page, select);
 		await h.page.mouse.click(lanes.x + 64 * ppb - sx, lanes.y + laneH * 3.5);
-		expect(await clips()).toHaveLength(before.length);
-		await state(h.page, `s => { const d = s.doc; window.planner.store.commit({ ...d, clips: d.clips.map(c => c.id === ${JSON.stringify(before[0].id)} ? ${JSON.stringify(before[0])} : c) }); return 0; }`);
 		expect(await clips()).toEqual(before);
+		expect(await state<string[]>(h.page, "s => s.selection")).toEqual([]);
+		expect(await playhead()).not.toBe(playheadBefore);
 	});
 
 	it("cannot drag a group past the start or outside the lanes", async () => {

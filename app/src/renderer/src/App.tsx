@@ -12,7 +12,7 @@ import { closeSettings, Settings } from "./planner/Settings";
 import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
 import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
-import { leadBeat, place } from "@shared/trackEdit";
+import { place } from "@shared/trackEdit";
 import { TrackEditor } from "./planner/TrackEditor";
 import { Updater, updateModalOpen } from "./Updater";
 import { VersionChip } from "./VersionChip";
@@ -24,7 +24,7 @@ function isTyping(): boolean {
 
 function modalOpen(): boolean {
 	const s = store.get();
-	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.pendingDuplicate !== null || s.exportUi !== null || s.cueWait !== null;
+	return updateModalOpen() || s.importQueue.length > 0 || s.trackBpmEdit !== null || s.pendingProjectBpm !== null || s.pendingDelete !== null || s.pendingDuplicate !== null || s.editReplace !== null || s.exportUi !== null || s.cueWait !== null;
 }
 
 function menuAction(action: string): void {
@@ -392,7 +392,7 @@ function start(): void {
 		editSelectedClips,
 		exportTrackEdit,
 		editPx,
-		placeEdit: (e: TrackEditUi) => place(leadBeat(e.track), e.sections),
+		placeEdit: (e: TrackEditUi) => place(e.sections),
 	};
 }
 
@@ -419,11 +419,6 @@ function Split({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
 			return SPLIT_DEFAULT;
 		});
 	}, [editing]);
-	// Two tracks side by side need three lanes: the bottom area is given half the height.
-	const lanes = useStore((s) => (s.trackEdit?.second ? 3 : 1));
-	useEffect(() => {
-		if (lanes === 3) setFrac((f) => Math.min(f, 0.5));
-	}, [lanes]);
 
 	const onDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;

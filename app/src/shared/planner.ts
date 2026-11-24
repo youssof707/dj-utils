@@ -74,6 +74,7 @@ export type CueRow = Record<string, string | number | null>;
 // What a change to a track's cues did, and the cues the track has now.
 export type CueChange = { cues: Cue[]; added: CueRow[]; removed: CueRow[] };
 export const HOT_CUES = 8; // A to H
+export const MEMORY_CUES = 10; // Rekordbox keeps at most this many memory cues on a track
 
 // A track in the Rekordbox library. `bpm` is 0 and `key` is "" when Rekordbox has none.
 // `key` is in Camelot form (8A, 7B) where Rekordbox's can be read that way, and `keyOrder`
@@ -140,12 +141,11 @@ export type ExportRequest = {
 export type ExportResult = { path: string; seconds: number; gainDb: number };
 export type ExportProgress = { stage: string; pct: number };
 
-// An edited track to write out: the lead-in (the first `leadBeat` beats of the file), then
-// these stretches of the track one after the other. Beats are the track's own, at `bpm`.
-// The file is named after `name` and goes in the export folder from the settings.
-// `second` is the other track of a two-track edit: the sections with `src` 1 are stretches of
-// it, in its own beats. The file is at the first track's tempo, the second stretched to it.
-export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: { startBeat: number; lengthBeat: number; gapBeat?: number; src?: number }[]; second?: { sourcePath: string; bpm: number } };
+// An edited track to write out: stretches of tracks, each at its place in the result (see
+// @shared/trackEdit). Beats are each track's own, at `bpm`. The file is named after `name` and
+// goes in the export folder from the settings. A section with `src` i > 0 is a stretch of
+// `others[i - 1]`; the file is at the first track's tempo, the others stretched to it.
+export type EditExportRequest = { sourcePath: string; name: string; bpm: number; downbeatSec?: number; sections: { startBeat: number; lengthBeat: number; atBeat: number; src?: number }[]; others?: { sourcePath: string; bpm: number }[] };
 export type EditExportResult = { path: string; seconds: number; sampleRate: number; bits: number; channels: number };
 
 // `lastSetId`: the set that was open when the app last closed, reopened at launch.

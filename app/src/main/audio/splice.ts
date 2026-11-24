@@ -5,7 +5,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { editSlices, srcOf, type Slice, type Span } from "../../shared/trackEdit";
+import { editLayers, srcOf, type Layer, type Span } from "../../shared/trackEdit";
 import { stretchFile } from "./dsp";
 import { parseWavHeader, type WavInfo } from "./wav";
 
@@ -69,10 +69,14 @@ function isPcm(info: WavInfo): boolean {
 	return info.format === 1 && (info.bits === 16 || info.bits === 24 || info.bits === 32) && info.channels >= 1;
 }
 
-// Writes `slices` of the integer PCM WAV at `srcPath`, one after the other, to `outPath` in
-// the same sample rate, bit depth and channel count. With several source files (a slice's
-// `src` says which) they must all be in the same format.
-export function spliceWav(srcPath: string | string[], outPath: string, slices: Slice[], tag: GridTag | null): SpliceResult {
+// Writes the `layers` of the integer PCM WAVs at `srcPath` (a layer's `src` says which file)
+// into one file at `outPath`, in the same sample rate, bit depth and channel count, which all
+// the files must share. Where only one layer plays, its bytes are copied as they are; where
+// layers overlap they are added together (and held at full scale), as two clips on a lane are.
+// Each layer fades in over the moment before it, from what led up to it in its file, and out
+// over its last moment unless it runs to the end of its file, so a join has no click and its
+// first beat is the incoming layer's own.
+export function spliceWav(srcPath: string | string[], outPath: string, layers: Layer[], tag: GridTag | null): SpliceResult {
 	const fds: number[] = [];
 	let out: number | null = null;
 	try {
@@ -82,104 +86,81 @@ export function spliceWav(srcPath: string | string[], outPath: string, slices: S
 		if (!isPcm(info)) throw new Error(`Unsupported WAV encoding (format ${info.format}, ${info.bits} bit)`);
 		if (infos.some((i) => i.format !== info.format || i.bits !== info.bits || i.channels !== info.channels || i.sampleRate !== info.sampleRate)) throw new Error("The tracks are not in the same audio format");
 		const bps = info.bits / 8;
-		const frameBytes = bps * info.channels;
-		for (const s of slices) {
-			if (!Number.isInteger(s.frames) || s.frames <= 0) throw new Error("A section lies outside the track");
-			if (!s.silent && (!infos[srcOf(s)] || !Number.isInteger(s.start) || s.start < 0 || s.start + s.frames > infos[srcOf(s)].frames)) throw new Error("A section lies outside the track");
+		const ch = info.channels;
+		const frameBytes = bps * ch;
+		for (const l of layers) {
+			const src = infos[l.src];
+			if (!src || !Number.isInteger(l.frames) || l.frames <= 0 || !Number.isInteger(l.start) || l.start < 0 || l.start + l.frames > src.frames || !Number.isInteger(l.at) || l.at < 0) throw new Error("A section lies outside the track");
 		}
-		// Reads `frames` frames of a slice's source file into `buf`.
-		const read = (of: Slice, buf: Buffer, frames: number, frame: number): void => readFully(fds[srcOf(of)], buf, frames * frameBytes, infos[srcOf(of)].dataOffset + frame * frameBytes);
+		if (layers.length === 0) throw new Error("There is nothing to export");
 		const joinFrames = Math.max(1, Math.round(JOIN_SEC * info.sampleRate));
 		const edgeFrames = Math.max(1, Math.round(EDGE_SEC * info.sampleRate));
+		// Each layer with its fades: `pre` frames before it, `head` (a file that starts part-way
+		// into a track, with no room before it) and `tail` at its own start and end.
+		const parts = layers.map((l) => {
+			const pre = Math.min(joinFrames, l.at);
+			const head = pre === 0 && l.start > 0 ? Math.min(edgeFrames, l.frames) : 0;
+			const tail = l.start + l.frames < infos[l.src].frames ? Math.min(joinFrames, l.frames) : 0;
+			return { ...l, pre, head, tail, from: l.at - pre, end: l.at + l.frames };
+		});
+		const total = Math.max(...parts.map((p) => p.end));
+		const cuts = [...new Set(parts.flatMap((p) => [p.from, p.at, p.at + p.head, p.end - p.tail, p.end]).concat([0, total]))].filter((b) => b >= 0 && b <= total).sort((x, y) => x - y);
+
 		out = fs.openSync(outPath, "w");
 		let pos = 44;
 		const chunkFrames = Math.max(1, Math.floor((1 << 20) / frameBytes));
 		const copy = Buffer.alloc(chunkFrames * frameBytes);
-		const a = Buffer.alloc(joinFrames * frameBytes);
-		const b = Buffer.alloc(joinFrames * frameBytes);
+		const acc = new Float64Array(chunkFrames * ch);
+		const max = 2 ** (info.bits - 1) - 1;
+		const min = -(2 ** (info.bits - 1));
+		const write = (buf: Buffer, frames: number): void => {
+			writeFully(out!, buf, frames * frameBytes, pos);
+			pos += frames * frameBytes;
+		};
+		// `n` frames of a layer's file from `frame` into `copy`; silence before the file starts.
+		const read = (p: (typeof parts)[number], frame: number, n: number): void => {
+			const skip = Math.max(0, -frame);
+			if (skip > 0) copy.fill(0, 0, Math.min(n, skip) * frameBytes);
+			if (n > skip) readFully(fds[p.src], copy.subarray(skip * frameBytes), (n - skip) * frameBytes, infos[p.src].dataOffset + (frame + skip) * frameBytes);
+		};
+		// How loud a layer is at frame `o` of the result.
+		const weight = (p: (typeof parts)[number], o: number): number => {
+			if (o < p.at) return blendWeight(joinFrames - (p.at - o), joinFrames);
+			let w = 1;
+			if (o - p.at < p.head) w *= blendWeight(o - p.at, p.head);
+			const t = o - (p.end - p.tail);
+			if (t >= 0) w *= 1 - blendWeight(t, p.tail);
+			return w;
+		};
 
-		slices.forEach((s, i) => {
-			const next = slices[i + 1];
-			if (s.silent) {
-				// Silence, then the same blend into the next section as at any join: from the
-				// silence into what led up to it in the source, so its first beat is untouched.
-				const tail = next && !next.silent ? Math.min(joinFrames, s.frames) : 0;
-				copy.fill(0);
-				for (let left = s.frames - tail; left > 0; ) {
-					const n = Math.min(chunkFrames, left);
-					writeFully(out!, copy, n * frameBytes, pos);
-					pos += n * frameBytes;
-					left -= n;
-				}
-				if (tail > 0) {
-					b.fill(0);
-					const from = Math.max(0, next.start - tail);
-					const have = next.start - from;
-					if (have > 0) read(next, b.subarray((tail - have) * frameBytes), have, from);
-					for (let k = 0; k < tail; k++) {
-						const w = blendWeight(k, tail);
-						for (let c = 0; c < info.channels; c++) {
-							const o = (k * info.channels + c) * bps;
-							b.writeIntLE(Math.round(b.readIntLE(o, bps) * w), o, bps);
+		for (let i = 0; i + 1 < cuts.length; i++) {
+			const [b0, b1] = [cuts[i], cuts[i + 1]];
+			const on = parts.filter((p) => p.from <= b0 && b0 < p.end);
+			for (let o = b0; o < b1; ) {
+				const n = Math.min(chunkFrames, b1 - o);
+				const only = on.length === 1 ? on[0] : null;
+				if (on.length === 0) {
+					copy.fill(0, 0, n * frameBytes);
+					write(copy, n);
+				} else if (only && o >= only.at + only.head && o + n <= only.end - only.tail) {
+					// One layer at full level: its file, byte for byte.
+					read(only, only.start + (o - only.at), n);
+					write(copy, n);
+				} else {
+					acc.fill(0, 0, n * ch);
+					for (const p of on) {
+						read(p, p.start + (o - p.at), n);
+						for (let k = 0; k < n; k++) {
+							const w = weight(p, o + k);
+							for (let c = 0; c < ch; c++) acc[k * ch + c] += copy.readIntLE((k * ch + c) * bps, bps) * w;
 						}
 					}
-					writeFully(out!, b, tail * frameBytes, pos);
-					pos += tail * frameBytes;
+					for (let k = 0; k < n * ch; k++) copy.writeIntLE(Math.min(max, Math.max(min, Math.round(acc[k]))), k * bps, bps);
+					write(copy, n);
 				}
-				return;
+				o += n;
 			}
-			const end = s.start + s.frames;
-			// The last frames of the slice are blended: towards the next slice's lead-up at a
-			// join, towards silence where the file ends before the track does.
-			const joined = next ? next.silent || srcOf(next) !== srcOf(s) || next.start !== end : end < infos[srcOf(s)].frames;
-			const tail = joined ? Math.min(joinFrames, s.frames) : 0;
-			const head = i === 0 && s.start > 0 ? Math.min(edgeFrames, s.frames - tail) : 0;
-
-			if (head > 0) {
-				read(s, a, head, s.start);
-				for (let k = 0; k < head; k++) {
-					const w = blendWeight(k, head);
-					for (let c = 0; c < info.channels; c++) {
-						const o = (k * info.channels + c) * bps;
-						a.writeIntLE(Math.round(a.readIntLE(o, bps) * w), o, bps);
-					}
-				}
-				writeFully(out!, a, head * frameBytes, pos);
-				pos += head * frameBytes;
-			}
-
-			// Everything between is the source, byte for byte.
-			let frame = s.start + head;
-			const bodyEnd = end - tail;
-			while (frame < bodyEnd) {
-				const n = Math.min(chunkFrames, bodyEnd - frame);
-				read(s, copy, n, frame);
-				writeFully(out!, copy, n * frameBytes, pos);
-				pos += n * frameBytes;
-				frame += n;
-			}
-
-			if (tail > 0) {
-				read(s, a, tail, bodyEnd);
-				b.fill(0);
-				// What led up to the next slice in the source (silence before the file's start);
-				// with silence next, the section fades out.
-				if (next && !next.silent) {
-					const from = Math.max(0, next.start - tail);
-					const have = next.start - from;
-					if (have > 0) read(next, b.subarray((tail - have) * frameBytes), have, from);
-				}
-				for (let k = 0; k < tail; k++) {
-					const w = blendWeight(k, tail);
-					for (let c = 0; c < info.channels; c++) {
-						const o = (k * info.channels + c) * bps;
-						a.writeIntLE(Math.round(a.readIntLE(o, bps) * (1 - w) + b.readIntLE(o, bps) * w), o, bps);
-					}
-				}
-				writeFully(out!, a, tail * frameBytes, pos);
-				pos += tail * frameBytes;
-			}
-		});
+		}
 
 		const dataBytes = pos - 44;
 		if (dataBytes % 2) {
@@ -293,12 +274,12 @@ function wavInfo(file: string): WavInfo {
 	}
 }
 
-// The second track of an edit as integer PCM in the first one's format and at its tempo, so
+// Another track of an edit as integer PCM in the first one's format and at its tempo, so
 // the two can be cut together: converted to that sample rate, channel count and bit depth,
 // and stretched (pitch kept) when its tempo is another. A file that already is all that is
 // used as it stands.
-async function matchedPcm(sourcePath: string, dir: string, like: WavInfo, fromBpm: number, toBpm: number): Promise<string> {
-	const out = path.join(dir, "second.wav");
+async function matchedPcm(sourcePath: string, dir: string, name: string, like: WavInfo, fromBpm: number, toBpm: number): Promise<string> {
+	const out = path.join(dir, `${name}.wav`);
 	const convert = async (from: string, to: string, format: string): Promise<void> => {
 		try {
 			await run("/usr/bin/afconvert", ["-f", "WAVE", "-d", format, "-c", String(like.channels), from, to]);
@@ -319,17 +300,17 @@ async function matchedPcm(sourcePath: string, dir: string, like: WavInfo, fromBp
 		return out;
 	}
 	// Stretched as floating point, so nothing clips or is rounded on the way.
-	const float = path.join(dir, "second-float.wav");
-	const stretched = path.join(dir, "second-stretched.wav");
+	const float = path.join(dir, `${name}-float.wav`);
+	const stretched = path.join(dir, `${name}-stretched.wav`);
 	await convert(sourcePath, float, `LEF32@${like.sampleRate}`);
 	await stretchFile(float, stretched, fromBpm, toBpm);
 	await convert(stretched, out, `LEI${like.bits}@${like.sampleRate}`);
 	return out;
 }
 
-// `second`: the other track of a two-track edit, which the sections with `src` 1 come from.
+// `others`: the editor's other tracks; a section with `src` i > 0 is a stretch of `others[i - 1]`.
 // The result is in the first track's format and at its tempo (`bpm`).
-export type EditExportJob = { sourcePath: string; outPath: string; tmpDir: string; bpm: number; downbeatSec?: number; leadBeat: number; sections: Span[]; second?: { sourcePath: string; bpm: number } };
+export type EditExportJob = { sourcePath: string; outPath: string; tmpDir: string; bpm: number; downbeatSec?: number; sections: Span[]; others?: { sourcePath: string; bpm: number }[] };
 
 export async function exportEdit(job: EditExportJob): Promise<SpliceResult & { seconds: number }> {
 	const dir = await fs.promises.mkdtemp(path.join(job.tmpDir, "dj-edit-"));
@@ -339,15 +320,23 @@ export async function exportEdit(job: EditExportJob): Promise<SpliceResult & { s
 		const info = wavInfo(pcm);
 		const sources = [pcm];
 		const frames = [info.frames];
-		if (job.sections.some((s) => srcOf(s) !== 0)) {
-			if (!job.second || job.sections.some((s) => srcOf(s) > 1)) throw new Error("A section's track is missing");
-			sources.push(await matchedPcm(job.second.sourcePath, dir, info, job.second.bpm, job.bpm));
-			frames.push(wavInfo(sources[1]).frames);
+		const used = new Set(job.sections.map(srcOf));
+		const others = job.others ?? [];
+		if ([...used].some((i) => i > others.length)) throw new Error("A section's track is missing");
+		for (let i = 1; i <= others.length; i++) {
+			// Tracks with nothing in the edit are not read at all; their place is kept.
+			if (!used.has(i)) {
+				sources.push(pcm);
+				frames.push(0);
+				continue;
+			}
+			sources.push(await matchedPcm(others[i - 1].sourcePath, dir, `track${i}`, info, others[i - 1].bpm, job.bpm));
+			frames.push(wavInfo(sources[i]).frames);
 		}
-		const slices = editSlices(job.leadBeat, job.sections, job.bpm, info.sampleRate, frames);
-		if (slices.length === 0) throw new Error("There is nothing to export");
+		const layers = editLayers(job.sections, job.bpm, info.sampleRate, frames);
+		if (layers.length === 0) throw new Error("There is nothing to export");
 		const tag: GridTag = job.downbeatSec === undefined ? { bpm: job.bpm } : { bpm: job.bpm, downbeatSec: job.downbeatSec };
-		const r = spliceWav(sources, part, slices, tag);
+		const r = spliceWav(sources, part, layers, tag);
 		await fs.promises.rename(part, job.outPath);
 		return { ...r, seconds: r.frames / r.sampleRate };
 	} finally {

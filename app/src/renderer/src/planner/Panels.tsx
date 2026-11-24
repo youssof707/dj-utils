@@ -8,7 +8,7 @@ import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
-import { openAutoEdit, openTrackEdit } from "./trackEdit";
+import { cancelEditReplace, confirmEditReplace, openAutoEdit, openTrackEdit } from "./trackEdit";
 import { tracksToEdit } from "@shared/cdj";
 
 function fmtClock(sec: number): string {
@@ -430,6 +430,7 @@ export function Modals() {
 	const exportUi = useStore((s) => s.exportUi);
 	const pendingDelete = useStore((s) => s.pendingDelete);
 	const pendingDuplicate = useStore((s) => s.pendingDuplicate);
+	const editReplace = useStore((s) => s.editReplace);
 	const doc = useStore((s) => s.doc);
 	const item = queue[0];
 	const editTrack = doc.tracks.find((t) => t.id === trackBpmEdit);
@@ -542,6 +543,22 @@ export function Modals() {
 			</Modal>
 		);
 	}
+	if (editReplace) {
+		return (
+			<Modal onClose={cancelEditReplace} onEnter={confirmEditReplace} testId="edit-replace-modal">
+				<h3>Replace what is in the editor?</h3>
+				<p className="muted">Its current clips will be lost.</p>
+				<div className="buttons">
+					<button className="ghost" onClick={cancelEditReplace}>
+						Cancel
+					</button>
+					<button className="primary" data-testid="edit-replace-confirm" onClick={confirmEditReplace}>
+						Replace
+					</button>
+				</div>
+			</Modal>
+		);
+	}
 	if (exportUi) return <ExportModal />;
 	return null;
 }
@@ -602,7 +619,7 @@ export function ClipMenu() {
 				{item("Delete", deleteSelection, { hint: "⌫", testId: "menu-delete" })}
 				<hr />
 				{track && toEdit && item("Edit automatically", () => openAutoEdit(track.id), { testId: "menu-auto-edit" })}
-				{track && item("Edit", () => openTrackEdit(track.id), { testId: "menu-edit" })}
+				{track && item("Add to editor", () => openTrackEdit(track.id), { testId: "menu-edit" })}
 				{track && item("Change track BPM…", () => store.set({ trackBpmEdit: track.id }), { testId: "menu-bpm" })}
 				{track && media?.state === "error" && item("Try again", () => retryMedia(track, doc.bpm))}
 				{track && media?.state === "error" && item("Locate file…", () => void relocateTrack(track.id))}

@@ -1,5 +1,5 @@
-// The track editor in the bottom part of the window: a track of the set is cut into
-// sections, rearranged, and exported to the folder from the settings as the source's own
+// The track editor in the bottom part of the window: tracks of the set are put on its one lane,
+// cut into sections, moved about (over each other too), and exported to the folder from the settings as the source's own
 // samples. The export comes back into a set with its parent's beat grid.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -30,7 +30,7 @@ const SR = 44100;
 const DOWNBEAT = 0.1; // seconds: the track's first beat
 const LEAD = (DOWNBEAT * BPM) / 60; // the same in beats
 const frameAt = (beat: number): number => Math.round(((beat * 60) / BPM) * SR);
-const sections = (): Promise<{ id: string; startBeat: number; lengthBeat: number; gapBeat?: number; src?: number }[]> => state(h.page, "s => s.trackEdit.sections");
+const sections = (): Promise<{ id: string; startBeat: number; lengthBeat: number; atBeat: number; src?: number }[]> => state(h.page, "s => s.trackEdit.sections");
 const setCursor = (beat: number): Promise<unknown> => state(h.page, `s => { window.planner.store.set({ trackEdit: { ...s.trackEdit, cursorBeat: ${beat} } }); return 0; }`);
 
 function audioOf(file: string): { sampleRate: number; bits: number; channels: number; frames: number; data: Buffer } {
@@ -63,15 +63,16 @@ afterAll(async () => {
 });
 
 describe("track editor", () => {
-	it("opens a track from its clip's menu, as one section after the lead-in", async () => {
+	it("adds a track to the editor from its clip's menu, as one section, the whole track", async () => {
 		await h.page.getByTestId("track-editor-empty").waitFor();
 		await h.page.locator('[data-testid="clip"]').first().click({ button: "right", position: { x: 50, y: 40 } });
+		expect(await h.page.getByTestId("menu-edit").textContent()).toBe("Add to editor");
 		await h.page.getByTestId("menu-edit").click();
 		await h.page.getByTestId("track-editor").waitFor();
 		expect(await h.page.getByTestId("edit-name").textContent()).toBe("parent");
 		const s = await sections();
 		expect(s).toHaveLength(1);
-		expect(s[0].startBeat).toBeCloseTo(LEAD, 6);
+		expect(s[0]).toMatchObject({ startBeat: 0, atBeat: 0 });
 		expect(await h.page.getByTestId("edit-section").count()).toBe(1);
 		await shot(h.page, "trackedit-01-open");
 	});
@@ -81,13 +82,19 @@ describe("track editor", () => {
 		await h.page.getByTestId("edit-cut").click();
 		await setCursor(LEAD + 64);
 		await h.page.getByTestId("edit-cut").click();
-		expect((await sections()).map((s) => Math.round(s.startBeat - LEAD))).toEqual([0, 32, 64]);
+		expect((await sections()).map((s) => Math.round(s.startBeat))).toEqual([0, 32, 64]);
 		// Copy the middle section and take the copy away again, by keyboard.
 		await h.page.getByTestId("edit-section").nth(1).click();
 		await h.page.keyboard.press("Meta+d");
-		expect((await sections()).map((s) => Math.round(s.startBeat - LEAD))).toEqual([0, 32, 32, 64]);
+		const copied = await sections();
+		expect(copied.map((s) => Math.round(s.startBeat))).toEqual([0, 32, 64, 32]);
+		// The copy goes right after it, over the section that was there: both show, on rows of their own.
+		expect(copied[3].atBeat).toBeCloseTo(LEAD + 64, 6);
+		const tops = await h.page.getByTestId("edit-section").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().top));
+		expect(new Set(tops).size).toBe(2);
+		await shot(h.page, "trackedit-01b-overlap");
 		await h.page.keyboard.press("Backspace");
-		expect((await sections()).map((s) => Math.round(s.startBeat - LEAD))).toEqual([0, 32, 64]);
+		expect((await sections()).map((s) => Math.round(s.startBeat))).toEqual([0, 32, 64]);
 		await h.page.keyboard.press("Meta+z");
 		await h.page.keyboard.press("Meta+z");
 		expect(await sections()).toHaveLength(3);
@@ -121,55 +128,29 @@ describe("track editor", () => {
 		expect(await state(h.page, "s => s.doc.clips.length")).toBe(1);
 	});
 
-	it("moves a section by dragging it; the others close up around it", async () => {
-		const last = (await h.page.getByTestId("edit-section").nth(2).boundingBox())!;
-		const row = (await h.page.getByTestId("edit-row").boundingBox())!;
-		const y = last.y + last.height / 2;
-		await h.page.mouse.move(last.x + last.width / 2, y);
-		await h.page.mouse.down();
-		await h.page.mouse.move(last.x + last.width / 2 - 30, y, { steps: 3 });
-		await h.page.mouse.move(row.x + 3, y, { steps: 6 });
-		await h.page.mouse.up();
-		const s = await sections();
-		expect(s.map((x) => Math.round(x.startBeat - LEAD))).toEqual([64, 0, 32]);
-		await shot(h.page, "trackedit-02-rearranged");
-	});
-
-	it("moves a section later in time with Option held, leaving silence, and never overlaps", async () => {
-		const before = await sections();
-		const out = (): Promise<number[]> => state(h.page, "s => window.planner.placeEdit(s.trackEdit).map((p) => p.outBeat)");
-		const at = await out();
-		const mid = (await h.page.getByTestId("edit-section").nth(1).boundingBox())!;
+	it("moves a section anywhere along the lane by dragging it, over the others or past them", async () => {
 		const px: number = await state(h.page, "s => window.planner.editPx(s.trackEdit)");
-		const y = mid.y + mid.height / 2;
-		await h.page.mouse.move(mid.x + mid.width / 2, y);
-		await h.page.mouse.down();
-		await h.page.keyboard.down("Alt");
-		await h.page.mouse.move(mid.x + mid.width / 2 + 2 * px, y, { steps: 3 });
-		await h.page.mouse.move(mid.x + mid.width / 2 + 8 * px, y, { steps: 6 });
-		await h.page.mouse.up();
-		await h.page.keyboard.up("Alt");
+		const drag = async (beats: number): Promise<void> => {
+			const last = (await h.page.getByTestId("edit-section").nth(2).boundingBox())!;
+			const y = last.y + last.height / 2;
+			await h.page.mouse.move(last.x + last.width / 2, y);
+			await h.page.mouse.down();
+			await h.page.mouse.move(last.x + last.width / 2 + Math.sign(beats) * 10, y, { steps: 3 });
+			await h.page.mouse.move(last.x + last.width / 2 + beats * px, y, { steps: 6 });
+			await h.page.mouse.up();
+		};
+		// Back over the middle one: they overlap, and the others stay where they are.
+		await drag(-16);
 		let s = await sections();
-		// Same order, the second section 8 beats later with silence before it, and the third
-		// pushed along so the two do not overlap.
-		expect(s.map((x) => x.id)).toEqual(before.map((x) => x.id));
-		expect(s.map((x) => x.gapBeat ?? 0)).toEqual([0, 8, 0]);
-		let now = await out();
-		expect(now[1] - at[1]).toBeCloseTo(8, 6);
-		expect(now[2] - at[2]).toBeCloseTo(8, 6);
-		// Option+Left moves it back a beat; the silence before the third section stays put.
-		await h.page.keyboard.press("Alt+ArrowLeft");
+		expect(s.map((x) => Math.round(x.atBeat))).toEqual([0, 32, 48]);
+		await shot(h.page, "trackedit-02-overlapping");
+		await h.page.keyboard.press("Meta+z");
+		// Later, leaving silence before it.
+		await drag(8);
 		s = await sections();
-		expect(s.map((x) => x.gapBeat ?? 0)).toEqual([0, 7, 1]);
-		now = await out();
-		expect(now[2] - at[2]).toBeCloseTo(8, 6);
+		expect(s[2].atBeat).toBeCloseTo(LEAD + 72, 6);
+		expect(s[1].atBeat).toBeCloseTo(LEAD + 32, 6);
 		await shot(h.page, "trackedit-02b-silence");
-		// Never earlier than the section before it ends.
-		for (let i = 0; i < 12; i++) await h.page.keyboard.press("Alt+ArrowLeft");
-		expect((await out())[1]).toBeCloseTo(at[1], 6);
-		// One undo step for the drag and one for each Option+Left that moved it (8).
-		for (let i = 0; i < 9; i++) await h.page.keyboard.press("Meta+z");
-		expect(await sections()).toEqual(before);
 	});
 
 	it("previews the edit with Space, on its own, and stops when the set plays", async () => {
@@ -207,18 +188,15 @@ describe("track editor", () => {
 		expect({ sampleRate: b.sampleRate, bits: b.bits, channels: b.channels }).toEqual({ sampleRate: a.sampleRate, bits: a.bits, channels: a.channels });
 		const fb = (a.bits / 8) * a.channels;
 		const n = Math.round(JOIN_SEC * SR);
-		const lead = frameAt(LEAD);
-		// The lead-in is still at the start, so the first beat is where the parent's is...
-		expect(b.data.subarray(0, (lead - n) * fb).equals(a.data.subarray(0, (lead - n) * fb))).toBe(true);
-		// ...and from that beat on it is the section that was dragged to the front, sample for
-		// sample: the last one, which gave up its part beat (63 beats), then the first.
-		const from = frameAt(LEAD + 64);
-		const len = frameAt(LEAD + 63) - lead - n;
-		expect(b.data.subarray(lead * fb, (lead + len) * fb).equals(a.data.subarray(from * fb, (from + len) * fb))).toBe(true);
-		const second = frameAt(LEAD + 63);
-		expect(b.data.subarray(second * fb, (second + 20000) * fb).equals(a.data.subarray(lead * fb, (lead + 20000) * fb))).toBe(true);
-		// Nothing overlaps: the length is the sum of the sections.
-		expect(b.frames).toBe(frameAt(LEAD + 63 + 64));
+		// The first two sections were never moved: the parent as it was, lead-in and all...
+		const gap = frameAt(LEAD + 64);
+		expect(b.data.subarray(0, (gap - n) * fb).equals(a.data.subarray(0, (gap - n) * fb))).toBe(true);
+		// ...then the 8 beats of silence the last section was dragged away by...
+		const back = frameAt(LEAD + 72);
+		expect(b.data.subarray(gap * fb, (back - n) * fb).every((x) => x === 0)).toBe(true);
+		// ...and the last section, sample for sample, to the end of the parent.
+		expect(b.data.subarray(back * fb).equals(a.data.subarray(gap * fb))).toBe(true);
+		expect(b.frames).toBe(back + a.frames - gap);
 		expect(readGridTag(exported)).toEqual({ bpm: BPM, downbeatSec: DOWNBEAT });
 		// A second export does not overwrite the first.
 		await h.page.evaluate(() => (window as any).planner.exportTrackEdit());
@@ -255,7 +233,7 @@ describe("track editor", () => {
 		}, file);
 		await expect.poll(() => h.page.getByTestId("edit-name").textContent()).toBe("parent (edit)");
 		expect(await h.page.getByTestId("import-modal").count()).toBe(0);
-		const t = await state<{ sourcePath: string; bpm: number; downbeatSec: number }>(h.page, "s => s.trackEdit.track");
+		const t = await state<{ sourcePath: string; bpm: number; downbeatSec: number }>(h.page, "s => s.trackEdit.tracks[0]");
 		expect(t.sourcePath).toBe(file);
 		expect(t.bpm).toBe(BPM);
 		expect(t.downbeatSec).toBeCloseTo(DOWNBEAT, 9);
@@ -265,62 +243,42 @@ describe("track editor", () => {
 		await expect.poll(() => h.page.getByTestId("edit-play").isEnabled(), { timeout: 60000 }).toBe(true);
 	});
 
-	it("puts a second track on a lane of its own, and its pieces go into the edit", async () => {
-		// The exported edit is open; the parent comes in next to it.
+	it("adds another track at the end of the same lane, on its bar lines, and exports both as one file", async () => {
+		// The exported edit is open; the parent goes after it.
 		const id = await state<string>(h.page, "s => s.doc.tracks.find((t) => t.name === 'parent').id");
-		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
-		await h.page.getByTestId("edit-source-1").waitFor();
-		expect(await h.page.getByTestId("edit-name").textContent()).toBe("parent (edit)");
-		expect(await state<string>(h.page, "s => s.trackEdit.second.name")).toBe("parent");
-		expect(await state(h.page, "s => s.trackEdit.lane")).toBe(1);
 		const before = await sections();
-		// Cuts on the parent's lane, 16 and 32 beats in: three pieces, and the edit as it was.
-		for (const beat of [16, 32]) {
-			await state(h.page, `s => { window.planner.store.set({ trackEdit: { ...s.trackEdit, lane: 1, cursorBeat: ${LEAD + beat} } }); return 0; }`);
-			await h.page.getByTestId("edit-cut").click();
-		}
-		const pieces = h.page.locator('[data-testid="edit-source-1"] [data-testid="edit-piece"]');
-		expect(await pieces.count()).toBe(3);
-		expect(await sections()).toEqual(before);
-		const added = async (): Promise<void> => {
-			const now = await sections();
-			expect(now).toHaveLength(before.length + 1);
-			expect(now[now.length - 1].src).toBe(1);
-			expect(now[now.length - 1].lengthBeat).toBeCloseTo(16, 6);
-			expect(now[now.length - 1].startBeat).toBeCloseTo(LEAD + 16, 6);
-			// The parent's lane shows which stretch of it is in the edit.
-			expect(await h.page.locator('[data-testid="edit-source-1"] .edit-used').count()).toBe(1);
-		};
-		// The middle piece goes on the end of the edit with the button.
-		await pieces.nth(1).click();
-		await h.page.getByTestId("edit-add").click();
-		await added();
-		await h.page.keyboard.press("Meta+z");
-		expect(await sections()).toEqual(before);
-		// And by dragging it down to the end of the edit's lane, which shows where it would land.
-		const from = (await pieces.nth(1).boundingBox())!;
-		const row = (await h.page.getByTestId("edit-row").boundingBox())!;
-		await h.page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-		await h.page.mouse.down();
-		await h.page.mouse.move(row.x + row.width - 6, row.y + row.height / 2, { steps: 8 });
-		expect(await h.page.locator(".edit-section.incoming").count()).toBe(1);
-		await h.page.mouse.up();
-		await added();
+		const end = before[0].atBeat + before[0].lengthBeat;
+		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
+		await expect.poll(() => h.page.getByTestId("edit-name").textContent()).toBe("parent (edit) + parent");
+		expect(await h.page.getByTestId("edit-section").count()).toBe(2);
+		const s = await sections();
+		const added = s[1];
+		expect(added).toMatchObject({ src: 1, startBeat: 0 });
+		// After the end, on the next bar line: both tracks have the same grid.
+		expect(added.atBeat).toBeGreaterThanOrEqual(end - 1e-6);
+		expect(added.atBeat - end).toBeLessThan(4);
+		expect(Math.abs(added.atBeat / 4 - Math.round(added.atBeat / 4))).toBeLessThan(1e-6);
+		expect(await state(h.page, "s => s.trackEdit.selection")).toEqual([added.id]);
 		await shot(h.page, "trackedit-07-two-tracks");
+		// Laid over the end of the first one, both are in the file, which is as long as the lane.
+		// Four grid steps back: at least four beats, more than the room it was put after.
+		for (let i = 0; i < 4; i++) await h.page.keyboard.press("Alt+ArrowLeft");
+		const moved = (await sections())[1];
+		expect(moved.atBeat).toBeLessThan(end);
 		const out: string = await h.page.evaluate(() => (window as any).planner.exportTrackEdit());
 		expect(fs.existsSync(out)).toBe(true);
-		// Taking the parent out of the editor takes its piece out of the edit.
-		await h.page.getByTestId("edit-remove-1").click();
-		expect(await state(h.page, "s => s.trackEdit.second")).toBeNull();
+		expect(audioOf(out).frames).toBe(frameAt(moved.atBeat) + audioOf(source).frames);
+		// Undo takes the parent back out of the editor.
+		for (let i = 0; i < 5; i++) await h.page.keyboard.press("Meta+z");
 		expect(await sections()).toEqual(before);
-		expect(await h.page.getByTestId("edit-source-0").count()).toBe(0);
+		expect(await state<number>(h.page, "s => s.trackEdit.tracks.length")).toBe(1);
 		// The parent on its own again, for the tests that follow.
 		await h.page.getByTestId("edit-close").click();
 		await h.page.evaluate((t) => (window as any).planner.openTrackEdit(t), id);
 		await h.page.getByTestId("edit-section").first().waitFor();
 	});
 
-	it("sends the selected clips of one file to the editor with Cmd+E, cut up and spaced as on the timeline", async () => {
+	it("sends the selected clips to the editor with Cmd+E, once it is agreed that they replace what is open", async () => {
 		// Two pieces of the parent, the later part first, four beats apart; and a clip of another file.
 		const ids = await h.page.evaluate((lead) => {
 			const { store } = (window as any).planner;
@@ -333,21 +291,32 @@ describe("track editor", () => {
 			store.set({ selection: [a.id, b.id, other.id], editFocus: false });
 			return { other: other.id };
 		}, LEAD);
-		// Clips of two files: both open, the other file as the second track, and no export dialog.
+		const opened = await sections();
+		// The editor has something open: Cmd+E asks first, and Cancel leaves it alone.
 		await h.page.keyboard.press("Meta+e");
-		await expect.poll(() => state(h.page, "s => !!s.trackEdit?.second")).toBe(true);
-		const both = await state(h.page, "s => ({ srcs: s.trackEdit.sections.map(x => x.src ?? 0), links: s.trackEdit.auto.links.map(l => l.clipId) })");
+		await h.page.getByTestId("edit-replace-modal").waitFor();
+		await h.page.getByTestId("edit-replace-modal").getByText("Cancel").click();
+		expect(await h.page.getByTestId("edit-replace-modal").count()).toBe(0);
+		expect(await sections()).toEqual(opened);
+		expect(await state(h.page, "s => !!s.trackEdit.auto")).toBe(false);
+		// Clips of two files: both are in the edit, and no export dialog.
+		await h.page.keyboard.press("Meta+e");
+		await h.page.getByTestId("edit-replace-confirm").click();
+		await expect.poll(() => state(h.page, "s => s.trackEdit.tracks.length")).toBe(2);
+		const both = await state<{ srcs: number[]; links: string[] }>(h.page, "s => ({ srcs: s.trackEdit.sections.map(x => x.src ?? 0), links: s.trackEdit.auto.links.map(l => l.clipId) })");
 		expect([...new Set(both.srcs)].sort()).toEqual([0, 1]);
 		expect(both.links.sort()).toEqual(["ce-a", "ce-b", ids.other].sort());
 		expect(await state(h.page, "s => s.exportUi")).toBeFalsy();
 		// Clips of one file open it, arranged the same way.
 		await h.page.evaluate(() => (window as any).planner.store.set({ selection: ["ce-a", "ce-b"], editFocus: false }));
 		await h.page.keyboard.press("Meta+e");
+		await h.page.getByTestId("edit-replace-confirm").click();
 		await expect.poll(() => h.page.getByTestId("edit-name").textContent()).toBe("parent");
 		const got = await sections();
-		expect(got.map((x) => [x.startBeat - LEAD, x.lengthBeat, x.gapBeat ?? 0].map((v) => Math.round(v * 1e6) / 1e6))).toEqual([
-			[8, 8, 0],
-			[0, 4, 4],
+		// The second starts with the parent's lead-in, so its first beat is on the edit's grid.
+		expect(got.map((x) => [x.startBeat, x.lengthBeat, x.atBeat].map((v) => Math.round(v * 1e6) / 1e6))).toEqual([
+			[LEAD + 8, 8, LEAD].map((v) => Math.round(v * 1e6) / 1e6),
+			[0, LEAD + 4, 12].map((v) => Math.round(v * 1e6) / 1e6),
 		]);
 		expect(await state(h.page, "s => s.editFocus")).toBe(true);
 		// Exported, the edit takes the two clips' place as one clip, playing straight through; the

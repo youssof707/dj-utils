@@ -251,8 +251,8 @@ export function PlaylistBar() {
 		if (!status?.linked) return;
 		setSyncing(true);
 		try {
-			await window.api.syncPlaylist(setId, paths);
-			if (status.missing.length) toast(`Not in Rekordbox, left out: ${status.missing.join(", ")}`);
+			const gone = await window.api.syncPlaylist(setId, paths);
+			if (gone.length) toast(`File missing, left out: ${gone.join(", ")}`);
 		} catch (e) {
 			toast(errorText(e));
 		} finally {
@@ -270,7 +270,7 @@ export function PlaylistBar() {
 						<Picker status={status} setId={setId} onChanged={refresh} />
 						{status.missing.length > 0 && (
 							<span className="sync-missing" data-testid="sync-missing">
-								{status.missing.length} not in Rekordbox
+								{status.missing.length} new to Rekordbox
 							</span>
 						)}
 						{status.linked && (

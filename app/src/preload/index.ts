@@ -31,7 +31,7 @@ const api = {
 	playlistStatus: (setId: string, paths: string[]): Promise<PlaylistStatus | null> => ipcRenderer.invoke("planner:playlist-status", setId, paths),
 	linkPlaylist: (setId: string, playlistId: string | null): Promise<void> => ipcRenderer.invoke("planner:playlist-link", setId, playlistId),
 	createPlaylist: (setId: string, name: string): Promise<void> => ipcRenderer.invoke("planner:playlist-create", setId, name),
-	syncPlaylist: (setId: string, paths: string[]): Promise<void> => ipcRenderer.invoke("planner:playlist-sync", setId, paths),
+	syncPlaylist: (setId: string, paths: string[]): Promise<string[]> => ipcRenderer.invoke("planner:playlist-sync", setId, paths),
 	cues: (path: string): Promise<CueInfo> => ipcRenderer.invoke("planner:cues", path),
 	// These write to Rekordbox's own database at once. `kind` 0 is a memory cue, 1 to 8 the
 	// hot cues A to H; a hot cue takes the place of the one already on its letter.

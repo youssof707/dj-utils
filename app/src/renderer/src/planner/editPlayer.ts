@@ -1,9 +1,8 @@
-// Preview for the track editor: plays the sections in their new order (or, with two tracks
-// open, one of them as it is) at the editor's tempo (the first track's own, unless changed),
-// so an arrangement can be heard before it is exported. The export itself never uses this audio; it reads the source file.
+// Preview for the track editor: plays the lane, overlaps and all, at the editor's tempo (the
+// first track's own, unless changed), so an arrangement can be heard before it is exported. The export itself never uses this audio; it reads the source file.
 
 import { trackBeats } from "@shared/planner";
-import { leadBeat, place, secondOffset, srcOf, totalBeats } from "@shared/trackEdit";
+import { place, srcOf, totalBeats } from "@shared/trackEdit";
 import { engine } from "./engine";
 import { mediaFor } from "./media";
 import { store } from "./store";
@@ -60,34 +59,20 @@ export async function playEditPreview(): Promise<void> {
 	const e = s.trackEdit;
 	if (!e) return;
 	engine.stopPreviews(stopEditPreview);
-	// What plays, in order. On the result: the lead-in, then each section, with silence where
-	// there is a gap; sections that follow each other in their track as well, with no gap, play
-	// as one stretch. On a track's own lane: that track, as it is.
-	const lead = leadBeat(e.track);
+	// What plays: each section, with sections that follow each other in their track as well as
+	// on the lane played as one stretch.
 	const runs: { outBeat: number; srcBeat: number; length: number; src: number }[] = [];
-	const source = e.lane === "out" ? null : e.lane === 0 ? e.track : e.second;
-	let total: number;
-	if (e.lane !== "out" && source) {
-		const off = e.lane === 1 && e.second ? secondOffset(e.track, e.second) : 0;
-		runs.push({ outBeat: off, srcBeat: 0, length: trackBeats(source), src: e.lane });
-		total = off + trackBeats(source);
-	} else {
-		const placed = place(lead, e.sections);
-		// The lead-in is the first track's: an edit that opens with the other track starts silent.
-		if (lead > 0 && (placed.length === 0 || srcOf(placed[0].section) === 0)) runs.push({ outBeat: 0, srcBeat: 0, length: lead, src: 0 });
-		for (const p of placed) {
-			const last = runs[runs.length - 1];
-			const src = srcOf(p.section);
-			if (last && last.src === src && Math.abs(last.srcBeat + last.length - p.section.startBeat) < 1e-6 && Math.abs(last.outBeat + last.length - p.outBeat) < 1e-6) last.length += p.lengthBeat;
-			else runs.push({ outBeat: p.outBeat, srcBeat: p.section.startBeat, length: p.lengthBeat, src });
-		}
-		total = totalBeats(lead, e.sections);
+	for (const p of place(e.sections)) {
+		const src = srcOf(p.section);
+		const prev = runs.find((r) => r.src === src && Math.abs(r.srcBeat + r.length - p.section.startBeat) < 1e-6 && Math.abs(r.outBeat + r.length - p.outBeat) < 1e-6);
+		if (prev) prev.length += p.lengthBeat;
+		else runs.push({ outBeat: p.outBeat, srcBeat: p.section.startBeat, length: p.lengthBeat, src });
 	}
+	const total = totalBeats(e.sections);
 	// Each track's audio at the editor's tempo.
-	const tracks = [e.track, e.second];
-	const paths: (string | null)[] = [null, null];
+	const paths: (string | null)[] = e.tracks.map(() => null);
 	for (const src of new Set(runs.map((r) => r.src))) {
-		const t = tracks[src];
+		const t = e.tracks[src];
 		const media = t ? mediaFor(t, e.bpm) : null;
 		if (media?.state !== "ready") {
 			store.set({ trackEdit: { ...e, error: "The track's audio is not ready to play yet" } });
@@ -115,7 +100,7 @@ export async function playEditPreview(): Promise<void> {
 	fromBeat = e.cursorBeat >= total - 1e-6 ? 0 : Math.max(0, e.cursorBeat);
 	t0 = ctx.currentTime + 0.08;
 	const clock = (beat: number): number => t0 + (beat - fromBeat) * secPerBeat;
-	runs.forEach((r, i) => {
+	runs.forEach((r) => {
 		const endBeat = r.outBeat + r.length;
 		if (endBeat <= fromBeat + 1e-6) return;
 		const startBeat = Math.max(r.outBeat, fromBeat);
@@ -124,14 +109,15 @@ export async function playEditPreview(): Promise<void> {
 		const offset = (r.srcBeat + (startBeat - r.outBeat)) * secPerBeat;
 		// A join: this run fades in over the moment before it, from the audio that led up to
 		// it in the track, while the run before fades out.
-		const pre = i > 0 && startBeat === r.outBeat ? Math.min(JOIN_SEC, offset, when - ctx.currentTime - 0.01) : 0;
+		const pre = startBeat === r.outBeat ? Math.min(JOIN_SEC, offset, when - ctx.currentTime - 0.01) : 0;
 		const src = new AudioBufferSourceNode(ctx, { buffer: bufs[r.src]! });
 		const gain = new GainNode(ctx, { gain: 1 });
 		if (pre > 0) {
 			gain.gain.setValueAtTime(0, when - pre);
 			gain.gain.linearRampToValueAtTime(1, when);
 		}
-		if (i < runs.length - 1) {
+		// It fades out at its end, unless it runs to the end of its track.
+		if (r.srcBeat + r.length < trackBeats(e.tracks[r.src]) - 1e-6) {
 			gain.gain.setValueAtTime(1, Math.max(when, endAt - JOIN_SEC));
 			gain.gain.linearRampToValueAtTime(0, endAt);
 		}

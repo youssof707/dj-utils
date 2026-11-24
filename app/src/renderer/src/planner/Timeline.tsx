@@ -724,33 +724,8 @@ function Lanes({ width }: { width: number }) {
 		window.addEventListener("keydown", key, true);
 	};
 
-	// With exactly one clip selected, a click on an empty spot of a clip lane puts a copy of
-	// it there, trimmed the same way, and selects the copy (so more clicks keep stamping).
-	// The copy's left edge goes where the click was, snapped like a move: by its bar line for
-	// a Rekordbox track. False when the click was not for this.
-	const stampCopy = (clickBeat: number, clientY: number, e: { altKey: boolean }): boolean => {
-		const s = store.get();
-		if (s.selection.length !== 1) return false;
-		const clip = s.doc.clips.find((c) => c.id === s.selection[0]);
-		const row = rowAt(clientY);
-		if (!clip || row === TEMPO_ROW) return false;
-		const track = s.doc.tracks.find((t) => t.id === clip.trackId);
-		const bar = track ? firstBarBeat(track) : null;
-		const lead = bar !== null ? bar - clip.offsetBeat : 0; // clip start to its grid anchor
-		let start = snap(clickBeat + lead, e) - lead;
-		if (start < 0) {
-			const step = bar !== null ? snapStep(e) : 0;
-			start = step ? Math.ceil(lead / step - 1e-9) * step - lead : 0;
-		}
-		const copy: Clip = { ...clip, id: newId("c"), lane: row, startBeat: start };
-		store.commit({ ...s.doc, clips: [...s.doc.clips, copy] });
-		store.set({ selection: [copy.id] });
-		return true;
-	};
-
-	// Click on empty space moves the playhead (or, with one clip selected, stamps a copy of
-	// it there; see stampCopy); ⌘-click only clears the selection; dragging draws a box that
-	// selects clips and tempo changes.
+	// Click on empty space moves the playhead; ⌘-click only clears the selection; dragging
+	// draws a box that selects clips and tempo changes.
 	const onBackgroundDown = (e: ReactPointerEvent): void => {
 		if (e.button !== 0) return;
 		store.set({ menu: null });
@@ -789,12 +764,11 @@ function Lanes({ width }: { width: number }) {
 			window.removeEventListener("pointerup", up);
 			if (boxRef.current) boxRef.current.style.display = "none";
 			if (!moved) {
-				// ⌘-click: only clears the selection; no copy, and the playhead stays put.
+				// ⌘-click: only clears the selection; the playhead stays put.
 				if (e.metaKey) {
 					store.set({ selection: [] });
 					return;
 				}
-				if (!e.shiftKey && stampCopy(startBeat, sy, e)) return;
 				if (!e.shiftKey) store.set({ selection: [] });
 				engine.seek(Math.max(0, snap(startBeat, e)));
 			}

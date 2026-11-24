@@ -1,7 +1,7 @@
 // Worker thread entry: one task per worker, so heavy audio work never blocks the app.
 import { parentPort, workerData } from "node:worker_threads";
 import fs from "node:fs";
-import { backupDatabase, changeCues, changeTags, createPlaylist, fillPlaylist, matchTrack, readCues, readLibrary, scanLibrary, type CueChangeJob, type LibraryEntry } from "../rekordbox";
+import { addTracks, backupDatabase, changeCues, changeTags, createPlaylist, fillPlaylist, matchTrack, readCues, readLibrary, scanLibrary, type CueChangeJob, type LibraryEntry, type NewTrack } from "../rekordbox";
 import { computePeaks, exportSet, killChildren, renderRamp, stretchFile, type ExportJob, type RampJob } from "./dsp";
 import { exportEdit, type EditExportJob } from "./splice";
 import { WavReader } from "./wav";
@@ -11,7 +11,7 @@ export type PrepareJob = { decodedPath: string; outPath: string; peaksPath: stri
 export type PeaksJob = { wavPath: string; peaksPath: string };
 export type ScanJob = { root: string; cachePath: string };
 export type MatchJob = { decodedPath: string; candidates: LibraryEntry[] };
-export type Task = { type: "edit-export"; job: EditExportJob } | { type: "prepare"; job: PrepareJob } |{ type: "ramp"; job: RampJob } | { type: "peaks"; job: PeaksJob } | { type: "export"; job: ExportJob } | { type: "rekordbox-scan"; job: ScanJob } | { type: "rekordbox-match"; job: MatchJob } | { type: "rekordbox-cues"; job: { dbPath: string } } | { type: "rekordbox-library"; job: { dbPath: string } } | { type: "rekordbox-cue-change"; job: { bin: string; dbPath: string; change: CueChangeJob } } | { type: "rekordbox-tag-change"; job: { bin: string; dbPath: string; change: TagChange } } | { type: "rekordbox-playlist-create"; job: { bin: string; dbPath: string; name: string } } | { type: "rekordbox-playlist-fill"; job: { bin: string; dbPath: string; playlistId: string; tracks: string[] } };
+export type Task = { type: "edit-export"; job: EditExportJob } | { type: "prepare"; job: PrepareJob } |{ type: "ramp"; job: RampJob } | { type: "peaks"; job: PeaksJob } | { type: "export"; job: ExportJob } | { type: "rekordbox-scan"; job: ScanJob } | { type: "rekordbox-match"; job: MatchJob } | { type: "rekordbox-cues"; job: { dbPath: string } } | { type: "rekordbox-library"; job: { dbPath: string } } | { type: "rekordbox-cue-change"; job: { bin: string; dbPath: string; change: CueChangeJob } } | { type: "rekordbox-tag-change"; job: { bin: string; dbPath: string; change: TagChange } } | { type: "rekordbox-playlist-create"; job: { bin: string; dbPath: string; name: string } } | { type: "rekordbox-playlist-fill"; job: { bin: string; dbPath: string; playlistId: string; tracks: string[] } } | { type: "rekordbox-tracks-add"; job: { bin: string; dbPath: string; tracks: NewTrack[] } };
 
 const post = (m: unknown): void => parentPort!.postMessage(m);
 
@@ -75,6 +75,10 @@ async function main(): Promise<unknown> {
 	if (task.type === "rekordbox-playlist-fill") {
 		backupDatabase(task.job.dbPath);
 		return fillPlaylist(task.job.bin, task.job.dbPath, task.job.playlistId, task.job.tracks);
+	}
+	if (task.type === "rekordbox-tracks-add") {
+		backupDatabase(task.job.dbPath);
+		return addTracks(task.job.bin, task.job.dbPath, task.job.tracks);
 	}
 	if (task.type === "rekordbox-match") return matchTrack(task.job.decodedPath, task.job.candidates);
 	return exportSet(task.job, (stage, pct) => post({ progress: { stage, pct } }));

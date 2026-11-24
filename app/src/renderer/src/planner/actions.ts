@@ -153,8 +153,7 @@ let cueWork: Promise<void> = Promise.resolve();
 function cuePaths(): Set<string> {
 	const s = store.get();
 	const paths = new Set(s.doc.tracks.map((t) => t.sourcePath));
-	if (s.trackEdit) paths.add(s.trackEdit.track.sourcePath);
-	if (s.trackEdit?.second) paths.add(s.trackEdit.second.sourcePath);
+	for (const t of s.trackEdit?.tracks ?? []) paths.add(t.sourcePath);
 	return paths;
 }
 
@@ -184,16 +183,13 @@ export function refreshCues(again: boolean): void {
 // whenever the window comes back to the front.
 export function watchCues(): void {
 	let tracks = store.get().doc.tracks;
-	let edited = store.get().trackEdit?.track;
-	let second = store.get().trackEdit?.second;
+	let edited = store.get().trackEdit?.tracks;
 	store.subscribe(() => {
 		const now = store.get().doc.tracks;
-		const open = store.get().trackEdit?.track;
-		const other = store.get().trackEdit?.second;
-		if (now === tracks && open === edited && other === second) return;
+		const open = store.get().trackEdit?.tracks;
+		if (now === tracks && open === edited) return;
 		tracks = now;
 		edited = open;
-		second = other;
 		refreshCues(false);
 	});
 	window.addEventListener("focus", () => refreshCues(true));

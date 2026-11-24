@@ -1,8 +1,8 @@
 // Which of a set's tracks can not simply be played from a CDJ: loaded once, started, and left
 // to run, they would not be where the set has them. Those need an edit made first.
 
-import type { Clip, Cue, PlannerDoc, PlannerTrack } from "./planner";
-import { clipSections, type EditSection, type Placed } from "./trackEdit";
+import { MEMORY_CUES, type Clip, type Cue, type PlannerDoc, type PlannerTrack } from "./planner";
+import { clipSections, srcOf, type EditSection, type Placed } from "./trackEdit";
 
 // How far, in the track's own time, a clip may start from where the track would be by then.
 export const CDJ_SLACK_SEC = 1;
@@ -47,9 +47,9 @@ export function clipsEdit(tracks: PlannerTrack | PlannerTrack[], clips: Clip[], 
 }
 
 // The set once the edit is exported as `edit`: each linked clip plays the same audio from the
-// new file, where its section went in the edit (`placed`, as exported). Clips whose section is
-// no longer in the edit stay where they were, and a track they came from goes once no clip
-// uses it.
+// new file, where its section went in the edit (`placed`, as exported), and they are then
+// joined into one clip (joinSwapped). Clips whose section is no longer in the edit stay where
+// they were, and a track they came from goes once no clip uses it.
 export function swapInEdit(doc: PlannerDoc, edit: PlannerTrack, links: AutoLink[], placed: Placed<EditSection>[]): { doc: PlannerDoc; moved: { from: Clip; to: Clip }[] } {
 	const at = new Map(placed.map((p) => [p.section.id, p]));
 	const sectionOf = new Map(links.map((l) => [l.clipId, l.sectionId]));
@@ -64,48 +64,44 @@ export function swapInEdit(doc: PlannerDoc, edit: PlannerTrack, links: AutoLink[
 	if (moved.length === 0) return { doc, moved };
 	const from = new Set(moved.map((m) => m.from.trackId));
 	const tracks = [...doc.tracks.filter((t) => !from.has(t.id) || clips.some((c) => c.trackId === t.id)), edit];
-	return { doc: { ...doc, tracks, clips: joinSwapped(clips, moved.map((m) => m.to)) }, moved };
+	return { doc: { ...doc, tracks, clips: joinSwapped(clips, moved.map((m) => m.to), Math.max(...placed.map((p) => p.outBeat + p.lengthBeat))) }, moved };
 }
 
-// The swapped-in clips now play the edit straight through, so those that follow on in it
-// become one clip, on the lane of the first: from the first one's start to the last one's end,
-// the gaps between them being silence in the file. Clips stay apart where the edit no longer
-// lines up with the set (its spacing was changed in the editor), where one cuts the bass and
-// the next does not, or where a fade sits at the join.
-function joinSwapped(clips: Clip[], swapped: Clip[]): Clip[] {
-	const EPS = 1e-6;
+// The swapped-in clips become one clip that plays the edit straight through, uncut: it sits
+// where the clip heard first in the edit sits, on its lane, and runs to the edit's end (`end`,
+// in the edit's beats). It keeps that clip's fade in and bass cut, and the last one's fade out.
+function joinSwapped(clips: Clip[], swapped: Clip[], end: number): Clip[] {
 	const ids = new Set(swapped.map((c) => c.id));
-	const runs: Clip[] = [];
-	for (const c of [...swapped].sort((a, b) => a.startBeat - b.startBeat)) {
-		const last = runs[runs.length - 1];
-		const lines = last && Math.abs(c.startBeat - c.offsetBeat - (last.startBeat - last.offsetBeat)) < EPS;
-		if (lines && !!c.lowCut === !!last.lowCut && !last.fadeOutBeat && !c.fadeInBeat) {
-			const end = Math.max(last.startBeat + last.lengthBeat, c.startBeat + c.lengthBeat);
-			const next: Clip = { ...last, lengthBeat: end - last.startBeat };
-			if (c.fadeOutBeat) next.fadeOutBeat = c.fadeOutBeat;
-			runs[runs.length - 1] = next;
-		} else runs.push(c);
-	}
-	const byFirst = new Map(runs.map((r) => [r.id, r]));
-	return clips.flatMap((c) => (!ids.has(c.id) ? [c] : byFirst.has(c.id) ? [byFirst.get(c.id)!] : []));
+	const byEdit = [...swapped].sort((a, b) => a.offsetBeat - b.offsetBeat || a.startBeat - b.startBeat);
+	const first = byEdit[0];
+	const last = byEdit.reduce((l, c) => (c.offsetBeat + c.lengthBeat > l.offsetBeat + l.lengthBeat ? c : l));
+	const one: Clip = { ...first, lengthBeat: Math.max(first.lengthBeat, end - first.offsetBeat) };
+	delete one.fadeOutBeat;
+	if (last.fadeOutBeat) one.fadeOutBeat = last.fadeOutBeat;
+	return clips.flatMap((c) => (!ids.has(c.id) ? [c] : c.id === first.id ? [one] : []));
 }
 
-// The old track's cues, at the same places in the edit: each cue inside the part of the track
-// a moved clip plays lands where that clip now plays it. A hot cue letter is used once, the
-// first time it comes up in the set (`letters`, shared when there are several old tracks);
-// loops become plain cues.
-export function cuesForEdit(cues: Cue[], oldTrack: PlannerTrack, edit: PlannerTrack, moved: { from: Clip; to: Clip }[], letters = new Set<number>()): { sec: number; kind: number }[] {
-	const out: { sec: number; kind: number }[] = [];
-	for (const { from, to } of [...moved].sort((a, b) => a.from.startBeat - b.from.startBeat)) {
-		for (const c of [...cues].sort((a, b) => a.sec - b.sec)) {
-			const beat = (c.sec * oldTrack.bpm) / 60;
-			if (beat < from.offsetBeat - 1e-6 || beat >= from.offsetBeat + from.lengthBeat) continue;
-			if (c.kind > 0 && letters.has(c.kind)) continue;
-			const sec = ((to.offsetBeat + beat - from.offsetBeat) * 60) / edit.bpm;
-			if (out.some((o) => o.kind === c.kind && Math.abs(o.sec - sec) < 0.003)) continue;
-			if (c.kind > 0) letters.add(c.kind);
-			out.push({ sec, kind: c.kind });
+// The cues of the editor's tracks, at the same places in the exported edit: each cue inside
+// the part of a track a section plays lands where that section plays it. When a hot cue
+// letter comes up more than once, the first in the edit keeps it; memory cues are kept up to
+// Rekordbox's limit, the first ones first. Loops become plain cues. `bpm` is the edit's.
+export function cuesForEdit(placed: Placed<EditSection>[], tracks: { bpm: number; cues: Cue[] }[], bpm: number): { sec: number; kind: number }[] {
+	const all: { sec: number; kind: number }[] = [];
+	for (const p of placed) {
+		const t = tracks[srcOf(p.section)];
+		if (!t) continue;
+		for (const c of t.cues) {
+			const beat = (c.sec * t.bpm) / 60;
+			if (beat < p.section.startBeat - 1e-6 || beat >= p.section.startBeat + p.lengthBeat) continue;
+			all.push({ sec: ((p.outBeat + beat - p.section.startBeat) * 60) / bpm, kind: c.kind });
 		}
+	}
+	const out: { sec: number; kind: number }[] = [];
+	let memory = 0;
+	for (const c of all.sort((a, b) => a.sec - b.sec || a.kind - b.kind)) {
+		if (c.kind > 0 ? out.some((o) => o.kind === c.kind) : memory >= MEMORY_CUES || out.some((o) => o.kind === 0 && Math.abs(o.sec - c.sec) < 0.003)) continue;
+		if (c.kind === 0) memory++;
+		out.push(c);
 	}
 	return out;
 }

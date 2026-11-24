@@ -225,10 +225,12 @@ function PlaylistPicker({ playlists, chosen, onPick }: { playlists: RekordboxPla
 }
 
 const KEYS = ["A", "B"].map((m) => Array.from({ length: 12 }, (_, i) => `${i + 1}${m}`));
-const filtering = (f: LibraryFilter): boolean => f.bpmMin !== null || f.bpmMax !== null || f.keys.length > 0;
+const filtering = (f: LibraryFilter): boolean => f.bpmMin !== null || f.bpmMax !== null || f.keys.length > 0 || f.tags.length > 0;
 
+// Keys: any of the picked ones. Tags: all of them.
 function passes(t: RekordboxTrack, f: LibraryFilter): boolean {
 	if (f.keys.length && !f.keys.includes(t.key.toUpperCase())) return false;
+	if (f.tags.some((id) => !t.tags.includes(id))) return false;
 	if (f.bpmMin === null && f.bpmMax === null) return true;
 	if (!(t.bpm > 0)) return false;
 	const bpm = snapBpm(t.bpm);
@@ -241,7 +243,7 @@ const bpmOf = (text: string): number | null => {
 	return text.trim() && n > 0 ? n : null;
 };
 
-// Next to the playlist: a filter icon that opens the BPM range and keys to show. While a
+// Next to the playlist: a filter icon that opens the BPM range, keys and tags to show. While a
 // filter is on, the icon lights up and an X beside it clears it. At its foot, tag editor
 // mode: the tags picked there show hollow on every row, to add with one click.
 function FilterButton({ filter, tags, canTag }: { filter: LibraryFilter; tags: RekordboxTag[]; canTag: boolean }) {
@@ -279,6 +281,7 @@ function FilterButton({ filter, tags, canTag }: { filter: LibraryFilter; tags: R
 		setOpen(!open);
 	};
 	const pickKey = (k: string): void => set({ keys: filter.keys.includes(k) ? filter.keys.filter((x) => x !== k) : [...filter.keys, k] });
+	const pickTag = (id: string): void => set({ tags: filter.tags.includes(id) ? filter.tags.filter((x) => x !== id) : [...filter.tags, id] });
 
 	return (
 		<div className="library-filter-box" ref={box}>
@@ -315,7 +318,6 @@ function FilterButton({ filter, tags, canTag }: { filter: LibraryFilter; tags: R
 							inputMode="decimal"
 							placeholder="Min"
 							spellCheck={false}
-							autoFocus
 							value={min}
 							onChange={(e) => {
 								setMin(e.target.value);
@@ -347,6 +349,15 @@ function FilterButton({ filter, tags, canTag }: { filter: LibraryFilter; tags: R
 							</div>
 						))}
 					</div>
+					{tags.length > 0 && (
+						<div className="filter-quick" data-testid="filter-tags">
+							{tags.map((t) => (
+								<button key={t.id} className={filter.tags.includes(t.id) ? "on" : ""} data-testid="filter-tag" aria-pressed={filter.tags.includes(t.id)} onClick={() => pickTag(t.id)}>
+									{t.name}
+								</button>
+							))}
+						</div>
+					)}
 					{canTag && (
 						<div className="filter-tagmode">
 							<label className="switch small">

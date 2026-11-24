@@ -652,10 +652,6 @@ button.sync-go.done:disabled {
 	border-bottom: 1px solid var(--line);
 	white-space: nowrap;
 }
-/* The keys act on the editor while it shows this line. */
-.track-editor.focused .edit-head {
-	box-shadow: inset 0 2px 0 var(--accent);
-}
 .edit-title {
 	display: flex;
 	align-items: baseline;
@@ -667,6 +663,7 @@ button.sync-go.done:disabled {
 .edit-name {
 	font-weight: 600;
 	overflow: hidden;
+	white-space: nowrap;
 	text-overflow: ellipsis;
 	max-width: 320px;
 }
@@ -757,124 +754,6 @@ button.sync-go.done:disabled {
 	overflow: hidden;
 	touch-action: none;
 }
-/* Two tracks open: each on a lane of its own, to take pieces from, and the edit under them. */
-.track-editor.multi .edit-row.source {
-	background: rgba(0, 0, 0, 0.22);
-	border-bottom: 1px solid var(--line);
-}
-.track-editor.multi .edit-row.out {
-	flex-grow: 2;
-	border-top: 1px solid var(--line-strong);
-}
-.track-editor.multi .edit-row.active {
-	background-image: linear-gradient(rgba(91, 140, 255, 0.07), rgba(91, 140, 255, 0.07));
-}
-.track-editor.multi .edit-section {
-	top: 5px;
-	bottom: 7px;
-}
-.track-editor.multi .edit-row.out .edit-section {
-	bottom: 14px;
-}
-.edit-section.piece {
-	cursor: grab;
-}
-/* Pieces being dropped into the edit, shown where they would land. */
-.edit-section.incoming {
-	background: hsl(var(--hue) calc(55% * var(--sat, 1)) 45% / 0.35);
-	box-shadow:
-		inset 0 0 0 2px #fff,
-		0 0 0 1px rgba(0, 0, 0, 0.5);
-	z-index: 2;
-}
-/* Under a track's lane: the stretches of it that are in the edit. */
-.edit-used {
-	position: absolute;
-	bottom: 2px;
-	height: 3px;
-	border-radius: 1.5px;
-	background: hsl(var(--hue) calc(80% * var(--sat, 1)) 68%);
-	pointer-events: none;
-	z-index: 2;
-}
-/* Pieces picked up from a track's lane, following the pointer until they are over the edit. */
-.edit-carry {
-	position: fixed;
-	height: 36px;
-	padding: 0 6px;
-	line-height: 36px;
-	font-size: 11px;
-	white-space: nowrap;
-	overflow: hidden;
-	border-radius: 3px;
-	background: hsl(var(--hue) calc(50% * var(--sat, 1)) 40% / 0.55);
-	box-shadow: inset 0 0 0 1px hsl(var(--hue) calc(60% * var(--sat, 1)) 68%);
-	pointer-events: none;
-	z-index: 50;
-}
-.edit-gutter {
-	flex: none;
-	width: 168px;
-	display: flex;
-	flex-direction: column;
-	background: var(--panel);
-	border-right: 1px solid var(--line);
-}
-.edit-lane-head {
-	flex: 1 1 0;
-	min-height: 0;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 0 4px 0 8px;
-	border-bottom: 1px solid var(--line);
-	overflow: hidden;
-	cursor: default;
-	user-select: none;
-}
-.edit-lane-head.out {
-	flex-grow: 2;
-	border-top: 1px solid var(--line-strong);
-	border-bottom: none;
-}
-/* The lane the keys, the cursor and play act on. */
-.edit-lane-head.active {
-	background: var(--panel-2);
-	box-shadow: inset 2px 0 0 var(--accent);
-}
-.edit-lane-key {
-	flex: none;
-	width: 18px;
-	height: 18px;
-	border-radius: 4px;
-	background: hsl(var(--hue) calc(50% * var(--sat, 1)) 42%);
-	color: #fff;
-	font-size: 11px;
-	font-weight: 700;
-	line-height: 18px;
-	text-align: center;
-}
-.edit-lane-head.out .edit-lane-key {
-	background: var(--line-strong);
-}
-.edit-lane-text {
-	flex: 1;
-	min-width: 0;
-	display: flex;
-	flex-direction: column;
-	font-size: 11px;
-	line-height: 15px;
-	font-variant-numeric: tabular-nums;
-}
-.edit-lane-text span {
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.edit-lane-name {
-	font-size: 12px;
-	font-weight: 600;
-}
 /* Bar and beat lines run over the sections, so they show through the waveform. */
 .edit-row .lane-grid {
 	z-index: 3;
@@ -891,12 +770,11 @@ button.sync-go.done:disabled {
 .edit-section.selected {
 	background: hsl(var(--hue) calc(48% * var(--sat, 1)) 38% / 0.2);
 	box-shadow: inset 0 0 0 2px #fff;
-	z-index: 2;
 }
 /* Where one piece or clip starts: a thin gap in the background colour, cut through the waveform
    and the label, so two pieces that touch read as two blocks. The piece's own edge line is
    drawn again just after the gap, so it still shows where nothing touches it. */
-.edit-row.out .edit-section:not(.lead):not(.selected)::before,
+.edit-row.out .edit-section:not(.selected)::before,
 .clip:not(.selected)::before {
 	content: "";
 	position: absolute;
@@ -907,17 +785,6 @@ button.sync-go.done:disabled {
 	background: linear-gradient(to right, var(--bg) 0 2px, hsl(var(--hue) calc(55% * var(--sat, 1)) 55% / 0.8) 2px 3px);
 	pointer-events: none;
 	z-index: 4;
-}
-/* Picked up and on its way to another place. */
-.edit-section.lifted {
-	opacity: 0.45;
-}
-/* The audio before the first beat: always kept at the start, never cut or moved. */
-.edit-section.lead {
-	background: transparent;
-	box-shadow: none;
-	opacity: 0.45;
-	cursor: default;
 }
 .edit-wave {
 	position: absolute;
@@ -935,13 +802,14 @@ button.sync-go.done:disabled {
 	font-size: 11px;
 	white-space: nowrap;
 	overflow: hidden;
-	background: hsl(var(--hue) calc(45% * var(--sat, 1)) 34% / 0.75);
+	/* Solid, and over the lane's grid lines, so they never run through the name. */
+	background: linear-gradient(hsl(var(--hue) calc(45% * var(--sat, 1)) 34% / 0.75), hsl(var(--hue) calc(45% * var(--sat, 1)) 34% / 0.75)), var(--bg);
+	z-index: 4;
 	pointer-events: none;
 	font-variant-numeric: tabular-nums;
 }
 .edit-cursor,
-.edit-playhead,
-.edit-drop {
+.edit-playhead {
 	position: absolute;
 	top: 0;
 	bottom: 0;
@@ -957,12 +825,6 @@ button.sync-go.done:disabled {
 .edit-playhead {
 	background: var(--danger);
 	visibility: hidden;
-}
-.edit-drop {
-	width: 3px;
-	margin-left: -1.5px;
-	background: #fff;
-	z-index: 6;
 }
 .edit-hint {
 	position: absolute;
@@ -1256,6 +1118,7 @@ button.sync-go.done:disabled {
 	color: hsl(var(--hue) calc(75% * var(--sat, 1)) 68%);
 }
 .library-playlist > button {
+	outline: none;
 	display: flex;
 	justify-content: space-between;
 	gap: 8px;
