@@ -16,7 +16,10 @@
 		"typecheck": "npm run typecheck:node && npm run typecheck:web",
 		"test": "vitest run",
 		"test:e2e": "node scripts/e2e.mjs",
-		"icon": "node scripts/gen-icon.mjs build"
+		"icon": "node scripts/gen-icon.mjs build",
+		"demo:voice": "node scripts/demo/voice.ts",
+		"demo:film": "electron-vite build && node scripts/demo/film.ts",
+		"demo:finish": "node scripts/demo/finish.ts"
 	},
 	"devDependencies": {
 		"@electron-toolkit/tsconfig": "^2.0.0",
