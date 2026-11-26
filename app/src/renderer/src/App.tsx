@@ -11,7 +11,7 @@ import { PlaylistBar } from "./planner/PlaylistMode";
 import { closeSettings, Settings } from "./planner/Settings";
 import { store, useStore, type TrackEditUi } from "./planner/store";
 import { Timeline } from "./planner/Timeline";
-import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, quickEditSelectedClips, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
+import { editCut, editDelete, editDuplicate, editNudge, editRedo, editSelect, editSelectAll, editSetCursor, editPx, editSelectedClips, editStepCursor, editToggleBass, quickEditSelectedClips, editUndo, exportTrackEdit, openTrackEdit } from "./planner/trackEdit";
 import { place } from "@shared/trackEdit";
 import { TrackEditor } from "./planner/TrackEditor";
 import { Updater, updateModalOpen } from "./Updater";
@@ -72,8 +72,10 @@ function editorAction(action: string): boolean {
 		case "delete":
 			editDelete();
 			return true;
-		case "mute":
 		case "bass":
+			editToggleBass();
+			return true;
+		case "mute":
 			return true; // nothing to mute in the editor, and the timeline's selection is not meant
 	}
 	return false;

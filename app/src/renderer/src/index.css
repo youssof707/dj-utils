@@ -68,7 +68,9 @@ body.cue-tool .edit-row * {
 body.mute-tool .clip,
 body.mute-tool .clip *,
 body.bass-tool .clip,
-body.bass-tool .clip * {
+body.bass-tool .clip *,
+body.bass-tool .edit-section,
+body.bass-tool .edit-section * {
 	cursor: pointer !important;
 }
 body.dragging-trim,
@@ -629,6 +631,7 @@ button.sync-go.done:disabled {
 
 /* ---- track editor (the bottom area) ---- */
 .edit-empty {
+	position: relative;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -661,6 +664,14 @@ button.sync-go.done:disabled {
 	font-variant-numeric: tabular-nums;
 }
 .edit-name {
+	padding: 2px 4px;
+	margin: 0 -4px;
+	border: none;
+	border-radius: 4px;
+	background: none;
+	color: inherit;
+	font: inherit;
+	cursor: text;
 	font-weight: 600;
 	overflow: hidden;
 	white-space: nowrap;
@@ -700,6 +711,36 @@ button.sync-go.done:disabled {
 .edit-empty.file-over {
 	box-shadow: inset 0 0 0 2px #6d8cff;
 	background-color: rgba(109, 140, 255, 0.08);
+}
+button.edit-name:hover {
+	background: rgba(255, 255, 255, 0.06);
+}
+.edit-name-input {
+	margin: 0 -4px;
+	padding: 2px 4px;
+	border: none;
+	border-radius: 4px;
+	outline: 1px solid #6d8cff;
+	background: rgba(0, 0, 0, 0.3);
+	color: #e8ebf2;
+	font: inherit;
+	font-weight: 600;
+}
+/* The empty editor's top bar: the file the editor last exported to. */
+.edit-last {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 42px;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0 10px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+	font-size: 13px;
 }
 .edit-file {
 	display: flex;
@@ -1934,11 +1975,15 @@ button.library-ghost-tag:hover > .library-tag-x {
 	pointer-events: none;
 }
 .clip .fade polygon,
-.clip .fade .shade {
+.clip .fade .shade,
+.edit-section .fade polygon,
+.edit-section .fade .shade {
 	fill: rgba(0, 0, 0, 0.4);
 }
 .clip .fade line,
-.clip .fade .curve {
+.clip .fade .curve,
+.edit-section .fade line,
+.edit-section .fade .curve {
 	fill: none;
 	stroke: rgba(255, 255, 255, 0.9);
 	stroke-width: 1.5px;
@@ -1978,8 +2023,22 @@ button.library-ghost-tag:hover > .library-tag-x {
 }
 .clip:hover + .clip-fades .fade-dot,
 .clip-fades:hover .fade-dot,
+.edit-section:hover .fade-dot,
 .fade-dot.set {
 	opacity: 1;
+}
+/* In the track editor the fades sit under the section's label, and the dots inside it, on the
+   label's lower edge and over it. */
+.edit-section .fade {
+	position: absolute;
+	top: 17px;
+	height: calc(100% - 17px);
+	pointer-events: none;
+	z-index: 3;
+}
+.edit-section .fade-dot {
+	top: 12px;
+	z-index: 5;
 }
 .playhead {
 	position: absolute;

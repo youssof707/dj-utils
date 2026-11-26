@@ -3,13 +3,13 @@ import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 const OUT = process.argv[2] || 'build';
+// Draws build/icon.svg (100-unit design) onto Apple's 824px tile inside the 1024 canvas.
 const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
-const ACC = hex('#2fb7ff'), GREY = hex('#3a4250'), WHITE = hex('#f2f4f7');
-const TOP = hex('#1b1c20'), BOT = hex('#09090b');
-const HEIGHTS = [90, 170, 120, 260, 340, 220, 290, 150, 200, 110, 70];
-const BW = 34, GAP = 22, PLAYED = 5;
-const X0 = 512 - (HEIGHTS.length * BW + (HEIGHTS.length - 1) * GAP) / 2;
-const PH_X = X0 + PLAYED * (BW + GAP) - GAP / 2;
+const TILE = hex('#131418'), BAR = hex('#3A3D44'), PLAYED = hex('#5E626B'), RED = hex('#E8655A');
+const S = 8.24, O = 100, u = v => O + v * S;
+const BARS = [[18, 27, 38, 11], [36, 44.5, 38, 11], [54, 62, 28, 11]];
+const PLAYED_BARS = [[18, 27, 34, 11], [36, 44.5, 16, 11]];
+const TRI = [[44, 18], [56, 18], [50, 25]].map(([x, y]) => [u(x), u(y)]);
 
 function sdBox(px, py, cx, cy, hx, hy, r) {
   const qx = Math.abs(px - cx) - hx + r, qy = Math.abs(py - cy) - hy + r;
@@ -22,35 +22,42 @@ function erfc(x) {
   return x >= 0 ? r : 2 - r;
 }
 
+const rect = (x, y, [rx, ry, w, h]) => sdBox(x, y, u(rx + w / 2), u(ry + h / 2), w / 2 * S, h / 2 * S, 3 * S);
+function sdTri(x, y) {
+  const [cx, cy] = TRI.reduce(([sx, sy], [px, py]) => [sx + px / 3, sy + py / 3], [0, 0]);
+  let d = -Infinity;
+  for (let n = 0; n < 3; n++) {
+    const [px, py] = TRI[n], [qx, qy] = TRI[(n + 1) % 3], l = Math.hypot(qx - px, qy - py);
+    const nx = (qy - py) / l, ny = -(qx - px) / l, s = nx * (cx - px) + ny * (cy - py) > 0 ? -1 : 1;
+    d = Math.max(d, s * (nx * (x - px) + ny * (y - py)));
+  }
+  return d;
+}
+
 function render(size) {
   const k = size / 1024, px = new Uint8Array(size * size * 4);
-  let seed = 12345; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
   for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
     const x = (i + 0.5) / k, y = (j + 0.5) / k, aa = 0.5 / k;
     const cov = d => Math.min(1, Math.max(0, 0.5 - d / (2 * aa)));
     let r = 0, g = 0, b = 0, a = 0;
     const over = (c, al) => { r = c[0] * al + r * (1 - al); g = c[1] * al + g * (1 - al); b = c[2] * al + b * (1 - al); a = al + a * (1 - al); };
-    const sdS = sdBox(x, y - 10, 512, 512, 412, 412, 185);
+    const sdS = sdBox(x, y - 10, 512, 512, 412, 412, 22.5 * S);
     over([0, 0, 0], 0.35 * 0.5 * erfc(sdS / (14 * Math.SQRT2)));
-    const sd = sdBox(x, y, 512, 512, 412, 412, 185), m = cov(sd);
+    const sd = sdBox(x, y, 512, 512, 412, 412, 22.5 * S), m = cov(sd);
     if (m > 0) {
-      const t = Math.min(1, Math.max(0, (y - 100) / 824));
-      const d = (rnd() - 0.5) * 1.5 / 255;
-      over([TOP[0] + (BOT[0] - TOP[0]) * t + d, TOP[1] + (BOT[1] - TOP[1]) * t + d, TOP[2] + (BOT[2] - TOP[2]) * t + d], m);
-      const rim = cov(Math.abs(sd + 1.5) - 1.5) * 0.10 * Math.max(0, 1 - t / 0.5);
-      if (rim > 0) over([1, 1, 1], rim * m);
-      HEIGHTS.forEach((h, n) => {
-        const bx = X0 + n * (BW + GAP) + BW / 2;
-        const c = cov(sdBox(x, y, bx, 512, BW / 2, h / 2, BW / 2));
-        if (c > 0) over(n < PLAYED ? ACC : GREY, c);
-      });
-      const p = cov(sdBox(x, y, PH_X, 512, 6, 212, 6));
-      if (p > 0) over(WHITE, p);
+      over(TILE, m);
+      const edge = cov(Math.abs(sd + S / 2) - S / 2) * 0.08;
+      if (edge > 0) over([1, 1, 1], edge * m);
+      for (const bar of BARS) { const c = cov(rect(x, y, bar)); if (c > 0) over(BAR, c); }
+      for (const bar of PLAYED_BARS) { const c = cov(rect(x, y, bar)); if (c > 0) over(PLAYED, c); }
+      const line = Math.hypot(x - u(50), y - Math.min(u(80), Math.max(u(22), y))) - 2 * S;
+      const c = cov(Math.min(line, sdTri(x, y)));
+      if (c > 0) over(RED, c);
     }
-    const o = (j * size + i) * 4, u = a > 0 ? 1 / a : 0;
-    px[o] = Math.round(Math.min(1, Math.max(0, r * u)) * 255);
-    px[o + 1] = Math.round(Math.min(1, Math.max(0, g * u)) * 255);
-    px[o + 2] = Math.round(Math.min(1, Math.max(0, b * u)) * 255);
+    const o = (j * size + i) * 4, w = a > 0 ? 1 / a : 0;
+    px[o] = Math.round(Math.min(1, Math.max(0, r * w)) * 255);
+    px[o + 1] = Math.round(Math.min(1, Math.max(0, g * w)) * 255);
+    px[o + 2] = Math.round(Math.min(1, Math.max(0, b * w)) * 255);
     px[o + 3] = Math.round(a * 255);
   }
   return png(size, px);

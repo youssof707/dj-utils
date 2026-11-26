@@ -34,12 +34,13 @@ class Biquad {
 		private kind: "low" | "high",
 		hz: number,
 		private q: number,
+		private rate: number = SAMPLE_RATE,
 	) {
 		this.tune(hz);
 	}
 	// Moves the cut-off; the running state is kept, so it can slide while filtering.
 	tune(hz: number): void {
-		const w = (2 * Math.PI * hz) / SAMPLE_RATE;
+		const w = (2 * Math.PI * hz) / this.rate;
 		const alpha = Math.sin(w) / (2 * this.q);
 		const cos = Math.cos(w);
 		const a0 = 1 + alpha;
@@ -61,29 +62,42 @@ class Biquad {
 }
 
 // Takes the bass out of one clip as it is mixed (see LOW_CUT_HZ): the same filter playback
-// uses, for the left and right channels, with the cut-off sliding down over the clip's last
-// moment. Frames must be fed in order from the clip's first.
-class LowCut {
-	private l = LOW_CUT_QS.map((q) => new Biquad("high", LOW_CUT_HZ, q));
-	private r = LOW_CUT_QS.map((q) => new Biquad("high", LOW_CUT_HZ, q));
-	private edge = Math.round(LOW_CUT_EDGE_SEC * SAMPLE_RATE);
-	constructor(private frames: number) {}
-	// Filters `count` interleaved stereo frames in place; the first is frame `rel` of the clip.
-	run(data: Float32Array, rel: number, count: number): void {
+// uses, for each channel, with the cut-off sliding down over the clip's last moment. Frames
+// must be fed in order from the clip's first. The set's mix is stereo at SAMPLE_RATE; an
+// edit's export is in its source file's own rate and channel count.
+export class LowCut {
+	private ch: Biquad[][];
+	private edge: number;
+	constructor(
+		private frames: number,
+		rate: number = SAMPLE_RATE,
+		private channels = 2,
+	) {
+		this.ch = Array.from({ length: channels }, () => LOW_CUT_QS.map((q) => new Biquad("high", LOW_CUT_HZ, q, rate)));
+		this.edge = Math.round(LOW_CUT_EDGE_SEC * rate);
+	}
+	// The filter as it stands, running state and all, to try frames on without moving this one.
+	clone(): LowCut {
+		const c = Object.create(LowCut.prototype) as LowCut;
+		Object.assign(c, this);
+		c.ch = this.ch.map((fs) => fs.map((f) => Object.assign(Object.create(Biquad.prototype), f) as Biquad));
+		return c;
+	}
+	// Filters `count` interleaved frames in place; the first is frame `rel` of the clip.
+	run(data: Float32Array | Float64Array, rel: number, count: number): void {
 		const sweepFrom = this.frames - this.edge;
+		const n = this.channels;
 		for (let i = 0; i < count; i++) {
 			const k = rel + i;
 			if (k >= sweepFrom) {
 				const hz = LOW_CUT_HZ * (LOW_CUT_END_HZ / LOW_CUT_HZ) ** Math.min(1, (k - sweepFrom) / this.edge);
-				for (const f of this.l) f.tune(hz);
-				for (const f of this.r) f.tune(hz);
+				for (const fs of this.ch) for (const f of fs) f.tune(hz);
 			}
-			let a = data[i * 2];
-			let b = data[i * 2 + 1];
-			for (const f of this.l) a = f.step(a);
-			for (const f of this.r) b = f.step(b);
-			data[i * 2] = a;
-			data[i * 2 + 1] = b;
+			for (let c = 0; c < n; c++) {
+				let v = data[i * n + c];
+				for (const f of this.ch[c]) v = f.step(v);
+				data[i * n + c] = v;
+			}
 		}
 	}
 }

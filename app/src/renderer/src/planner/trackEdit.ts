@@ -1,9 +1,10 @@
 // Everything the user can do in the track editor, as plain functions over the store.
 
-import { appendAt, barPhase, cutAt, duplicateSections, leadBeat, moveSections, place, removeSections, snapBeat, srcOf, totalBeats, wholeTrack, type EditSection } from "@shared/trackEdit";
-import type { Clip, EditExportRequest, PlannerTrack } from "@shared/planner";
+import { appendAt, autoEditName, barPhase, copySections, cutAt, duplicateSections, fixRows, leadBeat, moveSections, place, removeSections, setFade, setLowCut, snapBeat, srcOf, totalBeats, trimSection, wholeTrack, type EditSection } from "@shared/trackEdit";
+export { autoEditName, cleanTrackName } from "@shared/trackEdit";
+import { trackBeats, type Clip, type EditExportRequest, type PlannerTrack } from "@shared/planner";
 import { autoEdit, clipsEdit, cuesForEdit, swapInEdit, type AutoLink } from "@shared/cdj";
-import { BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT, refreshCues } from "./actions";
+import { alignPoint, BEAT_GRID_MIN_PX, MAX_PX_PER_BEAT, MIN_PX_PER_BEAT, refreshCues } from "./actions";
 import { playEditPreview, stopEditPreview } from "./editPlayer";
 import { exportingTo, reconcileMedia } from "./media";
 import { errorText, isCueStep, newId, runCueStep, store, toast, type CueStep, type EditReplace, type EditSnap, type TrackEditUi } from "./store";
@@ -20,6 +21,18 @@ function patch(p: Partial<TrackEditUi>): void {
 
 // The first track: the result has its tempo, grid and name.
 export const editMain = (e: EditSnap): PlannerTrack => e.tracks[0];
+
+// The edit's name: the one the user gave it, or else the one its tracks make, which follows
+// them as tracks are added.
+export const editName = (e: TrackEditUi): string => e.name ?? autoEditName(e.tracks);
+
+// Names the edit. An empty name, or the one it would get anyway, goes back to following its tracks.
+export function editRename(name: string): void {
+	const e = ed();
+	if (!e) return;
+	const v = name.trim();
+	patch({ name: v && v !== autoEditName(e.tracks) ? v : undefined });
+}
 
 // Length of the result in beats.
 export function editTotal(e: EditSnap): number {
@@ -73,6 +86,7 @@ function commit(change: Partial<EditSnap>, more: Partial<TrackEditUi> = {}): voi
 	const e = ed();
 	if (!e) return;
 	const snap: EditSnap = { ...snapOf(e), ...change };
+	if (change.sections) snap.sections = fixRows(change.sections, e.sections);
 	if (snap.tracks === e.tracks && snap.sections === e.sections) return;
 	stopEditPreview();
 	show({ ...e, ...snap, past: [...e.past, snapOf(e)].slice(-HISTORY), future: [], exported: snap.sections === e.sections ? e.exported : null, error: null, playing: false, ...more }, e);
@@ -84,7 +98,8 @@ function openWith(tracks: PlannerTrack[], sections: EditSection[], more: Partial
 	stopEditPreview();
 	store.set({
 		editFocus: true,
-		trackEdit: { tracks, sections, past: [], future: [], selection: [], cursorBeat: leadBeat(tracks[0]), bpm: tracks[0].bpm, pxPerBeat: 0, scrollX: 0, width: store.get().trackEdit?.width ?? 800, playing: false, exporting: false, exported: null, error: null, ...more },
+		lastEdit: null,
+		trackEdit: { tracks, sections: fixRows(sections), past: [], future: [], selection: [], cursorBeat: leadBeat(tracks[0]), bpm: tracks[0].bpm, pxPerBeat: 0, scrollX: 0, width: store.get().trackEdit?.width ?? 800, playing: false, exporting: false, exported: null, error: null, ...more },
 	});
 	// A track that is not in the set gets its audio (waveform and preview) all the same.
 	reconcileMedia(store.get().doc);
@@ -137,25 +152,61 @@ function selectedClipsEdit(): { tracks: PlannerTrack[]; sections: EditSection[];
 }
 
 // Sends the clips selected on the timeline to the editor as an automatic edit: exporting it
-// swaps the new file in for them. It takes the place of what the editor had open, once the
-// user agrees. False when no clip is selected.
+// swaps the new file in for them. With the editor open they are added to what it has (see
+// addToEdit). False when no clip is selected.
 export function editSelectedClips(): boolean {
 	const picked = selectedClipsEdit();
 	if (!picked) return false;
-	askAuto(picked.tracks, picked);
+	const e = ed();
+	if (e) addToEdit(e, picked);
+	else askAuto(picked.tracks, picked);
 	return true;
 }
 
+// Clips added to an open editor: their sections, spaced as the clips are, go after everything
+// on the lane, with their bar lines on the result's. When what is open is an automatic edit,
+// they join it: the export swaps the new file in for these clips too. One undo step; the
+// added sections are selected and brought into view.
+function addToEdit(e: TrackEditUi, picked: { tracks: PlannerTrack[]; sections: EditSection[]; links: AutoLink[] }): void {
+	if (picked.sections.length === 0) return;
+	store.set({ editFocus: true });
+	const tracks = [...e.tracks];
+	const srcMap = picked.tracks.map((t) => {
+		const i = tracks.findIndex((x) => sameTrack(x, t));
+		return i >= 0 ? i : tracks.push(t) - 1;
+	});
+	// The picked clips' own grid is their first track's (see clipSections); it moves by whole
+	// bars of the editor's grid, to the first place at or after the end of the lane.
+	const end = totalBeats(e.sections);
+	const from = Math.min(...picked.sections.map((s) => s.atBeat));
+	const base = barPhase(editMain(e)) - barPhase(picked.tracks[0]);
+	const by = base + Math.ceil((end - from - base) / 4 - 1e-9) * 4;
+	const added = picked.sections.map((s) => {
+		const next: EditSection = { ...s, atBeat: s.atBeat + by };
+		const src = srcMap[srcOf(s)] ?? 0;
+		if (src > 0) next.src = src;
+		else delete next.src;
+		return next;
+	});
+	const at = from + by;
+	const px = editPx(e);
+	const x = at * px - e.scrollX;
+	commit(
+		{ tracks, sections: [...e.sections, ...added] },
+		{ selection: added.map((s) => s.id), cursorBeat: at, scrollX: e.pxPerBeat > 0 && (x < 0 || x > e.width - 60) ? at * px - e.width / 3 : e.scrollX, ...(e.auto ? { auto: { ...e.auto, links: [...e.auto.links, ...picked.links] } } : {}) },
+	);
+}
+
 // What the export of these sections is asked to make.
-function exportRequest(tracks: PlannerTrack[], sections: EditSection[]): EditExportRequest {
+function exportRequest(tracks: PlannerTrack[], sections: EditSection[], name = autoEditName(tracks)): EditExportRequest {
 	const main = tracks[0];
 	const others = tracks.slice(1).map((t) => ({ sourcePath: t.sourcePath, bpm: t.bpm }));
 	return {
 		sourcePath: main.sourcePath,
-		name: main.name,
+		name,
 		bpm: main.bpm,
 		downbeatSec: main.downbeatSec,
-		sections: place(sections).map((p) => ({ startBeat: p.section.startBeat, lengthBeat: p.lengthBeat, atBeat: p.outBeat, ...(srcOf(p.section) > 0 ? { src: srcOf(p.section) } : {}) })),
+		sections: place(sections).map((p) => ({ startBeat: p.section.startBeat, lengthBeat: p.lengthBeat, atBeat: p.outBeat, ...(srcOf(p.section) > 0 ? { src: srcOf(p.section) } : {}), ...(p.section.lowCut ? { lowCut: true } : {}), ...(p.section.fadeInBeat ? { fadeInBeat: p.section.fadeInBeat } : {}), ...(p.section.fadeOutBeat ? { fadeOutBeat: p.section.fadeOutBeat } : {}) })),
 		...(others.length ? { others } : {}),
 	};
 }
@@ -179,7 +230,7 @@ export function quickEditSelectedClips(): boolean {
 		const main = tracks[0];
 		let file: string;
 		try {
-			file = await window.api.reserveEdit(main.name);
+			file = await window.api.reserveEdit(autoEditName(tracks));
 		} catch (err) {
 			toast(`Could not export: ${errorText(err)}`);
 			return;
@@ -349,11 +400,116 @@ export function editDuplicate(): void {
 	commit({ sections: r.sections }, { selection: r.copies });
 }
 
+// "Mute bass" for sections (the selected ones when none are given): when every one of them
+// has its bass cut it comes back on all of them; otherwise it is cut on all of them.
+export function editToggleBass(ids?: string[]): void {
+	const e = ed();
+	const chosen = ids ?? e?.selection ?? [];
+	if (!e || chosen.length === 0) return;
+	const picked = e.sections.filter((s) => chosen.includes(s.id));
+	if (picked.length === 0) return;
+	commit({ sections: setLowCut(e.sections, chosen, !picked.every((s) => s.lowCut)) });
+}
+
+// Whether every selected section has its bass cut.
+export function editBassCut(e: TrackEditUi): boolean {
+	const picked = e.sections.filter((s) => e.selection.includes(s.id));
+	return picked.length > 0 && picked.every((s) => s.lowCut);
+}
+
 // Moves sections along the lane by whole grid steps.
 export function editMove(ids: string[], byBeats: number): void {
 	const e = ed();
 	if (!e) return;
 	commit({ sections: moveSections(e.sections, ids, byBeats) }, { selection: ids });
+}
+
+// Drags one edge of a section by about `byBeats` to make it shorter or longer (see
+// trimSection). The edge lands on the result's beat lines, or bar lines when zoomed out.
+export function editTrim(id: string, side: "left" | "right", byBeats: number): void {
+	const e = ed();
+	if (!e) return;
+	commit({ sections: editTrimmed(e, id, side, byBeats) }, { selection: [id] });
+}
+
+// The sections as editTrim would leave them, for showing while the edge is dragged.
+export function editTrimmed(e: TrackEditUi, id: string, side: "left" | "right", byBeats: number): EditSection[] {
+	const s = e.sections.find((x) => x.id === id);
+	const track = s && (e.tracks[srcOf(s)] ?? e.tracks[0]);
+	if (!s || !track) return e.sections;
+	const main = editMain(e);
+	const edge = side === "right" ? s.atBeat + s.lengthBeat : s.atBeat;
+	const to = snapBeat(edge + byBeats, leadBeat(main), barPhase(main), editStep(e), Infinity);
+	return trimSection(e.sections, id, side, to - edge, trackBeats(track), editStep(e));
+}
+
+// Drags a section's fade dot: its fade-in ("in") or fade-out about `beats` long, ending on a
+// beat line of the result (bar lines when zoomed out), or anywhere with `free` (Option held).
+export function editFade(id: string, side: "in" | "out", beats: number, free = false): void {
+	const e = ed();
+	if (!e) return;
+	commit({ sections: editFaded(e, id, side, beats, free) }, { selection: [id] });
+}
+
+// The sections as editFade would leave them, for showing while the dot is dragged.
+export function editFaded(e: TrackEditUi, id: string, side: "in" | "out", beats: number, free = false): EditSection[] {
+	const s = e.sections.find((x) => x.id === id);
+	if (!s) return e.sections;
+	let len = Math.max(0, beats);
+	if (!free) {
+		// Where the fade ends on the lane goes to the grid; a fade that ends at the far end of
+		// the section fills it.
+		const main = editMain(e);
+		const edge = side === "in" ? s.atBeat : s.atBeat + s.lengthBeat;
+		const to = snapBeat(side === "in" ? edge + len : edge - len, leadBeat(main), barPhase(main), editStep(e), Infinity);
+		len = Math.abs(to - edge);
+	}
+	return setFade(e.sections, id, side, len);
+}
+
+// Shift-drag: copies of the sections, `byBeats` along from them, and the copies selected.
+// `idOf` gives each copy's id from its original's (new ids when left out).
+export function editCopyMove(ids: string[], byBeats: number, idOf: (id: string) => string = () => newId("e")): void {
+	const e = ed();
+	if (!e) return;
+	const r = copySections(e.sections, ids, byBeats, idOf);
+	commit({ sections: r.sections }, { selection: r.copies });
+}
+
+// Where a section's alignment point (its track's first bar line, or first cue: see alignPoint)
+// is heard on the lane; null when its track has neither.
+function alignBeat(e: TrackEditUi, s: EditSection): number | null {
+	const track = e.tracks[srcOf(s)] ?? e.tracks[0];
+	const point = track ? alignPoint(track) : null;
+	return point === null ? null : s.atBeat - s.startBeat + point;
+}
+
+// "Align to grid" can do something for one of these sections.
+export function editCanAlign(ids: string[]): boolean {
+	const e = ed();
+	return !!e && e.sections.some((s) => ids.includes(s.id) && alignBeat(e, s) !== null);
+}
+
+// "Align to grid", as on the timeline: moves each of the sections so its alignment point sits
+// on the nearest bar line of the result (as far as the start of the lane allows, the nearest
+// one after it). One undo step for all of them.
+export function editAlignToGrid(ids: string[]): void {
+	const e = ed();
+	if (!e) return;
+	const phase = barPhase(editMain(e));
+	let changed = false;
+	const sections = e.sections.map((s) => {
+		if (!ids.includes(s.id)) return s;
+		const anchor = alignBeat(e, s);
+		if (anchor === null) return s;
+		let target = phase + Math.round((anchor - phase) / 4) * 4;
+		if (s.atBeat + target - anchor < -1e-9) target = phase + Math.ceil((anchor - s.atBeat - phase) / 4 - 1e-9) * 4;
+		const d = target - anchor;
+		if (Math.abs(d) < 1e-9) return s;
+		changed = true;
+		return { ...s, atBeat: s.atBeat + d };
+	});
+	if (changed) commit({ sections }, { selection: ids });
 }
 
 // Moves the selected sections one grid step later or earlier.
@@ -449,7 +605,8 @@ export async function exportTrackEdit(): Promise<string | null> {
 	patch({ exporting: true, error: null });
 	const same = (): boolean => ed()?.tracks[0] === main;
 	try {
-		const r = await window.api.exportEdit(exportRequest(e.tracks, e.sections));
+		const r = await window.api.exportEdit(exportRequest(e.tracks, e.sections, editName(e)));
+		store.set({ lastEdit: r.path });
 		// the tracks' cues go onto the new file once Rekordbox has it
 		await window.api.editCues(r.path, editCuesOf(e.tracks, e.sections)).catch((err) => toast(`The cues could not be kept: ${errorText(err)}`));
 		if (e.auto && same()) {

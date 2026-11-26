@@ -4,24 +4,31 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { cueMarks, type CueMark } from "@shared/cues";
 import { PEAK_BUCKET, SAMPLE_RATE, trackBeats, type PlannerTrack } from "@shared/planner";
-import { barPhase, moveSections, overlapRows, place, srcOf, type EditSection } from "@shared/trackEdit";
+import { barPhase, copySections, moveSections, overlapRows, place, srcOf, type EditSection } from "@shared/trackEdit";
 import { cueSpot, placeCue } from "./cues";
 import { editPositionBeat, toggleEditPreview } from "./editPlayer";
 import { openFileInEditor, parseBpm } from "./actions";
 import { useLibraryDrop } from "./libraryDrag";
 import { mediaFor } from "./media";
 import { fmtLength } from "./Panels";
-import { store, useStore, type TrackEditUi } from "./store";
+import { newId, store, useStore, type TrackEditUi } from "./store";
 import { hueVars, LaneGrid, NO_KEY, trackHue } from "./Timeline";
-import { closeTrackEdit, editCanCut, editCut, editCutAt, editDelete, editDuplicate, editFit, editMain, editMove, editPx, editRedo, editResize, editSetBpm, editScroll, editSelect, editSetCursor, editStep, editTotal, editUndo, editZoom, exportTrackEdit } from "./trackEdit";
+import { closeTrackEdit, editBassCut, editCanCut, editCopyMove, editCut, editCutAt, editDelete, editDuplicate, editFade, editName, editRename, editFaded, editFit, editMain, editMove, editPx, editRedo, editResize, editSetBpm, editScroll, editSelect, editSetCursor, editStep, editToggleBass, editTotal, editTrim, editTrimmed, editUndo, editZoom, exportTrackEdit } from "./trackEdit";
 import { drawBand, peakMax, sizeCanvas } from "./wave";
 
 const FROM_EDITOR = "application/x-dj-from-editor";
 
 type View = { pxPerBeat: number; scrollX: number; width: number };
 
+const EDGE = 8; // px at each end of a section that drag the end instead of the section, as on the timeline
+const FADE_DOT = 10; // px, as on the timeline
+type FadeSide = "in" | "out";
+
 // One stretch of a track, drawn where it lands along the ruler, in the track's colour.
-function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue, projectBpm, className, label, testId, id, style }: { outBeat: number; lengthBeat: number; startBeat: number; view: View; peaks: Uint8Array | null; maxes: [number, number]; marks: CueMark[]; hue: number; projectBpm: number; className: string; label?: string; testId: string; id?: string; style?: CSSProperties }) {
+// With its bass cut, the kick band is only hinted at, as on the timeline.
+// Its volume fades are shaded as on the timeline, with a dot at the end of each that is dragged
+// to set it (`onFade`).
+function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue, projectBpm, className, label, lowCut, testId, id, style, fadeIn = 0, fadeOut = 0, onFade }: { outBeat: number; lengthBeat: number; startBeat: number; view: View; peaks: Uint8Array | null; maxes: [number, number]; marks: CueMark[]; hue: number; projectBpm: number; className: string; label?: string; lowCut?: boolean; testId: string; id?: string; style?: CSSProperties; fadeIn?: number; fadeOut?: number; onFade?: (ev: ReactPointerEvent, side: FadeSide) => void }) {
 	const ref = useRef<HTMLCanvasElement>(null);
 	const { pxPerBeat, scrollX, width } = view;
 	const left = outBeat * pxPerBeat - scrollX;
@@ -40,15 +47,16 @@ function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue,
 		const at = { startBucket: ((startBeat + (visL - left) / pxPerBeat) * framesPerBeat) / PEAK_BUCKET, bucketsPerPx: framesPerBeat / pxPerBeat / PEAK_BUCKET };
 		// The whole signal faintly, so breaks and drops can be told apart, with the kicks over it.
 		drawBand(cv, peaks, { ...at, band: 0, max: maxes[0], fill: "rgba(255, 255, 255, 0.16)" });
-		drawBand(cv, peaks, { ...at, band: 1, max: maxes[1], fill: "rgba(255, 255, 255, 0.85)" });
-	}, [visible, visL, visR, left, pxPerBeat, peaks, maxes, startBeat, projectBpm, style?.height]);
+		drawBand(cv, peaks, { ...at, band: 1, max: maxes[1], fill: lowCut ? "rgba(255, 255, 255, 0.4)" : "rgba(255, 255, 255, 0.85)" });
+	}, [visible, visL, visR, left, pxPerBeat, peaks, maxes, startBeat, projectBpm, style?.height, lowCut]);
 
 	if (!visible) return null;
 	return (
-		<div className={className} style={{ left, width: w, ...hueVars(hue), ...style } as CSSProperties} data-testid={testId} data-section-id={id}>
+		<div className={`${className}${lowCut ? " lowcut" : ""}`} style={{ left, width: w, ...hueVars(hue), ...style } as CSSProperties} data-testid={testId} data-section-id={id} data-lowcut={lowCut ? "true" : undefined}>
 			<canvas ref={ref} className="edit-wave" style={{ left: visL - left, width: Math.ceil(visR - visL) }} />
 			{label && w >= 64 && (
 				<div className="edit-section-label" style={{ paddingLeft: Math.max(0, -left) + 6 }}>
+					{lowCut && w >= 120 && <span className="clip-tag lowcut">NO BASS</span>}
 					{label}
 				</div>
 			)}
@@ -64,6 +72,32 @@ function Block({ outBeat, lengthBeat, startBeat, view, peaks, maxes, marks, hue,
 					</div>
 				);
 			})}
+			{id && (
+				<>
+					<div className="trim left" />
+					<div className="trim right" />
+				</>
+			)}
+			{fadeIn > 0 && (
+				<svg className="fade" style={{ left: 0, width: fadeIn * pxPerBeat }} viewBox="0 0 1 1" preserveAspectRatio="none">
+					<path className="shade" d="M0,0 L1,0 Q0.5,1 0,1 Z" />
+					<path className="curve" d="M0,1 Q0.5,1 1,0" />
+				</svg>
+			)}
+			{fadeOut > 0 && (
+				<svg className="fade" style={{ right: 0, width: fadeOut * pxPerBeat }} viewBox="0 0 1 1" preserveAspectRatio="none">
+					<polygon points="0,0 1,0 1,1" />
+					<line x1="0" y1="0" x2="1" y2="1" />
+				</svg>
+			)}
+			{/* Inside the section (it clips what is outside it), centred on the end of the fade
+			    where there is room. */}
+			{onFade && w >= FADE_DOT * 4 && (
+				<>
+					<div className={`fade-dot${fadeIn > 0 ? " set" : ""}`} style={{ left: Math.min(Math.max(0, fadeIn * pxPerBeat - FADE_DOT / 2), w - FADE_DOT) }} data-testid="edit-fade-in" onPointerDown={(ev) => onFade(ev, "in")} />
+					<div className={`fade-dot${fadeOut > 0 ? " set" : ""}`} style={{ right: Math.min(Math.max(0, fadeOut * pxPerBeat - FADE_DOT / 2), w - FADE_DOT) }} data-testid="edit-fade-out" onPointerDown={(ev) => onFade(ev, "out")} />
+				</>
+			)}
 		</div>
 	);
 }
@@ -127,12 +161,8 @@ function EditPlayhead() {
 			const e = store.get().trackEdit;
 			if (!el || !e) return;
 			const beat = editPositionBeat();
-			let x = beat * editPx(e) - e.scrollX;
-			// Zoomed in, the view pages along once the preview runs off its right edge.
-			if (e.playing && (x > e.width || x < 0)) {
-				editScroll(x - 40);
-				x = beat * editPx(e) - (store.get().trackEdit?.scrollX ?? e.scrollX);
-			}
+			// The view stays where it is: the line just goes out of sight when it runs off the edge.
+			const x = beat * editPx(e) - e.scrollX;
 			el.style.visibility = e.playing && x >= -1 && x <= e.width + 1 ? "visible" : "hidden";
 			el.style.transform = `translateX(${x}px)`;
 			el.dataset.beat = beat.toFixed(4);
@@ -225,9 +255,11 @@ function EditBpmField({ bpm, original }: { bpm: number; original: number }) {
 function Editor({ e }: { e: TrackEditUi }) {
 	const focus = useStore((s) => s.editFocus);
 	useStore((s) => s.mediaRev);
+	const lastEdit = useStore((s) => s.lastEdit);
 	const allCues = useStore((s) => s.cues);
 	const keys = useStore((s) => s.trackKeys);
 	const lanesRef = useRef<HTMLDivElement>(null);
+	const boxRef = useRef<HTMLDivElement>(null);
 	const [moving, setMoving] = useState<EditSection[] | null>(null); // the sections as a drag would leave them
 	const fileDrop = useFileDrop();
 	const editorRef = useRef<HTMLDivElement>(null);
@@ -257,7 +289,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 	const phase = barPhase(main);
 	const shownSections = moving ?? e.sections;
 	const shown = useMemo(() => place(shownSections), [shownSections]);
-	const rows = useMemo(() => overlapRows(shownSections), [shownSections]);
+	const rows = useMemo(() => overlapRows(shownSections, e.sections), [shownSections, e.sections]);
 	const total = editTotal(e);
 	const view: View = { pxPerBeat: editPx(e), scrollX: e.scrollX, width: e.width };
 	const hues = trackHues(e.tracks, keys);
@@ -294,32 +326,107 @@ function Editor({ e }: { e: TrackEditUi }) {
 			editCutAt(at);
 			return;
 		}
+		// B is held: a click on a section mutes or unmutes its bass, as on the timeline.
+		if (document.body.classList.contains("bass-tool")) {
+			if (hit) editToggleBass([hit.id]);
+			return;
+		}
 		const selection = e.selection;
 		const ids = hit ? (selection.includes(hit.id) ? selection : [hit.id]) : [];
 		const downX = ev.clientX;
+		const downY = ev.clientY;
 		let dragging = false;
+		let boxing = false; // a drag from empty space: a box selects every section it touches
+		const keep = ev.shiftKey || ev.metaKey ? selection : [];
 		let by = 0;
 		const step = editStep(e);
+		// Shift held while dragging a section's middle: the originals stay and copies are
+		// dragged, as on the timeline. A drag started with Shift stays a copy even if Shift is
+		// let go before the drop; pressing it mid-drag turns a move into a copy. The copies keep
+		// their ids for the whole drag.
+		let copying = false;
+		let copyLocked = false;
+		const copyIds = new Map(ids.map((id) => [id, newId("e")]));
+		const idOf = (id: string): string => copyIds.get(id)!;
+		let lastX = ev.clientX;
+		const showMove = (shift: boolean): void => {
+			copying = copyLocked || shift;
+			document.body.classList.toggle("dragging-copy", copying);
+			by = Math.round((beatAt(lastX) - at) / step) * step;
+			setMoving(copying ? copySections(e.sections, ids, by, idOf).sections : moveSections(e.sections, ids, by));
+		};
+		// A press near either end of a section drags that end, to make it shorter or longer.
+		const hitRect = hit && (ev.target as HTMLElement).closest<HTMLElement>("[data-section-id]")!.getBoundingClientRect();
+		const edge = hitRect ? Math.min(EDGE, hitRect.width / 4) : 0;
+		const side: "left" | "right" | null = !hitRect ? null : ev.clientX - hitRect.left < edge ? "left" : hitRect.right - ev.clientX < edge ? "right" : null;
 		row.setPointerCapture(ev.pointerId);
+		const drawBox = (m: PointerEvent): void => {
+			const r = row.getBoundingClientRect();
+			const left = Math.max(r.left, Math.min(downX, m.clientX));
+			const right = Math.min(r.right, Math.max(downX, m.clientX));
+			const top = Math.max(r.top, Math.min(downY, m.clientY));
+			const bottom = Math.min(r.bottom, Math.max(downY, m.clientY));
+			const hits: string[] = [];
+			for (const el of row.querySelectorAll<HTMLElement>("[data-section-id]")) {
+				const b = el.getBoundingClientRect();
+				if (b.left < right && b.right > left && b.top < bottom && b.bottom > top) hits.push(el.dataset.sectionId!);
+			}
+			editSelect([...new Set([...keep, ...hits])]);
+			const box = boxRef.current;
+			if (box) {
+				box.style.display = "block";
+				box.style.left = `${left - r.left}px`;
+				box.style.width = `${right - left}px`;
+				box.style.top = `${top - r.top}px`;
+				box.style.height = `${bottom - top}px`;
+			}
+		};
 		const move = (m: PointerEvent): void => {
+			if (!hit && (boxing || Math.abs(m.clientX - downX) + Math.abs(m.clientY - downY) > 4)) {
+				boxing = true;
+				drawBox(m);
+				return;
+			}
 			if (!dragging && hit && Math.abs(m.clientX - downX) > 4) {
 				dragging = true;
-				document.body.classList.add("dragging-move");
-				editSelect(ids);
+				copyLocked = !side && (ev.shiftKey || m.shiftKey);
+				document.body.classList.add(side ? "dragging-trim" : "dragging-move");
+				editSelect(side ? [hit.id] : ids);
 			}
 			if (!dragging) return;
-			by = Math.round((beatAt(m.clientX) - at) / step) * step;
-			setMoving(moveSections(e.sections, ids, by));
+			if (side) {
+				by = beatAt(m.clientX) - at;
+				setMoving(editTrimmed(e, hit!.id, side, by));
+				return;
+			}
+			lastX = m.clientX;
+			showMove(m.shiftKey);
+		};
+		// Pressing or letting go of Shift mid-drag switches between moving and copying without
+		// waiting for the mouse to move.
+		const shiftKey = (k: KeyboardEvent): void => {
+			if (k.key !== "Shift" || !dragging || side) return;
+			showMove(k.type === "keydown");
 		};
 		const end = (cancelled: boolean): void => {
 			row.removeEventListener("pointermove", move);
 			row.removeEventListener("pointerup", up);
 			row.removeEventListener("pointercancel", cancel);
 			window.removeEventListener("keydown", key, true);
-			document.body.classList.remove("dragging-move");
+			window.removeEventListener("keydown", shiftKey);
+			window.removeEventListener("keyup", shiftKey);
+			document.body.classList.remove("dragging-move", "dragging-trim", "dragging-copy");
 			setMoving(null);
+			if (boxRef.current) boxRef.current.style.display = "none";
+			if (boxing) {
+				if (cancelled) editSelect(selection);
+				return;
+			}
 			if (dragging) {
-				if (!cancelled) editMove(ids, by);
+				if (cancelled) return;
+				if (side) editTrim(hit!.id, side, by);
+				else if (copying) editCopyMove(ids, by, idOf);
+				else editMove(ids, by);
 				return;
 			}
 			if (cancelled) return;
@@ -333,7 +440,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 		const cancel = (): void => end(true);
 		// Escape lets go of a drag and leaves everything where it was.
 		const key = (k: KeyboardEvent): void => {
-			if (k.key !== "Escape" || !dragging) return;
+			if (k.key !== "Escape" || (!dragging && !boxing)) return;
 			k.preventDefault();
 			k.stopPropagation();
 			end(true);
@@ -341,6 +448,67 @@ function Editor({ e }: { e: TrackEditUi }) {
 		row.addEventListener("pointermove", move);
 		row.addEventListener("pointerup", up);
 		row.addEventListener("pointercancel", cancel);
+		window.addEventListener("keydown", key, true);
+		window.addEventListener("keydown", shiftKey);
+		window.addEventListener("keyup", shiftKey);
+	};
+
+	// A press on a section's fade dot: dragging it inwards makes the fade longer. When the two
+	// dots of a section sit on the same spot (a fade that fills it), the drag goes to whichever
+	// can move the way the mouse first goes, the grabbed one first.
+	const onFadeDown = (ev: ReactPointerEvent, id: string, grabbed: FadeSide): void => {
+		if (ev.button !== 0) return;
+		ev.stopPropagation(); // not a trim, move or box of the lane underneath
+		const e0 = store.get().trackEdit;
+		const s0 = e0?.sections.find((x) => x.id === id);
+		if (!e0 || !s0) return;
+		if (!e0.selection.includes(id)) editSelect([id]);
+		const was = (side: FadeSide): number => (side === "in" ? s0.fadeInBeat : s0.fadeOutBeat) ?? 0;
+		const room = (side: FadeSide): number => s0.lengthBeat - was(side === "in" ? "out" : "in");
+		const sign = (side: FadeSide): number => (side === "in" ? 1 : -1);
+		const other: FadeSide = grabbed === "in" ? "out" : "in";
+		const dotBeat = (side: FadeSide): number => (side === "in" ? s0.atBeat + was("in") : s0.atBeat + s0.lengthBeat - was("out"));
+		const shared = Math.abs(dotBeat(grabbed) - dotBeat(other)) * view.pxPerBeat < FADE_DOT;
+		let side = grabbed;
+		const grabBeat = beatAt(ev.clientX);
+		const sx = ev.clientX;
+		const sy = ev.clientY;
+		let moved = false;
+		let len = was(side);
+		let free = false;
+		const move = (m: PointerEvent): void => {
+			if (!moved) {
+				if (Math.abs(m.clientX - sx) + Math.abs(m.clientY - sy) < 4) return;
+				const dir = Math.sign(m.clientX - sx);
+				if (shared) {
+					if (dir === 0) return; // wait for a sideways move to tell which dot is meant
+					const can = (d: FadeSide): boolean => (dir * sign(d) > 0 ? was(d) < room(d) - 1e-6 : was(d) > 1e-6);
+					side = can(grabbed) ? grabbed : can(other) ? other : grabbed;
+				}
+				moved = true;
+				document.body.classList.add("dragging-fade");
+			}
+			len = was(side) + sign(side) * (beatAt(m.clientX) - grabBeat);
+			free = m.altKey;
+			setMoving(editFaded(store.get().trackEdit!, id, side, len, free));
+		};
+		const finish = (cancel: boolean): void => {
+			window.removeEventListener("pointermove", move);
+			window.removeEventListener("pointerup", up);
+			window.removeEventListener("keydown", key, true);
+			document.body.classList.remove("dragging-fade");
+			setMoving(null);
+			if (moved && !cancel) editFade(id, side, len, free);
+		};
+		const up = (): void => finish(false);
+		const key = (k: KeyboardEvent): void => {
+			if (k.key !== "Escape") return;
+			k.preventDefault();
+			k.stopPropagation();
+			finish(true);
+		};
+		window.addEventListener("pointermove", move);
+		window.addEventListener("pointerup", up);
 		window.addEventListener("keydown", key, true);
 	};
 
@@ -350,10 +518,12 @@ function Editor({ e }: { e: TrackEditUi }) {
 		ev.preventDefault();
 		const hit = sectionAt(ev.target);
 		if (!hit) return;
+		// The menu is for the selection when the section is in it, and for the section otherwise.
+		if (!e.selection.includes(hit.id)) editSelect([hit.id]);
 		const so = sourceOf(hit);
 		const beat = hit.startBeat + (beatAt(ev.clientX) - hit.atBeat);
-		if (beat < 0 || beat > trackBeats(so.track)) return;
-		store.set({ menu: { x: ev.clientX, y: ev.clientY, cue: cueSpot(so.track, so.marks, beat, view.pxPerBeat, true, { from: hit.startBeat, to: hit.startBeat + hit.lengthBeat }) } });
+		const cue = beat < 0 || beat > trackBeats(so.track) ? undefined : cueSpot(so.track, so.marks, beat, view.pxPerBeat, true, { from: hit.startBeat, to: hit.startBeat + hit.lengthBeat });
+		store.set({ menu: { x: ev.clientX, y: ev.clientY, sectionId: hit.id, cue } });
 	};
 
 	// The zoom buttons keep the cursor where it is when it is in view (the middle otherwise).
@@ -368,9 +538,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 					{e.playing ? "■" : "▶"}
 				</button>
 				<div className="edit-title">
-					<span className="edit-name" data-testid="edit-name">
-						{e.tracks.map((t) => t.name).join(" + ")}
-					</span>
+					<EditName name={editName(e)} />
 					<span className="muted">{fmtLength((total * 60) / e.bpm)}</span>
 				</div>
 				<EditBpmField bpm={e.bpm} original={main.bpm} />
@@ -382,6 +550,9 @@ function Editor({ e }: { e: TrackEditUi }) {
 				</button>
 				<button className="ghost" data-testid="edit-delete" disabled={!some} onClick={editDelete}>
 					Delete
+				</button>
+				<button className="ghost" data-testid="edit-bass" disabled={!some} onClick={() => editToggleBass()}>
+					{editBassCut(e) ? "Unmute bass" : "Mute bass"}
 				</button>
 				<button className="ghost" data-testid="edit-undo" disabled={e.past.length === 0} onClick={editUndo}>
 					Undo
@@ -406,28 +577,8 @@ function Editor({ e }: { e: TrackEditUi }) {
 							{e.error}
 						</span>
 					)}
-					{!e.error && e.exported && (
-						<>
-							{/* The exported file: drag it onto a lane to use it in the set. */}
-							<div
-								className="edit-file"
-								data-testid="edit-exported"
-								draggable
-								onDragStart={(ev) => {
-									ev.dataTransfer.setData("application/x-dj-path", e.exported!);
-									ev.dataTransfer.setData(FROM_EDITOR, "1");
-									ev.dataTransfer.effectAllowed = "copy";
-								}}
-							>
-								<span className="edit-file-grip">⠿</span>
-								<span className="edit-file-name">{e.exported.split("/").pop()}</span>
-								<span className="edit-file-hint">drag to a lane</span>
-							</div>
-							<button className="ghost" data-testid="edit-reveal" onClick={() => void window.api.reveal(e.exported!)}>
-								Show in Finder
-							</button>
-						</>
-					)}
+					{/* With everything deleted, the file last exported is still at hand. */}
+					{!e.error && (e.exported ?? (shown.length === 0 ? lastEdit : null)) && <ExportedFile path={(e.exported ?? lastEdit)!} />}
 				</div>
 				<button className="primary" data-testid="edit-export" disabled={e.exporting || shown.length === 0} onClick={() => void exportTrackEdit()}>
 					{e.exporting ? "Exporting…" : "Export edit"}
@@ -453,6 +604,7 @@ function Editor({ e }: { e: TrackEditUi }) {
 									className={`edit-section${selected ? " selected" : ""}`}
 									testId="edit-section"
 									label={`${multi ? `${so.track.name} · ` : `${i + 1} · `}${lengthText(p.lengthBeat)}`}
+									lowCut={p.section.lowCut}
 									outBeat={p.outBeat}
 									lengthBeat={p.lengthBeat}
 									startBeat={p.section.startBeat}
@@ -463,12 +615,16 @@ function Editor({ e }: { e: TrackEditUi }) {
 									hue={so.hue}
 									projectBpm={e.bpm}
 									style={rowStyle}
+									fadeIn={p.section.fadeInBeat}
+									fadeOut={p.section.fadeOutBeat}
+									onFade={(ev, side) => onFadeDown(ev, p.section.id, side)}
 								/>
 							);
 						})}
 						{shown.length === 0 && <div className="edit-hint">Everything is deleted. Undo to bring sections back.</div>}
 						<div className="edit-cursor" data-testid="edit-cursor" data-beat={e.cursorBeat.toFixed(4)} style={{ transform: `translateX(${x(e.cursorBeat)}px)`, visibility: e.playing || x(e.cursorBeat) < 1 ? "hidden" : "visible" }} />
 						<EditPlayhead />
+						<div className="marquee" ref={boxRef} />
 					</div>
 				</div>
 			</div>
@@ -476,12 +632,90 @@ function Editor({ e }: { e: TrackEditUi }) {
 	);
 }
 
+// The exported file: drag it onto a lane to use it in the set, or show it in Finder.
+function ExportedFile({ path }: { path: string }) {
+	return (
+		<>
+			<div
+				className="edit-file"
+				data-testid="edit-exported"
+				draggable
+				onDragStart={(ev) => {
+					ev.dataTransfer.setData("application/x-dj-path", path);
+					ev.dataTransfer.setData(FROM_EDITOR, "1");
+					ev.dataTransfer.effectAllowed = "copy";
+				}}
+			>
+				<span className="edit-file-grip">⠿</span>
+				<span className="edit-file-name">{path.split("/").pop()}</span>
+				<span className="edit-file-hint">drag to a lane</span>
+			</div>
+			<button className="ghost" data-testid="edit-reveal" onClick={() => void window.api.reveal(path)}>
+				Show in Finder
+			</button>
+		</>
+	);
+}
+
+// The edit's name: a click makes it a field to give the edit a name of its own. Enter or
+// leaving the field keeps it, Esc does not; an empty name goes back to the tracks' names.
+function EditName({ name }: { name: string }) {
+	const [text, setText] = useState<string | null>(null);
+	const done = useRef(false);
+	if (text === null)
+		return (
+			<button
+				className="edit-name"
+				data-testid="edit-name"
+				aria-label="Rename the edit"
+				onClick={() => {
+					done.current = false;
+					setText(name);
+				}}
+			>
+				{name}
+			</button>
+		);
+	const finish = (keep: boolean): void => {
+		if (done.current) return;
+		done.current = true;
+		if (keep) editRename(text);
+		setText(null);
+	};
+	return (
+		<input
+			className="edit-name-input"
+			data-testid="edit-name-input"
+			aria-label="Edit name"
+			autoFocus
+			value={text}
+			size={Math.max(8, Math.min(48, text.length + 1))}
+			onFocus={(ev) => ev.currentTarget.select()}
+			onChange={(ev) => setText(ev.target.value)}
+			onKeyDown={(ev) => {
+				ev.stopPropagation();
+				if (ev.key === "Enter") finish(true);
+				else if (ev.key === "Escape") finish(false);
+			}}
+			onBlur={() => finish(true)}
+		/>
+	);
+}
+
+const LAST_HUE = 220;
+
 function Empty() {
+	const last = useStore((s) => s.lastEdit);
 	const drop = useFileDrop();
 	const ref = useRef<HTMLDivElement>(null);
 	useLibraryDrop(ref, (d) => void openFileInEditor(d.path));
 	return (
 		<div className={`bottom-area edit-empty${drop.dropping ? " file-over" : ""}`} data-testid="track-editor-empty" ref={ref} {...drop.handlers}>
+			{last && (
+				<div className="edit-last" data-testid="edit-last" style={hueVars(LAST_HUE)}>
+					<ExportedFile path={last} />
+				</div>
+			)}
 			Right-click a clip and choose Add to editor, or drop an audio file here, to cut a track up.
 		</div>
 	);

@@ -146,7 +146,7 @@ export type ExportProgress = { stage: string; pct: number };
 // goes in the export folder from the settings. A section with `src` i > 0 is a stretch of
 // `others[i - 1]`; the file is at the first track's tempo, the others stretched to it.
 // `outPath`: a file held for it with reserveEdit (a background export); else one is picked.
-export type EditExportRequest = { sourcePath: string; name: string; outPath?: string; bpm: number; downbeatSec?: number; sections: { startBeat: number; lengthBeat: number; atBeat: number; src?: number }[]; others?: { sourcePath: string; bpm: number }[] };
+export type EditExportRequest = { sourcePath: string; name: string; outPath?: string; bpm: number; downbeatSec?: number; sections: { startBeat: number; lengthBeat: number; atBeat: number; src?: number; lowCut?: boolean; fadeInBeat?: number; fadeOutBeat?: number }[]; others?: { sourcePath: string; bpm: number }[] };
 export type EditExportResult = { path: string; seconds: number; sampleRate: number; bits: number; channels: number };
 
 // `lastSetId`: the set that was open when the app last closed, reopened at launch.

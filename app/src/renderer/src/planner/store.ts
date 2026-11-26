@@ -23,7 +23,8 @@ export type ExportUi = { phase: "options" } | { phase: "running"; stage: string;
 export type CueSpot = { path: string; sec: number; hits: Cue[]; edit: boolean };
 
 // The right-click menu: for a clip, for a place on a track, or on the timeline both.
-export type MenuUi = { x: number; y: number; clipId?: string; cue?: CueSpot } | null;
+// `sectionId`: a section of the track editor was right-clicked.
+export type MenuUi = { x: number; y: number; clipId?: string; cue?: CueSpot; sectionId?: string } | null;
 
 // A change to a track's cues in Rekordbox, as a step of undo history: the rows that were
 // added and the rows that were taken out. It sits in the history between the document's
@@ -53,6 +54,7 @@ export type TrackEditUi = EditSnap & {
 	// Made by "Edit automatically" or Cmd+E: exporting swaps the file in for these clips (see
 	// swapInEdit in @shared/cdj).
 	auto?: { links: AutoLink[] };
+	name?: string; // a name the user gave the edit; left out, it is named after its tracks (see editName)
 };
 
 // An automatic edit waiting for the user to agree that it replaces the one in the editor.
@@ -86,6 +88,7 @@ export type State = {
 	trackEdit: TrackEditUi | null;
 	editFocus: boolean; // the track editor was clicked last, so the keys act on it
 	editReplace: EditReplace | null;
+	lastEdit: string | null; // the file the editor last exported to: shown while the editor is empty, until a new edit starts
 	sets: SetInfo[] | null; // what the list of sets shows; null until first read
 	setId: string | null; // the set that is open
 	setName: string | null; // null until the set is first stored, which names it
@@ -147,6 +150,7 @@ let state: State = {
 	trackEdit: null,
 	editFocus: false,
 	editReplace: null,
+	lastEdit: null,
 	sets: null,
 	setId: null,
 	setName: null,
@@ -262,7 +266,7 @@ export const store = {
 	// Replace everything (a new set, or one being opened). Clears history.
 	load(loaded: PlannerDoc, setId: string | null, setName: string | null): void {
 		dragBase = null;
-		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, cueTool: null, trackEdit: null, editFocus: false, editReplace: null, starred: [] });
+		store.set({ doc: normalizeDoc(loaded), past: [], future: [], rev: state.rev + 1, selection: [], setId, setName, setGen: state.setGen + 1, askName: false, playheadBeat: 0, cueBeat: 0, scrollX: 0, importQueue: [], lastPlacedEnd: 0, menu: null, cueWait: null, cueTool: null, trackEdit: null, editFocus: false, editReplace: null, lastEdit: null, starred: [] });
 	},
 };
 

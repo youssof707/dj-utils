@@ -1,15 +1,17 @@
 // Preview for the track editor: plays the lane, overlaps and all, at the editor's tempo (the
 // first track's own, unless changed), so an arrangement can be heard before it is exported. The export itself never uses this audio; it reads the source file.
 
-import { trackBeats } from "@shared/planner";
-import { place, srcOf, totalBeats } from "@shared/trackEdit";
+import { LOW_CUT_EDGE_SEC, LOW_CUT_END_HZ, LOW_CUT_HZ, LOW_CUT_QS, trackBeats } from "@shared/planner";
+import { fadeGain } from "@shared/fades";
+import { editRuns, totalBeats } from "@shared/trackEdit";
 import { engine } from "./engine";
 import { mediaFor } from "./media";
 import { store } from "./store";
 
 const JOIN_SEC = 0.005; // the same blend into a join as the export makes
+const FADE_IN_STEPS = 24; // straight pieces the fade-in curve is drawn with, as the set's playback does
 
-type Voice = { src: AudioBufferSourceNode; gain: GainNode };
+type Voice = { src: AudioBufferSourceNode; filters: BiquadFilterNode[]; gain: GainNode; fade: GainNode | null };
 
 let voices: Voice[] = [];
 let out: GainNode | null = null;
@@ -29,7 +31,9 @@ function silence(): void {
 			// not started yet
 		}
 		v.src.disconnect();
+		for (const f of v.filters) f.disconnect();
 		v.gain.disconnect();
+		v.fade?.disconnect();
 	}
 	voices = [];
 }
@@ -59,15 +63,8 @@ export async function playEditPreview(): Promise<void> {
 	const e = s.trackEdit;
 	if (!e) return;
 	engine.stopPreviews(stopEditPreview);
-	// What plays: each section, with sections that follow each other in their track as well as
-	// on the lane played as one stretch.
-	const runs: { outBeat: number; srcBeat: number; length: number; src: number }[] = [];
-	for (const p of place(e.sections)) {
-		const src = srcOf(p.section);
-		const prev = runs.find((r) => r.src === src && Math.abs(r.srcBeat + r.length - p.section.startBeat) < 1e-6 && Math.abs(r.outBeat + r.length - p.outBeat) < 1e-6);
-		if (prev) prev.length += p.lengthBeat;
-		else runs.push({ outBeat: p.outBeat, srcBeat: p.section.startBeat, length: p.lengthBeat, src });
-	}
+	// What plays: the same stretches as the export makes (see editRuns).
+	const runs = editRuns(e.sections).map((r) => ({ outBeat: r.atBeat, srcBeat: r.startBeat, length: r.lengthBeat, src: r.src, lowCut: r.lowCut, fadeIn: r.fadeInBeat, fadeOut: r.fadeOutBeat }));
 	const total = totalBeats(e.sections);
 	// Each track's audio at the editor's tempo.
 	const paths: (string | null)[] = e.tracks.map(() => null);
@@ -109,7 +106,7 @@ export async function playEditPreview(): Promise<void> {
 		const offset = (r.srcBeat + (startBeat - r.outBeat)) * secPerBeat;
 		// A join: this run fades in over the moment before it, from the audio that led up to
 		// it in the track, while the run before fades out.
-		const pre = startBeat === r.outBeat ? Math.min(JOIN_SEC, offset, when - ctx.currentTime - 0.01) : 0;
+		const pre = startBeat === r.outBeat && r.fadeIn <= 0 ? Math.min(JOIN_SEC, offset, when - ctx.currentTime - 0.01) : 0;
 		const src = new AudioBufferSourceNode(ctx, { buffer: bufs[r.src]! });
 		const gain = new GainNode(ctx, { gain: 1 });
 		if (pre > 0) {
@@ -121,10 +118,40 @@ export async function playEditPreview(): Promise<void> {
 			gain.gain.setValueAtTime(1, Math.max(when, endAt - JOIN_SEC));
 			gain.gain.linearRampToValueAtTime(0, endAt);
 		}
-		src.connect(gain).connect(out!);
+		// Without its bass: the same low cut as the set's "Mute bass", with the cut-off sliding
+		// down over the last moment so the bass is back by the join. Web Audio takes Q in dB.
+		const filters = r.lowCut ? LOW_CUT_QS.map((q) => new BiquadFilterNode(ctx, { type: "highpass", frequency: LOW_CUT_HZ, Q: 20 * Math.log10(q) })) : [];
+		let tail: AudioNode = src;
+		for (const flt of filters) {
+			flt.frequency.setValueAtTime(LOW_CUT_HZ, Math.max(when, endAt - LOW_CUT_EDGE_SEC));
+			flt.frequency.exponentialRampToValueAtTime(LOW_CUT_END_HZ, endAt);
+			tail.connect(flt);
+			tail = flt;
+		}
+		// Its volume fades, from wherever the preview starts in them: the fade-in along its
+		// curve, the fade-out straight down.
+		let fade: GainNode | null = null;
+		if (r.fadeIn > 0 || r.fadeOut > 0) {
+			fade = new GainNode(ctx, { gain: 1 });
+			const g = fade.gain;
+			const gainAt = (beat: number): number => fadeGain(beat - r.outBeat, r.length, r.fadeIn, r.fadeOut);
+			g.setValueAtTime(gainAt(startBeat), when);
+			const inEnd = r.outBeat + r.fadeIn;
+			if (startBeat < inEnd) for (let k = 1; k <= FADE_IN_STEPS; k++) {
+				const b = startBeat + ((inEnd - startBeat) * k) / FADE_IN_STEPS;
+				g.linearRampToValueAtTime(gainAt(b), clock(b));
+			}
+			const outStart = Math.max(startBeat, endBeat - r.fadeOut);
+			if (r.fadeOut > 0) {
+				g.setValueAtTime(gainAt(outStart), clock(outStart));
+				g.linearRampToValueAtTime(0, endAt);
+			}
+		}
+		tail.connect(gain);
+		(fade ? gain.connect(fade) : gain).connect(out!);
 		src.start(when - Math.max(0, pre), Math.max(0, offset - Math.max(0, pre)));
 		src.stop(endAt);
-		voices.push({ src, gain });
+		voices.push({ src, filters, gain, fade });
 	});
 	const endAt = clock(total);
 	timer = setInterval(() => {

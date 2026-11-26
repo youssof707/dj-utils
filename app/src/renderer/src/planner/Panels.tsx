@@ -8,7 +8,7 @@ import { addCue, deleteCue, waitForHotCue } from "./cues";
 import { engine } from "./engine";
 import { mediaFor, retryMedia, tempoProgress, workingCount } from "./media";
 import { store, useStore } from "./store";
-import { cancelEditReplace, confirmEditReplace, openAutoEdit, openTrackEdit } from "./trackEdit";
+import { cancelEditReplace, confirmEditReplace, editAlignToGrid, editCanAlign, openAutoEdit, openTrackEdit } from "./trackEdit";
 import { tracksToEdit } from "@shared/cdj";
 
 function fmtClock(sec: number): string {
@@ -571,6 +571,7 @@ export function ClipMenu() {
 	const cues = useStore((s) => s.cues);
 	const cueEdit = useStore((s) => s.cueEdit);
 	const playlistMode = useStore((s) => s.playlistMode);
+	const editSelection = useStore((s) => s.trackEdit?.selection);
 	useEffect(() => {
 		if (!menu) return;
 		const close = (): void => store.set({ menu: null });
@@ -584,7 +585,9 @@ export function ClipMenu() {
 	if (!menu) return null;
 	const clip = doc.clips.find((c) => c.id === menu.clipId);
 	const spot = menu.cue;
-	if (!clip && !spot) return null;
+	// A section of the track editor: the menu acts on the selection, which it is in.
+	const sectionIds = menu.sectionId ? (editSelection?.includes(menu.sectionId) ? editSelection : [menu.sectionId]) : null;
+	if (!clip && !spot && !sectionIds) return null;
 	const track = clip && doc.tracks.find((t) => t.id === clip.trackId);
 	// Playlist mode: a track a CDJ could not play straight through can be edited automatically.
 	const toEdit = !!track && playlistMode && tracksToEdit(doc).has(track.id);
@@ -635,19 +638,25 @@ export function ClipMenu() {
 		const taken = (cues[spot.path] ?? []).some((c) => c.kind === 0 && sameMoment(c.sec, spot.sec));
 		return (
 			<>
-				{clip && <hr />}
+				{(clip || sectionIds) && <hr />}
 				{spot.hits.map((c) => item(`Delete ${cueName(c)}`, () => deleteCue(spot, c.id), { disabled: !canEdit, testId: `menu-cue-delete-${c.kind}`, key: c.id }))}
 				{item("Add memory cue", () => addCue(spot, 0), { disabled: !canEdit || taken, testId: "menu-cue-memory" })}
 				{item("Add hot cue…", () => waitForHotCue(spot), { disabled: !canEdit, hint: "A–H", testId: "menu-cue-hot" })}
 			</>
 		);
 	};
-	const count = (clip ? 9 + (toEdit ? 1 : 0) : 0) + (spot ? 2 + spot.hits.length : 0);
+	const sectionItems = (): ReactNode => {
+		if (!sectionIds) return null;
+		const ids = sectionIds;
+		return item("Align to grid", () => editAlignToGrid(ids), { disabled: !editCanAlign(ids), testId: "menu-edit-align" });
+	};
+	const count = (clip ? 9 + (toEdit ? 1 : 0) : 0) + (sectionIds ? 1 : 0) + (spot ? 2 + spot.hits.length : 0);
 	const x = Math.min(menu.x, window.innerWidth - 230);
 	const y = Math.max(0, Math.min(menu.y, window.innerHeight - 20 - count * 31));
 	return (
 		<div className="menu" style={{ left: x, top: y }} data-testid="clip-menu">
 			{clipItems()}
+			{sectionItems()}
 			{cueItems()}
 		</div>
 	);

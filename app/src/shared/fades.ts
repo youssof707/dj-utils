@@ -2,7 +2,8 @@
 // to silence over its end. The fade-in rises along a curve (volume = t²) so the loudness
 // builds evenly instead of jumping up in the first part of the fade; the fade-out is straight.
 
-import type { Clip } from "./planner";
+// Anything with fades: a clip of the set, or a section of the track editor.
+export type Faded = { lengthBeat: number; fadeInBeat?: number; fadeOutBeat?: number };
 
 // How loud a clip is at `pos`, 0..1. `pos`, `length` and the two fade lengths share one unit
 // (beats, seconds or frames).
@@ -13,9 +14,9 @@ export function fadeGain(pos: number, length: number, fadeIn: number, fadeOut: n
 	return Math.max(0, Math.min(1, g));
 }
 
-// The clip with its fades made to fit inside it: when the two no longer fit (after a trim,
-// say) both shrink by the same factor. A clip without a fade has no fade field at all.
-export function fitFades(c: Clip): Clip {
+// The clip (or section) with its fades made to fit inside it: when the two no longer fit
+// (after a trim, say) both shrink by the same factor. One without a fade has no fade field at all.
+export function fitFades<T extends Faded>(c: T): T {
 	let a = Math.max(0, c.fadeInBeat ?? 0);
 	let b = Math.max(0, c.fadeOutBeat ?? 0);
 	if (a + b > c.lengthBeat) {
@@ -23,7 +24,7 @@ export function fitFades(c: Clip): Clip {
 		a *= k;
 		b *= k;
 	}
-	const out: Clip = { ...c };
+	const out: T = { ...c };
 	delete out.fadeInBeat;
 	delete out.fadeOutBeat;
 	if (a > 1e-6) out.fadeInBeat = a;

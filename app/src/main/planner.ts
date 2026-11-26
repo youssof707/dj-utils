@@ -699,7 +699,9 @@ function editPath(dir: string, name: string): string {
 	const base =
 		name
 			.replace(/[/\\:\0]/g, "-")
-			.replace(/ \(edit( \d+)?\)$/, "")
+			.replace(/\s*\(edit( \d+)?\)\s*$/i, "")
+			.trim()
+			.slice(0, 180)
 			.trim() || "Track";
 	for (let n = 1; ; n++) {
 		const file = path.join(dir, `${base} (edit${n === 1 ? "" : ` ${n}`}).wav`);
